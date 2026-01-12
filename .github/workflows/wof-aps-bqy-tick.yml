@@ -1,0 +1,64 @@
+name: wof-aps-bqy-tick
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "tick | maintenance"
+        required: true
+        default: "tick"
+
+concurrency:
+  group: eou-redisq-bq
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      BQ_DATASET: eou
+
+      APS_LEDGER_URL: ${{ secrets.APS_LEDGER_URL }}
+      APS_LEDGER_SECRET: ${{ secrets.APS_LEDGER_SECRET }}
+
+      # RedisQ / ESI etiquette
+      EVE_USER_AGENT: ${{ secrets.EVE_USER_AGENT }}
+      REDISQ_QUEUE_ID: eou_orch_main
+      MODE: ${{ inputs.mode }}
+
+      MAX_SECONDS: "50"
+      MAX_REDISQ_POLLS: "4"
+      MAX_ENRICH_PER_RUN: "10"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auth to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud + bq
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Run pipeline
+        run: python scripts/pipeline.py
