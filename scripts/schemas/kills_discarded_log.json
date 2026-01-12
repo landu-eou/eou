@@ -1,0 +1,7 @@
+[
+  {"name":"run_id","type":"STRING","mode":"REQUIRED"},
+  {"name":"discard_ts","type":"TIMESTAMP","mode":"REQUIRED"},
+  {"name":"killmail_id","type":"INT64","mode":"REQUIRED"},
+  {"name":"reason","type":"STRING","mode":"REQUIRED"},
+  {"name":"details","type":"STRING","mode":"NULLABLE"}
+]
