@@ -1,0 +1,8 @@
+[
+  {"name":"run_id","type":"STRING","mode":"REQUIRED"},
+  {"name":"attempt_ts","type":"TIMESTAMP","mode":"REQUIRED"},
+  {"name":"killmail_id","type":"INT64","mode":"REQUIRED"},
+  {"name":"stage","type":"STRING","mode":"REQUIRED"},
+  {"name":"ok","type":"BOOL","mode":"REQUIRED"},
+  {"name":"error","type":"STRING","mode":"NULLABLE"}
+]
