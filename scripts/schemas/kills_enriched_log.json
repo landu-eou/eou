@@ -1,0 +1,19 @@
+[
+  {"name":"run_id","type":"STRING","mode":"REQUIRED"},
+  {"name":"enriched_ts","type":"TIMESTAMP","mode":"REQUIRED"},
+  {"name":"killmail_id","type":"INT64","mode":"REQUIRED"},
+  {"name":"killmail_id_hash","type":"STRING","mode":"REQUIRED"},
+  {"name":"killmail_hash","type":"STRING","mode":"NULLABLE"},
+  {"name":"killmail_time","type":"TIMESTAMP","mode":"REQUIRED"},
+  {"name":"solar_system_name","type":"STRING","mode":"NULLABLE"},
+  {"name":"stargate_route","type":"STRING","mode":"NULLABLE"},
+  {"name":"victim_ship_class","type":"STRING","mode":"REQUIRED"},
+  {"name":"is_freighter","type":"BOOL","mode":"REQUIRED"},
+  {"name":"is_capsule","type":"BOOL","mode":"REQUIRED"},
+  {"name":"attacker_count","type":"INT64","mode":"REQUIRED"},
+  {"name":"attacker_corp_names","type":"STRING","mode":"REPEATED"},
+  {"name":"is_ganked","type":"BOOL","mode":"REQUIRED"},
+  {"name":"has_smartbomb","type":"BOOL","mode":"REQUIRED"},
+  {"name":"is_war_related","type":"BOOL","mode":"REQUIRED"},
+  {"name":"raw_esi_json","type":"STRING","mode":"NULLABLE"}
+]
