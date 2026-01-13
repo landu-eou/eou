@@ -1,0 +1,10 @@
+[
+  {"name":"request_ts","type":"TIMESTAMP","mode":"REQUIRED"},
+  {"name":"killmail_id","type":"INTEGER","mode":"REQUIRED"},
+  {"name":"killmail_hash","type":"STRING","mode":"REQUIRED"},
+  {"name":"killmail_id_sha256","type":"STRING","mode":"REQUIRED"},
+  {"name":"location_id","type":"INTEGER","mode":"NULLABLE"},
+  {"name":"labels","type":"STRING","mode":"REPEATED"},
+  {"name":"zkb_npc","type":"BOOLEAN","mode":"NULLABLE"},
+  {"name":"zkb_awox","type":"BOOLEAN","mode":"NULLABLE"}
+]
