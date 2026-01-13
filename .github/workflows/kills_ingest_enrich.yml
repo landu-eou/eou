@@ -1,0 +1,260 @@
+name: kills_ingest_enrich
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "run | maintain"
+        required: true
+        default: "run"
+      max_packages:
+        description: "Max paquetes RedisQ a consumir"
+        required: true
+        default: "120"
+      max_enrich:
+        description: "Max kills a enriquecer por run"
+        required: true
+        default: "80"
+
+  repository_dispatch:
+    types: [kills_ingest_enrich]
+
+concurrency:
+  group: kills-ingest-enrich-singleton
+  cancel-in-progress: false
+
+jobs:
+  saga:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      BQ_DATASET: ${{ secrets.BQ_DATASET || 'eou' }}
+      DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+      BQ_SOFT_CAP_GB: ${{ secrets.BQ_SOFT_CAP_GB || '9' }}
+      REDISQ_QUEUE_ID: ${{ github.repository }}-kills
+
+      # Recomendado por CCP: user-agent identificable + contacto
+      # (cámbialo por un email real tuyo)
+      ESI_USER_AGENT: "eou-ht kills_ingest_enrich (contact: you@example.com)"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auth to Google (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          access_token_scopes: |
+            https://www.googleapis.com/auth/cloud-platform
+            https://www.googleapis.com/auth/drive.file
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install -r scripts/zkb/requirements.txt
+
+      - name: Bootstrap BigQuery (create tables + soft-cap guard)
+        run: |
+          bash scripts/zkb/bootstrap_bq.sh
+
+      - name: (1) Listen RedisQ -> NDJSON
+        if: ${{ github.event.inputs.mode != 'maintain' && env.ZKB_STOP != '1' }}
+        run: |
+          mkdir -p out
+          python scripts/zkb/rq_listener.py \
+            --queue-id "${REDISQ_QUEUE_ID}" \
+            --max-packages "${{ github.event.inputs.max_packages || '120' }}" \
+            --out-dir out
+
+      - name: (1) Upload raw to Drive (append-style)
+        if: ${{ github.event.inputs.mode != 'maintain' && env.ZKB_STOP != '1' }}
+        run: |
+          ACCESS_TOKEN="$(gcloud auth print-access-token)"
+          RAW_FILE="$(cat out/raw_file.txt)"
+          NAME="$(basename "$RAW_FILE")"
+
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -F "metadata={\"name\":\"${NAME}\",\"parents\":[\"${DRIVE_FOLDER_ID}\"]};type=application/json;charset=UTF-8" \
+            -F "file=@${RAW_FILE};type=application/x-ndjson" \
+            "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true" \
+            > /dev/null
+
+      - name: (2) Load raw into BigQuery (append)
+        if: ${{ github.event.inputs.mode != 'maintain' && env.ZKB_STOP != '1' }}
+        run: |
+          RAW_FILE="$(cat out/raw_file.txt)"
+          bq --project_id="${GCP_PROJECT_ID}" load \
+            --source_format=NEWLINE_DELIMITED_JSON \
+            "${BQ_DATASET}.zkb_redisq_raw" \
+            "${RAW_FILE}" \
+            schemas/zkb/rq_raw.json
+
+      - name: (2) Build first-seen index (append via destination table, no DML)
+        if: ${{ github.event.inputs.mode != 'maintain' && env.ZKB_STOP != '1' }}
+        run: |
+          # En Sandbox no hay DML (INSERT/UPDATE/DELETE). En su lugar:
+          # Query job + destination table + append_table.
+          bq --project_id="${GCP_PROJECT_ID}" query --use_legacy_sql=false --format=none \
+            --destination_table "${GCP_PROJECT_ID}:${BQ_DATASET}.zkb_kills_first_seen" \
+            --append_table "
+            WITH day_first AS (
+              SELECT
+                killmail_id,
+                killmail_hash,
+                killmail_id_sha256,
+                location_id,
+                labels,
+                zkb_npc,
+                zkb_awox,
+                request_ts AS first_request_ts,
+                DATE(request_ts) AS request_date
+              FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.zkb_redisq_raw\`
+              WHERE DATE(request_ts) = CURRENT_DATE()
+              QUALIFY ROW_NUMBER() OVER(PARTITION BY killmail_id ORDER BY request_ts ASC) = 1
+            )
+            SELECT d.*
+            FROM day_first d
+            LEFT JOIN \`${GCP_PROJECT_ID}.${BQ_DATASET}.zkb_kills_first_seen\` fs
+              USING (killmail_id)
+            WHERE fs.killmail_id IS NULL;
+            "
+
+      - name: (3) Enrich via ESI (writes logs to NDJSON)
+        if: ${{ github.event.inputs.mode != 'maintain' && env.ZKB_STOP != '1' }}
+        run: |
+          python scripts/zkb/esi_enricher.py \
+            --project "${GCP_PROJECT_ID}" \
+            --dataset "${BQ_DATASET}" \
+            --max-enrich "${{ github.event.inputs.max_enrich || '80' }}" \
+            --user-agent "${ESI_USER_AGENT}" \
+            --out-dir out
+
+      - name: (3) Load attempts + facts into BigQuery (append)
+        if: ${{ github.event.inputs.mode != 'maintain' && env.ZKB_STOP != '1' }}
+        run: |
+          if [ -s out/ea.ndjson ]; then
+            bq --project_id="${GCP_PROJECT_ID}" load \
+              --source_format=NEWLINE_DELIMITED_JSON \
+              "${BQ_DATASET}.zkb_enrichment_attempts" out/ea.ndjson schemas/zkb/ea.json
+          fi
+
+          if [ -s out/ekf.ndjson ]; then
+            bq --project_id="${GCP_PROJECT_ID}" load \
+              --source_format=NEWLINE_DELIMITED_JSON \
+              "${BQ_DATASET}.zkb_esi_killmail_facts" out/ekf.ndjson schemas/zkb/ekf.json
+          fi
+
+      - name: (3) Refresh touched partitions in zkb_kills_enriched
+        if: ${{ github.event.inputs.mode != 'maintain' && env.ZKB_STOP != '1' }}
+        run: |
+          if [ ! -s out/partitions.txt ]; then
+            echo "No partitions to refresh."
+            exit 0
+          fi
+
+          while read -r D; do
+            [ -z "$D" ] && continue
+            P="${D//-/}"
+
+            bq --project_id="${GCP_PROJECT_ID}" query --use_legacy_sql=false --format=none \
+              --destination_table "${BQ_DATASET}.zkb_kills_enriched\$${P}" --replace "
+              WITH
+              base AS (
+                SELECT
+                  fs.killmail_id,
+                  fs.killmail_hash,
+                  fs.killmail_id_sha256,
+                  fs.location_id,
+                  fs.labels,
+                  fs.zkb_npc,
+                  fs.zkb_awox,
+                  fs.first_request_ts AS request_ts,
+                  fs.request_date
+                FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.zkb_kills_first_seen\` fs
+                WHERE fs.request_date = DATE('${D}')
+              ),
+              att AS (
+                SELECT
+                  killmail_id,
+                  SUM(IF(result='FAIL', 1, 0)) AS fail_count,
+                  MAX(IF(result='SUCCESS', 1, 0)) AS has_success,
+                  MAX(IF(result='DISCARD', 1, 0)) AS has_discard
+                FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.zkb_enrichment_attempts\`
+                GROUP BY killmail_id
+              ),
+              ekf AS (
+                SELECT AS VALUE x
+                FROM (
+                  SELECT
+                    kf.*,
+                    ROW_NUMBER() OVER(PARTITION BY killmail_id ORDER BY fetch_ts DESC) AS rn
+                  FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.zkb_esi_killmail_facts\` kf
+                ) x
+                WHERE x.rn = 1
+              )
+              SELECT
+                base.request_date,
+                base.request_ts,
+
+                IF(
+                  COALESCE(att.has_success,0)=1 OR COALESCE(att.has_discard,0)=1
+                  OR COALESCE(base.zkb_npc,false)=true
+                  OR COALESCE(base.zkb_awox,false)=true
+                  OR NOT EXISTS (SELECT 1 FROM UNNEST(base.labels) l WHERE l='pvp'),
+                  NULL,
+                  COALESCE(att.fail_count,0)
+                ) AS enrich_attempts,
+
+                base.killmail_id,
+                base.killmail_id_sha256,
+                base.killmail_hash,
+                base.location_id,
+
+                -- ESI-derived (NULL hasta enriquecido)
+                ekf.killmail_time,
+                ekf.solar_system_name,
+                ekf.stargate_route,
+                ekf.victim_ship_bucket,
+                ekf.is_freighter,
+                ekf.is_capsule,
+                ekf.attackers_count,
+                ekf.attacker_corp_names,
+
+                EXISTS (SELECT 1 FROM UNNEST(base.labels) l WHERE l='ganked') AS is_ganked,
+                ekf.smartbomb_damage,
+                ekf.war_related,
+
+                CASE
+                  WHEN COALESCE(base.zkb_npc,false)=true
+                    OR COALESCE(base.zkb_awox,false)=true
+                    OR NOT EXISTS (SELECT 1 FROM UNNEST(base.labels) l WHERE l='pvp')
+                    OR COALESCE(att.has_discard,0)=1 THEN 'DISCARDED'
+                  WHEN COALESCE(att.has_success,0)=1 THEN 'ENRICHED'
+                  WHEN COALESCE(att.fail_count,0) > 10 THEN 'DROPPED'
+                  ELSE 'PENDING'
+                END AS enrich_state
+              FROM base
+              LEFT JOIN att USING (killmail_id)
+              LEFT JOIN ekf USING (killmail_id);
+              "
+          done < out/partitions.txt
+
+      - name: Stats (dataset size bytes)
+        run: |
+          bq --project_id="${GCP_PROJECT_ID}" query --use_legacy_sql=false --format=prettyjson "
+          SELECT table_id, size_bytes
+          FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.__TABLES__\`
+          ORDER BY size_bytes DESC
+          "
