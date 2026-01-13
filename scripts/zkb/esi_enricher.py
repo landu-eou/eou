@@ -15,19 +15,47 @@ def utc_now_iso() -> str:
 
 
 def bq_query_json(project: str, sql: str) -> List[Dict[str, Any]]:
-    cmd = ["bq", f"--project_id={project}", "query", "--use_legacy_sql=false", "--format=json", sql]
-    out = subprocess.check_output(cmd, text=True)
-    return json.loads(out) if out.strip() else []
+    """
+    Ejecuta `bq query --format=json` y devuelve lista de dicts.
+    Robusto contra warnings/progress que a veces aparecen en stdout/stderr.
+    """
+    cmd = [
+        "bq",
+        f"--project_id={project}",
+        "query",
+        "--use_legacy_sql=false",
+        "--format=json",
+        "--quiet",
+        sql,
+    ]
+    p = subprocess.run(cmd, text=True, capture_output=True)
 
+    # bq a veces escribe warnings/progress. Si falla el comando, propaga el error con contexto.
+    if p.returncode != 0:
+        raise RuntimeError(
+            f"bq query failed (code {p.returncode})\nSTDOUT:\n{p.stdout}\nSTDERR:\n{p.stderr}"
+        )
 
-def pick_cat(labels: List[str]) -> Optional[int]:
-    for l in labels:
-        if l.startswith("cat:"):
-            try:
-                return int(l.split(":")[1])
-            except Exception:
-                pass
-    return None
+    out = (p.stdout or "").strip()
+
+    # Si no hay salida o no hay filas, devolvemos vacío.
+    if not out:
+        return []
+
+    # A veces stdout puede llevar texto antes del JSON. Buscamos el primer '[' (JSON array).
+    i = out.find("[")
+    if i == -1:
+        # No parece JSON -> tratamos como vacío (o cambia a raise si prefieres)
+        return []
+
+    out_json = out[i:]
+
+    try:
+        data = json.loads(out_json)
+        return data if isinstance(data, list) else []
+    except json.JSONDecodeError:
+        # Último recurso: vacío para no romper el workflow.
+        return []
 
 
 def esi_get(session: requests.Session, url: str, **kw) -> requests.Response:
@@ -130,8 +158,13 @@ def main():
 
     candidates = bq_query_json(args.project, sql)
     if not candidates:
+        # Nada que enriquecer: salida limpia
         open(os.path.join(args.out_dir, "partitions.txt"), "w", encoding="utf-8").close()
+        # También crea los ndjson vacíos para que los pasos siguientes no fallen
+        open(os.path.join(args.out_dir, "ea.ndjson"), "w", encoding="utf-8").close()
+        open(os.path.join(args.out_dir, "ekf.ndjson"), "w", encoding="utf-8").close()
         return
+
 
     sess = requests.Session()
     sess.headers.update({"User-Agent": args.user_agent, "Accept": "application/json"})
