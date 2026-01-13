@@ -19,6 +19,11 @@ on:
   repository_dispatch:
     types: [kills_ingest_enrich]
 
+# ✅ Opción A: permisos a nivel de workflow (necesario para OIDC/WIF)
+permissions:
+  id-token: write
+  contents: read
+
 concurrency:
   group: kills-ingest-enrich-singleton
   cancel-in-progress: false
@@ -36,7 +41,7 @@ jobs:
       REDISQ_QUEUE_ID: ${{ github.repository }}-kills
 
       # Recomendado por CCP: user-agent identificable + contacto
-      # (cámbialo por un email real tuyo)
+      # Cambia el email por uno real tuyo
       ESI_USER_AGENT: "eou-ht kills_ingest_enrich (contact: you@example.com)"
 
     steps:
@@ -104,8 +109,6 @@ jobs:
       - name: (2) Build first-seen index (append via destination table, no DML)
         if: ${{ github.event.inputs.mode != 'maintain' && env.ZKB_STOP != '1' }}
         run: |
-          # En Sandbox no hay DML (INSERT/UPDATE/DELETE). En su lugar:
-          # Query job + destination table + append_table.
           bq --project_id="${GCP_PROJECT_ID}" query --use_legacy_sql=false --format=none \
             --destination_table "${GCP_PROJECT_ID}:${BQ_DATASET}.zkb_kills_first_seen" \
             --append_table "
@@ -222,7 +225,6 @@ jobs:
                 base.killmail_hash,
                 base.location_id,
 
-                -- ESI-derived (NULL hasta enriquecido)
                 ekf.killmail_time,
                 ekf.solar_system_name,
                 ekf.stargate_route,
