@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import requests
 
-REDISQ_URL = "https://redisq.zkillboard.com/listen.php"
+REDISQ_URL = "https://zkillredisq.stream/listen.php"
 
 
 def sha256_id(killmail_id: int) -> str:
@@ -60,9 +60,9 @@ def main():
                 # long-poll sin evento
                 continue
 
-            km_id = pkg.get("killmail_id")
-            km_hash = pkg.get("hash")
             zkb = pkg.get("zkb", {}) or {}
+            km_id = pkg.get("killID")
+            km_hash = zkb.get("hash")
 
             if km_id is None or km_hash is None:
                 continue
@@ -72,8 +72,8 @@ def main():
                 "killmail_id": int(km_id),
                 "killmail_hash": str(km_hash),
                 "killmail_id_sha256": sha256_id(int(km_id)),
-                "location_id": int(pkg.get("locationID")) if pkg.get("locationID") is not None else None,
-                "labels": list(pkg.get("labels", []) or []),
+                "location_id": int(zkb.get("locationID")) if zkb.get("locationID") is not None else None,
+                "labels": list(zkb.get("labels", []) or []),
                 "zkb_npc": bool(zkb.get("npc")) if "npc" in zkb else None,
                 "zkb_awox": bool(zkb.get("awox")) if "awox" in zkb else None,
             }
