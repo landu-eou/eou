@@ -16,10 +16,14 @@ on:
         required: true
         default: "80"
 
+# ✅ cron inicio
+  schedule:
+    - cron: "* * * * *"
+# ✅ cron fin
+    
   repository_dispatch:
     types: [kills_ingest_enrich]
 
-# ✅ Opción A: permisos a nivel de workflow (necesario para OIDC/WIF)
 permissions:
   id-token: write
   contents: read
