@@ -182,7 +182,7 @@ if [[ -n "$expires_jumps_raw" ]]; then expires_j_epoch="$(date -u -d "$expires_j
 if [[ -n "$expires_kills_raw" ]]; then expires_k_epoch="$(date -u -d "$expires_kills_raw" +%s 2>/dev/null || echo 0)"; fi
 max_exp_epoch=$(( expires_j_epoch > expires_k_epoch ? expires_j_epoch : expires_k_epoch ))
 next_eligible_epoch=$(( max_exp_epoch + 60 ))
-next_eligible_iso="$(date -u -d "@$next_eligible_epoch" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"
+next_eligible_iso="$(date -u -d "@$next_eligible_epoch" +"%Y-%m-%d %H:%M:%S+00:00" 2>/dev/null || echo "")"
 
 changed_jumps=false
 changed_kills=false
