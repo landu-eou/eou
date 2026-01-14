@@ -16,7 +16,7 @@ touch "$STATE_FILE"
 
 workflow_ref="${GITHUB_WORKFLOW_REF:-unknown}"
 workflow_yaml="$(echo "$workflow_ref" | sed -E 's@^.*\.github/workflows/@@; s/@.*$//')"
-now_iso="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+now_iso="$(date -u +"%Y-%m-%d %H:%M:%S+00:00")"
 now_epoch="$(date -u +%s)"
 
 # ---- read state line 1 (ESI) and line 2 (refresh) ----
@@ -167,7 +167,7 @@ lm_kills_raw="$(hdr_get "$tmpdir/kills.hdr" "Last-Modified")"
 to_iso_or_empty() {
   local rfc="$1"
   if [[ -z "$rfc" ]]; then echo ""; return; fi
-  date -u -d "$rfc" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo ""
+  date -u -d "$rfc" +"%Y-%m-%d %H:%M:%S+00:00" 2>/dev/null || echo ""
 }
 
 expires_jumps_iso="$(to_iso_or_empty "$expires_jumps_raw")"
@@ -238,11 +238,15 @@ ensure_tables() {
 
 load_ndjson_append() {
   local table="$1" file="$2"
+  echo "Loading to ${GCP_PROJECT_ID}:${BQ_DATASET}.${table} from $file"
+  echo "NDJSON sample (first 3 lines):"
+  head -n 3 "$file" || true
+  echo "bq load output:"
   bq --location="$BQ_LOCATION" load \
     --noreplace \
     --source_format=NEWLINE_DELIMITED_JSON \
     "${GCP_PROJECT_ID}:${BQ_DATASET}.${table}" \
-    "$file" >/dev/null
+    "$file"
 }
 
 # --- DEFENSIVE CHECKS BEFORE jq PARSING ---
