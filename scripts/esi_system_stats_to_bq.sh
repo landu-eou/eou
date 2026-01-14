@@ -198,7 +198,14 @@ echo "Status: jumps=$code_jumps changed=$changed_jumps | kills=$code_kills chang
 
 # ---- Ensure tables exist (DDL only; no DML, compatible con Sandbox) ----
 detect_bq_location() {
-  bq show --format=prettyjson "${GCP_PROJECT_ID}:${BQ_DATASET}" | jq -r '.location // empty'
+  local out
+  out="$(bq show --format=prettyjson "${GCP_PROJECT_ID}:${BQ_DATASET}" 2>/dev/null || true)"
+
+  if echo "$out" | jq -e . >/dev/null 2>&1; then
+    echo "$out" | jq -r '.location // empty'
+  else
+    echo ""
+  fi
 }
 BQ_LOCATION="$(detect_bq_location || true)"
 [[ -n "$BQ_LOCATION" ]] || BQ_LOCATION="US"
