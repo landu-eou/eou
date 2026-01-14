@@ -22,12 +22,32 @@ now_epoch="$(date -u +%s)"
 # ---- read state line 1 (ESI) and line 2 (refresh) ----
 line1="$(sed -n '1p' "$STATE_FILE" || true)"
 line2="$(sed -n '2p' "$STATE_FILE" || true)"
+
+echo "STATE_FILE=$STATE_FILE"
+echo "STATE line1 (raw): $(printf '%q' "$line1")"
+echo "STATE line2 (raw): $(printf '%q' "$line2")"
+
+echo "STATE line1 first bytes (hex):"
+printf "%s" "$line1" | head -c 16 | xxd -p || true
+
+# Fallback si faltan líneas
 [[ -n "$line1" ]] || line1='{}'
 [[ -n "$line2" ]] || line2='{"type":"BQ_REFRESH_STATE"}'
 
-old_etag_jumps="$(echo "$line1" | jq -r '.etag_jumps // ""')"
-old_etag_kills="$(echo "$line1" | jq -r '.etag_kills // ""')"
-next_eligible="$(echo "$line1" | jq -r '.next_eligible_run_at // ""')"
+# Fallback si el JSON está corrupto (BOM, basura, etc.)
+if ! echo "$line1" | jq -e . >/dev/null 2>&1; then
+  echo "ERROR: state line1 is not valid JSON; falling back to {}"
+  line1='{}'
+fi
+if ! echo "$line2" | jq -e . >/dev/null 2>&1; then
+  echo "ERROR: state line2 is not valid JSON; falling back to default"
+  line2='{"type":"BQ_REFRESH_STATE"}'
+fi
+
+old_etag_jumps="$(echo "$line1" | jq -r '.etag_jumps // ""' 2>/dev/null || echo "")"
+old_etag_kills="$(echo "$line1" | jq -r '.etag_kills // ""' 2>/dev/null || echo "")"
+next_eligible="$(echo "$line1" | jq -r '.next_eligible_run_at // ""' 2>/dev/null || echo "")"
+
 
 if [[ "${FORCE}" != "true" && -n "$next_eligible" && "$next_eligible" != "null" ]]; then
   next_epoch="$(date -u -d "$next_eligible" +%s 2>/dev/null || echo 0)"
