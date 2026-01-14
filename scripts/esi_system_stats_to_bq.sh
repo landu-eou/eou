@@ -200,13 +200,13 @@ echo "Status: jumps=$code_jumps changed=$changed_jumps | kills=$code_kills chang
 detect_bq_location() {
   local out
   out="$(bq show --format=prettyjson "${GCP_PROJECT_ID}:${BQ_DATASET}" 2>/dev/null || true)"
-
   if echo "$out" | jq -e . >/dev/null 2>&1; then
     echo "$out" | jq -r '.location // empty'
   else
     echo ""
   fi
 }
+
 BQ_LOCATION="$(detect_bq_location || true)"
 [[ -n "$BQ_LOCATION" ]] || BQ_LOCATION="US"
 
@@ -238,7 +238,7 @@ ensure_tables() {
 
 load_ndjson_append() {
   local table="$1" file="$2"
-  echo "Loading to ${GCP_PROJECT_ID}:${BQ_DATASET}.${table} from $file"
+  echo "Loading: ${GCP_PROJECT_ID}:${BQ_DATASET}.${table}"
   echo "NDJSON sample (first 3 lines):"
   head -n 3 "$file" || true
   echo "bq load output:"
