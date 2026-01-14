@@ -1,4 +1,4 @@
-name: ESI → BigQuery · system_jumps & system_kills
+name: "ESI → BigQuery · system_jumps & system_kills"
 
 on:
   workflow_dispatch:
@@ -36,7 +36,7 @@ jobs:
 
       # IMPORTANTE: pon un contacto real (email o issue) para cumplir buenas prácticas.
       # ESI recomienda User-Agent con identificación/contacto.
-      USER_AGENT: landu-eou/eou (ESI system stats) contact: landueve78@gmail.com
+      USER_AGENT: "landu-eou/eou (ESI system stats) contact: landueve78@gmail.com"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
