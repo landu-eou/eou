@@ -1,5 +1,10 @@
+echo "SCRIPT VERSION: $(git rev-parse --short HEAD 2>/dev/null || echo no-git)"
+
 #!/usr/bin/env bash
 set -euo pipefail
+
+trap 'echo "ERROR at line $LINENO";' ERR
+
 
 : "${GCP_PROJECT_ID:?Missing GCP_PROJECT_ID}"
 : "${BQ_DATASET:=eou}"
