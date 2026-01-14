@@ -183,6 +183,41 @@ load_ndjson_append() {
     "$file" >/dev/null
 }
 
+# --- DEFENSIVE CHECKS BEFORE jq PARSING ---
+
+# If any endpoint returned 304, do not try to parse body
+if [[ "$code_jumps" == "304" || "$code_kills" == "304" ]]; then
+  echo "At least one endpoint returned 304; skipping body parsing and ingestion."
+  should_ingest=false
+fi
+
+# Validate JSON bodies if we are going to ingest
+if [[ "$should_ingest" == "true" ]]; then
+  if ! jq -e . "$tmpdir/jumps.json" >/dev/null 2>&1; then
+    echo "ERROR: jumps body is not valid JSON"
+    head -c 400 "$tmpdir/jumps.json" | sed 's/[^[:print:]\t]/?/g'
+    exit 1
+  fi
+
+  if ! jq -e . "$tmpdir/kills.json" >/dev/null 2>&1; then
+    echo "ERROR: kills body is not valid JSON"
+    head -c 400 "$tmpdir/kills.json" | sed 's/[^[:print:]\t]/?/g'
+    exit 1
+  fi
+
+  if ! jq -e 'type=="array"' "$tmpdir/jumps.json" >/dev/null; then
+    echo "ERROR: jumps JSON is not an array. Body:"
+    jq -c . "$tmpdir/jumps.json" | head -c 400
+    exit 1
+  fi
+
+  if ! jq -e 'type=="array"' "$tmpdir/kills.json" >/dev/null; then
+    echo "ERROR: kills JSON is not an array. Body:"
+    jq -c . "$tmpdir/kills.json" | head -c 400
+    exit 1
+  fi
+fi
+
 if [[ "$should_ingest" == "true" && "$DRY_RUN" != "true" ]]; then
   ensure_tables
 
