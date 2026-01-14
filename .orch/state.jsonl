@@ -1,0 +1,2 @@
+{"type":"ESI_ETAG_STATE","updated_at":null,"workflow":null,"etag_jumps":null,"etag_kills":null,"last_modified_jumps":null,"last_modified_kills":null,"expires_jumps":null,"expires_kills":null,"next_eligible_run_at":null}
+{"type":"BQ_REFRESH_STATE","updated_at":null,"workflow":null,"last_refresh_at":null,"next_refresh_at":null}
