@@ -39,7 +39,7 @@ fi
 
 tmpdir="$(mktemp -d)"
 cleanup() { rm -rf "$tmpdir"; }
-trap cleanup EXIT
+trap 'rc=$?; if [[ $rc -ne 0 ]]; then echo "Keeping tmpdir for debugging: $tmpdir"; else cleanup; fi; exit $rc' EXIT
 
 hdr_get() {
   local file="$1" key="$2"
@@ -80,6 +80,41 @@ fetch_one "kills" "$url_kills" "$old_etag_kills"
 
 code_jumps="$(cat "$tmpdir/jumps.code")"
 code_kills="$(cat "$tmpdir/kills.code")"
+
+# ---- DEBUG/VALIDATION: ensure responses are valid JSON arrays before jq transforms ----
+echo "---- Debug headers (first 30 lines) ----"
+echo "[jumps headers]"; head -n 30 "$tmpdir/jumps.hdr" || true
+echo "[kills headers]"; head -n 30 "$tmpdir/kills.hdr" || true
+echo "----------------------------------------"
+
+# If 200, validate JSON and type
+if [[ "$code_jumps" == "200" ]]; then
+  if ! jq -e . "$tmpdir/jumps.json" >/dev/null 2>&1; then
+    echo "ERROR: jumps body is not valid JSON. First 300 bytes:"
+    head -c 300 "$tmpdir/jumps.json" | sed 's/[^[:print:]\t]/?/g'
+    exit 1
+  fi
+  if ! jq -e 'type=="array"' "$tmpdir/jumps.json" >/dev/null 2>&1; then
+    echo "ERROR: jumps JSON is not an array. Body (first 400 chars):"
+    jq -c . "$tmpdir/jumps.json" | head -c 400
+    echo
+    exit 1
+  fi
+fi
+
+if [[ "$code_kills" == "200" ]]; then
+  if ! jq -e . "$tmpdir/kills.json" >/dev/null 2>&1; then
+    echo "ERROR: kills body is not valid JSON. First 300 bytes:"
+    head -c 300 "$tmpdir/kills.json" | sed 's/[^[:print:]\t]/?/g'
+    exit 1
+  fi
+  if ! jq -e 'type=="array"' "$tmpdir/kills.json" >/dev/null 2>&1; then
+    echo "ERROR: kills JSON is not an array. Body (first 400 chars):"
+    jq -c . "$tmpdir/kills.json" | head -c 400
+    echo
+    exit 1
+  fi
+fi
 
 if [[ ! "$code_jumps" =~ ^(200|304)$ ]]; then
   echo "ESI jumps returned HTTP $code_jumps — aborting to avoid burning error budget."
