@@ -1,2 +1,2 @@
-{"type":"ESI_ETAG_STATE","updated_at":null,"workflow":null,"etag_jumps":null,"etag_kills":null,"last_modified_jumps":null,"last_modified_kills":null,"expires_jumps":null,"expires_kills":null,"next_eligible_run_at":null}
+{"type":"ESI_ETAG_STATE","updated_at":"2026-01-15 00:32:32+00:00","workflow":"wof-esi-bq-system-stats.yml","etag_jumps":"d5da7fac13d6a4e49f1eaa4ec3ec2cdf713f2fc5b2e8631e78197a54","etag_kills":"19d3b6aff4d31f92471bf8426180ed74a7cc9b845cdf602c1d1acd32","last_modified_jumps":null,"last_modified_kills":null,"expires_jumps":null,"expires_kills":null,"next_eligible_run_at":null}
 {"type":"BQ_REFRESH_STATE","updated_at":null,"workflow":null,"last_refresh_at":null,"next_refresh_at":null}
