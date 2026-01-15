@@ -1,39 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-commit_state_via_worktree() {
-  local state_branch="$1"      # ej: orch-state-system-jumps
-  local state_path="$2"        # ej: .orch/state/system_jumps.json
-  local state_src_file="$3"    # ej: /tmp/tmp.XXX/system_jumps.json
-  local msg="$4"
-
-  git fetch --no-tags origin "+refs/heads/*:refs/remotes/origin/*" >/dev/null 2>&1 || true
-
-  local wt
-  wt="$(mktemp -d)"
-
-  if git show-ref --quiet "refs/remotes/origin/${state_branch}"; then
-    git worktree add -B "${state_branch}" "${wt}" "origin/${state_branch}"
-  else
-    git worktree add -B "${state_branch}" "${wt}" HEAD
-  fi
-
-  mkdir -p "${wt}/$(dirname "${state_path}")"
-  cp -f "${state_src_file}" "${wt}/${state_path}"
-
-  (
-    cd "${wt}"
-    git config user.name  "github-actions[bot]"
-    git config user.email "github-actions[bot]@users.noreply.github.com"
-    git add "${state_path}"
-    git commit -m "${msg}" >/dev/null 2>&1 || true
-    git push -u origin "${state_branch}"
-  )
-
-  git worktree remove -f "${wt}" >/dev/null 2>&1 || true
-  rm -rf "${wt}" >/dev/null 2>&1 || true
-}
-
 trap 'echo "ERROR at line $LINENO" >&2' ERR
 
 : "${GCP_PROJECT_ID:?Missing GCP_PROJECT_ID}"
