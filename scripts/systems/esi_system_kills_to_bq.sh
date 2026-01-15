@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 trap 'echo "ERROR at line $LINENO" >&2' ERR
 
 : "${GCP_PROJECT_ID:?Missing GCP_PROJECT_ID}"
@@ -10,8 +9,9 @@ BQ_DATASET="${BQ_DATASET:-eou}"
 ESI_BASE_URL="${ESI_BASE_URL:-https://esi.evetech.net/latest}"
 ESI_DATASOURCE="${ESI_DATASOURCE:-tranquility}"
 
-ENDPOINT="${ENDPOINT:-system_kills}"
-STATE_FILE="${STATE_FILE:-.orch/state/system_kills.json}"
+ENDPOINT="system_kills"
+
+STATE_PATH="${STATE_PATH:-.orch/state/system_kills.json}"
 STATE_BRANCH="${STATE_BRANCH:-orch-state-system-kills}"
 
 FORCE="${FORCE:-false}"
@@ -20,7 +20,7 @@ DRY_RUN="${DRY_RUN:-false}"
 workflow_ref="${GITHUB_WORKFLOW_REF:-unknown}"
 workflow_yaml="$(echo "$workflow_ref" | sed -E 's@^.*\.github/workflows/@@; s/@.*$//')"
 
-now_rfc3339() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+now_rfc3339z() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
 to_rfc3339z_or_empty() {
   local http_date="$1"
@@ -64,12 +64,56 @@ load_ndjson_append() {
     "$file"
 }
 
-mkdir -p "$(dirname "$STATE_FILE")"
-touch "$STATE_FILE"
+commit_state_via_worktree() {
+  local state_branch="$1"
+  local state_path="$2"
+  local src_file="$3"
+  local msg="$4"
 
-state_raw="$(cat "$STATE_FILE" 2>/dev/null || true)"
+  git fetch --no-tags origin "+refs/heads/*:refs/remotes/origin/*" >/dev/null 2>&1 || true
+
+  local wt
+  wt="$(mktemp -d)"
+
+  if git show-ref --quiet "refs/remotes/origin/${state_branch}"; then
+    git worktree add -B "${state_branch}" "${wt}" "origin/${state_branch}" >/dev/null
+  else
+    git worktree add -B "${state_branch}" "${wt}" HEAD >/dev/null
+  fi
+
+  mkdir -p "${wt}/$(dirname "${state_path}")"
+  cp -f "${src_file}" "${wt}/${state_path}"
+
+  (
+    cd "${wt}"
+    git config user.name  "github-actions[bot]"
+    git config user.email "github-actions[bot]@users.noreply.github.com"
+    git add "${state_path}"
+    git commit -m "${msg}" >/dev/null 2>&1 || true
+    git push -u origin "${state_branch}" >/dev/null
+  )
+
+  git worktree remove -f "${wt}" >/dev/null 2>&1 || true
+  rm -rf "${wt}" >/dev/null 2>&1 || true
+}
+
+# ------------------- Leer state actual DESDE la rama dedicada -------------------
+state_raw=""
+if git show "origin/${STATE_BRANCH}:${STATE_PATH}" >/dev/null 2>&1; then
+  state_raw="$(git show "origin/${STATE_BRANCH}:${STATE_PATH}" 2>/dev/null || true)"
+fi
+
 if ! echo "$state_raw" | jq -e . >/dev/null 2>&1; then
-  state_raw='{"type":"ESI_ENDPOINT_STATE","endpoint":"system_kills","updated_at":null,"workflow":"wof-esi-bq-system-kills.yml","etag":null,"last_modified":null,"expires":null,"next_eligible_run_at":null}'
+  state_raw="$(jq -cn --arg wf "$workflow_yaml" '{
+    type:"ESI_ENDPOINT_STATE",
+    endpoint:"system_kills",
+    updated_at:null,
+    workflow:$wf,
+    etag:null,
+    last_modified:null,
+    expires:null,
+    next_eligible_run_at:null
+  }')"
 fi
 
 old_etag="$(echo "$state_raw" | jq -r '.etag // ""')"
@@ -79,11 +123,12 @@ if [[ "$FORCE" != "true" && -n "$next_eligible" && "$next_eligible" != "null" ]]
   now_epoch="$(date -u +%s)"
   next_epoch="$(date -u -d "$next_eligible" +%s 2>/dev/null || echo 0)"
   if (( now_epoch < next_epoch )); then
-    echo "Too early. next_eligible_run_at=$next_eligible (now=$(now_rfc3339)). Exit."
+    echo "Too early. next_eligible_run_at=$next_eligible (now=$(now_rfc3339z)). Exit."
     exit 0
   fi
 fi
 
+# ------------------- Fetch ESI -------------------
 tmpdir="$(mktemp -d)"
 cleanup() { rm -rf "$tmpdir"; }
 trap 'rc=$?; if [[ $rc -ne 0 ]]; then echo "Keeping tmpdir for debugging: $tmpdir" >&2; else cleanup; fi; exit $rc' EXIT
@@ -114,7 +159,7 @@ lm_raw="$(hdr_get "$hdr" "Last-Modified")"
 
 expires_iso="$(to_rfc3339z_or_empty "$expires_raw")"
 lm_iso="$(to_rfc3339z_or_empty "$lm_raw")"
-updated_at="$(now_rfc3339)"
+updated_at="$(now_rfc3339z)"
 
 exp_epoch=0
 [[ -n "$expires_raw" ]] && exp_epoch="$(date -u -d "$expires_raw" +%s 2>/dev/null || echo 0)"
@@ -122,10 +167,15 @@ next_epoch=$(( exp_epoch + 60 ))
 next_iso="$(date -u -d "@$next_epoch" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"
 
 changed=false
-if [[ "$code" == "200" && -n "$etag_new" && "$etag_new" != "$old_etag" ]]; then
-  changed=true
+if [[ "$code" == "200" ]]; then
+  if [[ -n "$etag_new" && "$etag_new" != "$old_etag" ]]; then
+    changed=true
+  elif [[ -z "$old_etag" && -n "$etag_new" ]]; then
+    changed=true
+  fi
 fi
 
+# ------------------- BigQuery -------------------
 BQ_LOCATION="$(detect_bq_location || true)"
 [[ -n "$BQ_LOCATION" ]] || { echo "ERROR: Could not detect dataset location" >&2; exit 1; }
 
@@ -153,6 +203,7 @@ else
   echo "No ingestion performed (unchanged or DRY_RUN=true)."
 fi
 
+# ------------------- Construir state nuevo -------------------
 new_etag="$old_etag"
 new_lm="$(echo "$state_raw" | jq -r '.last_modified // ""')"
 [[ "$new_lm" == "null" ]] && new_lm=""
@@ -183,33 +234,18 @@ state_new="$(jq -cn \
   }'
 )"
 
-printf "%s\n" "$state_new" > "$STATE_FILE"
+state_file_tmp="$tmpdir/state.json"
+printf "%s\n" "$state_new" > "$state_file_tmp"
 
 if [[ "$DRY_RUN" == "true" ]]; then
   echo "DRY_RUN=true → no commit."
   exit 0
 fi
 
-git config user.name "github-actions[bot]"
-git config user.email "github-actions[bot]@users.noreply.github.com"
+commit_state_via_worktree \
+  "$STATE_BRANCH" \
+  "$STATE_PATH" \
+  "$state_file_tmp" \
+  "orch: update state ${ENDPOINT} (${updated_at})"
 
-git fetch origin "$STATE_BRANCH" 2>/dev/null || true
-
-if git show-ref --verify --quiet "refs/heads/$STATE_BRANCH"; then
-  git checkout "$STATE_BRANCH"
-elif git show-ref --verify --quiet "refs/remotes/origin/$STATE_BRANCH"; then
-  git checkout -b "$STATE_BRANCH" "origin/$STATE_BRANCH"
-else
-  git checkout -b "$STATE_BRANCH"
-fi
-
-git add "$STATE_FILE"
-
-if git diff --cached --quiet; then
-  echo "No state changes to commit."
-  exit 0
-fi
-
-git commit -m "orch: update state ${ENDPOINT} (${updated_at})"
-git push -u origin "HEAD:$STATE_BRANCH"
 echo "State committed to branch: $STATE_BRANCH"
