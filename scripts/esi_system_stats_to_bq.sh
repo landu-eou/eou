@@ -2,7 +2,6 @@ echo "SCRIPT VERSION: $(git rev-parse --short HEAD 2>/dev/null || echo no-git)"
 
 #!/usr/bin/env bash
 set -euo pipefail
-
 trap 'echo "ERROR at line $LINENO";' ERR
 
 
