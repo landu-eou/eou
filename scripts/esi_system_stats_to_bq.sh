@@ -1,4 +1,4 @@
-echo "SCRIPT VERSION: $(git rev-parse --short HEAD 2 || echo no-git)"
+echo "SCRIPT VERSION: $(git rev-parse --short HEAD 2>/dev/null || echo no-git)"
 
 #!/usr/bin/env bash
 set -euo pipefail
@@ -48,9 +48,9 @@ if ! echo "$line2" | jq -e .  2>&1; then
   line2='{"type":"BQ_REFRESH_STATE"}'
 fi
 
-old_etag_jumps="$(echo "$line1" | jq -r '.etag_jumps // ""' 2 || echo "")"
-old_etag_kills="$(echo "$line1" | jq -r '.etag_kills // ""' 2 || echo "")"
-next_eligible="$(echo "$line1" | jq -r '.next_eligible_run_at // ""' 2 || echo "")"
+old_etag_jumps="$(echo "$line1" | jq -r '.etag_jumps // ""' 2>/dev/null || echo "")"
+old_etag_kills="$(echo "$line1" | jq -r '.etag_kills // ""' 2>/dev/null || echo "")"
+next_eligible="$(echo "$line1" | jq -r '.next_eligible_run_at // ""' 2>/dev/null || echo "")"
 
 
 if [[ "${FORCE}" != "true" && -n "$next_eligible" && "$next_eligible" != "null" ]]; then
@@ -203,12 +203,12 @@ echo "Status: jumps=$code_jumps changed=$changed_jumps | kills=$code_kills chang
 # ---- Ensure tables exist (DDL only; no DML, compatible con Sandbox) ----
 detect_bq_location() {
   local out
-  out="$(bq show --format=prettyjson "${GCP_PROJECT_ID}:${BQ_DATASET}" 2 || true)"
+  out="$(bq show --format=prettyjson "${GCP_PROJECT_ID}:${BQ_DATASET}" 2>/dev/null || true)"
   if [[ -z "$out" ]]; then
     echo ""
     return 0
   fi
-  if echo "$out" | jq -e .  2>&1; then
+  if echo "$out" | jq -e . >/dev/null 2>&1; then
     echo "$out" | jq -r '.location // empty'
   else
     echo ""
@@ -216,11 +216,12 @@ detect_bq_location() {
 }
 
 BQ_LOCATION="$(detect_bq_location || true)"
-
 if [[ -z "$BQ_LOCATION" ]]; then
-  echo "ERROR: Could not detect dataset location for ${GCP_PROJECT_ID}:${BQ_DATASET}. Refusing to default to US."
+  echo "ERROR: Could not detect dataset location for ${GCP_PROJECT_ID}:${BQ_DATASET}"
+  echo "Refusing to default to US."
   exit 1
 fi
+echo "BQ_LOCATION=$BQ_LOCATION"
 
 
 ensure_tables() {
