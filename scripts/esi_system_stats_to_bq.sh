@@ -1,276 +1,339 @@
 #!/usr/bin/env bash
 set -euo pipefail
-trap 'echo "ERROR at line $LINENO" >&2' ERR
 
 # -----------------------------
-# Required env
+# Config (via env)
 # -----------------------------
-: "${GCP_PROJECT_ID:?Missing GCP_PROJECT_ID}"
-: "${USER_AGENT:?Missing USER_AGENT}"
+: "${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}"
+: "${BQ_DATASET:=eou}"
 
-# -----------------------------
-# Optional env (defaults)
-# -----------------------------
-BQ_DATASET="${BQ_DATASET:-eou}"
-STATE_FILE="${STATE_FILE:-.orch/state.jsonl}"
-ESI_BASE_URL="${ESI_BASE_URL:-https://esi.evetech.net/latest}"
-ESI_DATASOURCE="${ESI_DATASOURCE:-tranquility}"
-FORCE="${FORCE:-false}"
-DRY_RUN="${DRY_RUN:-false}"
+: "${ESI_BASE:=https://esi.evetech.net/latest}"
+: "${ESI_DATASOURCE:=tranquility}"
+: "${USER_AGENT:=landu-eou/eou (ESI system stats) contact: landueve78@gmail.com}"
 
-mkdir -p "$(dirname "$STATE_FILE")"
-touch "$STATE_FILE"
+: "${STATE_FILE:=.orch/state.jsonl}"
+
+# Control knobs (useful for manual tests)
+: "${FORCE:=false}"     # if true, ignores next_eligible_run_at gate
+: "${DRY_RUN:=false}"   # if true, don't load to BQ and don't git commit
+
+WORKFLOW_REF="${GITHUB_WORKFLOW_REF:-landu-eou/eou/.github/workflows/wof-esi-bq-system-stats.yml@refs/heads/main}"
+WORKFLOW_YAML="$(echo "$WORKFLOW_REF" | sed -E 's@^.*\.github/workflows/@@; s/@.*$//')"
+
+URL_JUMPS="${ESI_BASE}/universe/system_jumps/?datasource=${ESI_DATASOURCE}"
+URL_KILLS="${ESI_BASE}/universe/system_kills/?datasource=${ESI_DATASOURCE}"
 
 # -----------------------------
 # Helpers
 # -----------------------------
-now_iso="$(date -u +"%Y-%m-%d %H:%M:%S+00:00")"
-now_epoch="$(date -u +%s)"
-workflow_ref="${GITHUB_WORKFLOW_REF:-unknown}"
-workflow_yaml="$(echo "$workflow_ref" | sed -E 's@^.*\.github/workflows/@@; s/@.*$//')"
+log() { echo "$@" >&2; }
 
-to_iso_or_empty() {
-  local rfc="$1"
-  [[ -z "$rfc" ]] && { echo ""; return; }
-  date -u -d "$rfc" +"%Y-%m-%d %H:%M:%S+00:00" 2>/dev/null || echo ""
+utc_now_rfc3339() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+
+# Convert HTTP-date (e.g. "Thu, 15 Jan 2026 00:51:24 GMT") -> RFC3339Z
+httpdate_to_rfc3339z() {
+  local httpdate="$1"
+  [[ -z "$httpdate" ]] && { echo ""; return 0; }
+  date -u -d "$httpdate" +"%Y-%m-%dT%H:%M:%SZ"
 }
 
-hdr_get() {
-  local file="$1" key="$2"
-  grep -i "^${key}:" "$file" | tail -n 1 | cut -d: -f2- | tr -d '\r' | xargs || true
+# RFC3339Z -> epoch seconds
+rfc3339z_to_epoch() {
+  local rfc="$1"
+  [[ -z "$rfc" ]] && { echo ""; return 0; }
+  date -u -d "$rfc" +%s
+}
+
+# epoch seconds -> RFC3339Z
+epoch_to_rfc3339z() {
+  local epoch="$1"
+  [[ -z "$epoch" ]] && { echo ""; return 0; }
+  date -u -d "@$epoch" +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+# Get header value from curl -D header file (case-insensitive)
+get_hdr() {
+  local hdr_file="$1" header_name="$2"
+  # prints raw value (trimmed), empty if not present
+  awk -v IGNORECASE=1 -v h="$header_name" '
+    BEGIN{FS=":"}
+    $1 ~ "^"h"$" {
+      sub(/^[^:]*:[[:space:]]*/, "", $0);
+      sub(/\r$/, "", $0);
+      print $0;
+      exit
+    }
+  ' "$hdr_file"
+}
+
+strip_etag_quotes() {
+  local et="$1"
+  et="${et%$'\r'}"
+  et="${et#\"}"
+  et="${et%\"}"
+  echo "$et"
 }
 
 detect_bq_location() {
-  # bq sometimes emits warnings mixed with JSON. Extract JSON from first "{".
-  local out json
+  # bq show may print warnings before JSON; extract JSON from first "{" onwards
+  local out json loc
   out="$(bq show --format=prettyjson "${GCP_PROJECT_ID}:${BQ_DATASET}" 2>&1 || true)"
   json="$(printf '%s\n' "$out" | awk 'BEGIN{p=0} /^[[:space:]]*{/{p=1} p{print}')"
-  [[ -z "$json" ]] && echo "" && return
-  echo "$json" | jq -r '.location // empty' 2>/dev/null || echo ""
-}
-
-ensure_tables() {
-  # New schema per your request:
-  # - at_time (TIMESTAMP) from Last-Modified
-  # - only system_id and counters
-  bq --location="$BQ_LOCATION" query --use_legacy_sql=false "
-    CREATE TABLE IF NOT EXISTS \`${GCP_PROJECT_ID}.${BQ_DATASET}.system_jumps\` (
-      at_time    TIMESTAMP NOT NULL,
-      system_id  INT64     NOT NULL,
-      ship_jumps INT64
-    )
-    CLUSTER BY system_id, at_time;
-
-    CREATE TABLE IF NOT EXISTS \`${GCP_PROJECT_ID}.${BQ_DATASET}.system_kills\` (
-      at_time    TIMESTAMP NOT NULL,
-      system_id  INT64     NOT NULL,
-      ship_kills INT64,
-      npc_kills  INT64,
-      pod_kills  INT64
-    )
-    CLUSTER BY system_id, at_time;
-  "
-}
-
-load_ndjson_append() {
-  local table="$1" file="$2"
-  bq --location="$BQ_LOCATION" load \
-    --noreplace \
-    --source_format=NEWLINE_DELIMITED_JSON \
-    "${GCP_PROJECT_ID}:${BQ_DATASET}.${table}" \
-    "$file"
-}
-
-# -----------------------------
-# Read state (2-line JSONL)
-# -----------------------------
-line1="$(sed -n '1p' "$STATE_FILE" 2>/dev/null || true)"
-line2="$(sed -n '2p' "$STATE_FILE" 2>/dev/null || true)"
-
-[[ -n "$line1" ]] || line1='{}'
-[[ -n "$line2" ]] || line2='{"type":"BQ_REFRESH_STATE"}'
-
-# If invalid JSON, fall back safely.
-echo "$line1" | jq -e . >/dev/null 2>&1 || line1='{}'
-echo "$line2" | jq -e . >/dev/null 2>&1 || line2='{"type":"BQ_REFRESH_STATE"}'
-
-old_etag_jumps="$(echo "$line1" | jq -r '.etag_jumps // ""' 2>/dev/null || echo "")"
-old_etag_kills="$(echo "$line1" | jq -r '.etag_kills // ""' 2>/dev/null || echo "")"
-next_eligible="$(echo "$line1" | jq -r '.next_eligible_run_at // ""' 2>/dev/null || echo "")"
-
-# Gate early to avoid unnecessary ESI calls
-if [[ "$FORCE" != "true" && -n "$next_eligible" && "$next_eligible" != "null" ]]; then
-  next_epoch="$(date -u -d "$next_eligible" +%s 2>/dev/null || echo 0)"
-  if (( now_epoch < next_epoch )); then
-    echo "Too early. next_eligible_run_at=$next_eligible (now=$now_iso). Exit."
-    exit 0
+  if ! echo "$json" | jq -e . >/dev/null 2>&1; then
+    log "ERROR: Could not parse dataset JSON from: bq show ${GCP_PROJECT_ID}:${BQ_DATASET}"
+    log "$out"
+    return 1
   fi
-fi
+  loc="$(echo "$json" | jq -r '.location // empty')"
+  [[ -z "$loc" ]] && { log "ERROR: dataset location missing"; return 1; }
+  echo "$loc"
+}
 
-# -----------------------------
-# Fetch from ESI
-# -----------------------------
-tmpdir="$(mktemp -d)"
-cleanup() { rm -rf "$tmpdir"; }
-trap 'rc=$?; if [[ $rc -ne 0 ]]; then echo "Keeping tmpdir for debugging: $tmpdir" >&2; else cleanup; fi; exit $rc' EXIT
+ensure_state_file() {
+  mkdir -p "$(dirname "$STATE_FILE")"
+  touch "$STATE_FILE"
+
+  # Ensure it has 2 lines (ESI_ETAG_STATE + BQ_REFRESH_STATE)
+  local l1 l2
+  l1="$(sed -n '1p' "$STATE_FILE" || true)"
+  l2="$(sed -n '2p' "$STATE_FILE" || true)"
+
+  if [[ -z "$l1" ]]; then
+    l1='{"type":"ESI_ETAG_STATE","updated_at":null,"workflow":null,"etag_jumps":null,"etag_kills":null,"last_modified_jumps":null,"last_modified_kills":null,"expires_jumps":null,"expires_kills":null,"next_eligible_run_at":null}'
+  fi
+  if [[ -z "$l2" ]]; then
+    l2='{"type":"BQ_REFRESH_STATE","updated_at":null,"workflow":null,"last_refresh_at":null,"next_refresh_at":null}'
+  fi
+
+  printf "%s\n%s\n" "$l1" "$l2" > "$STATE_FILE"
+}
+
+read_state_field() {
+  local line_json="$1" jq_expr="$2"
+  echo "$line_json" | jq -r "$jq_expr // empty"
+}
+
+should_gate_by_next_eligible() {
+  # returns 0 if allowed to run, 1 if should stop
+  local next_eligible="$1"
+  [[ "$FORCE" == "true" ]] && return 0
+  [[ -z "$next_eligible" ]] && return 0
+
+  local now_epoch next_epoch
+  now_epoch="$(date -u +%s)"
+  next_epoch="$(rfc3339z_to_epoch "$next_eligible")"
+  [[ -z "$next_epoch" ]] && return 0
+
+  if (( now_epoch < next_epoch )); then
+    log "Gate: now < next_eligible_run_at (${next_eligible}) → skipping."
+    return 1
+  fi
+  return 0
+}
 
 fetch_one() {
-  local name="$1" url="$2" etag="$3"
-  local hdr="$tmpdir/${name}.hdr"
-  local body="$tmpdir/${name}.json"
-  local code_file="$tmpdir/${name}.code"
+  # args: name url old_etag tmpdir
+  local name="$1" url="$2" old_etag="$3" tmpdir="$4"
+
+  local hdr="${tmpdir}/${name}.hdr"
+  local body="${tmpdir}/${name}.json"
+  local code_file="${tmpdir}/${name}.code"
 
   local -a curl_args
-  curl_args=(
-    -sS --compressed
+  curl_args=(-sS --compressed
     -H "Accept: application/json"
     -H "User-Agent: ${USER_AGENT}"
     -D "$hdr"
     -o "$body"
     -w "%{http_code}"
   )
-  [[ -n "$etag" ]] && curl_args+=(-H "If-None-Match: ${etag}")
+  if [[ -n "$old_etag" ]]; then
+    curl_args+=(-H "If-None-Match: \"$old_etag\"")
+  fi
 
   local code
-  code="$(curl "${curl_args[@]}" "$url" || true)"
+  code="$(curl "${curl_args[@]}" "$url")"
   echo "$code" > "$code_file"
+
+  # For 304, body may be empty; that's OK.
+  echo "$hdr|$body|$code"
 }
 
-url_jumps="${ESI_BASE_URL}/universe/system_jumps/?datasource=${ESI_DATASOURCE}"
-url_kills="${ESI_BASE_URL}/universe/system_kills/?datasource=${ESI_DATASOURCE}"
+ensure_tables() {
+  local bq_loc="$1"
+  bq --location="$bq_loc" query --use_legacy_sql=false "
+  CREATE TABLE IF NOT EXISTS \`${GCP_PROJECT_ID}.${BQ_DATASET}.system_jumps\` (
+    ts        TIMESTAMP NOT NULL,
+    system_id INT64     NOT NULL,
+    ship_jumps INT64
+  )
+  PARTITION BY DATE(ts)
+  CLUSTER BY system_id;
 
-fetch_one "jumps" "$url_jumps" "$old_etag_jumps"
-fetch_one "kills" "$url_kills" "$old_etag_kills"
+  CREATE TABLE IF NOT EXISTS \`${GCP_PROJECT_ID}.${BQ_DATASET}.system_kills\` (
+    ts        TIMESTAMP NOT NULL,
+    system_id INT64     NOT NULL,
+    ship_kills INT64,
+    npc_kills  INT64,
+    pod_kills  INT64
+  )
+  PARTITION BY DATE(ts)
+  CLUSTER BY system_id;
+  "
+}
 
-code_jumps="$(cat "$tmpdir/jumps.code")"
-code_kills="$(cat "$tmpdir/kills.code")"
+load_ndjson_append() {
+  local bq_loc="$1" table="$2" file="$3"
+  bq --location="$bq_loc" load --noreplace \
+    --source_format=NEWLINE_DELIMITED_JSON \
+    "${GCP_PROJECT_ID}:${BQ_DATASET}.${table}" \
+    "$file"
+}
 
-# Accept only 200/304 (anything else we abort to avoid hammering & burning budget)
-[[ "$code_jumps" =~ ^(200|304)$ ]] || { echo "ESI jumps HTTP $code_jumps" >&2; exit 1; }
-[[ "$code_kills" =~ ^(200|304)$ ]] || { echo "ESI kills HTTP $code_kills" >&2; exit 1; }
+commit_state_if_needed() {
+  [[ "$DRY_RUN" == "true" ]] && { log "DRY_RUN=true → no git commit."; return 0; }
 
-etag_jumps_new="$(hdr_get "$tmpdir/jumps.hdr" "ETag")"
-etag_kills_new="$(hdr_get "$tmpdir/kills.hdr" "ETag")"
-expires_jumps_raw="$(hdr_get "$tmpdir/jumps.hdr" "Expires")"
-expires_kills_raw="$(hdr_get "$tmpdir/kills.hdr" "Expires")"
-lm_jumps_raw="$(hdr_get "$tmpdir/jumps.hdr" "Last-Modified")"
-lm_kills_raw="$(hdr_get "$tmpdir/kills.hdr" "Last-Modified")"
+  if git diff --quiet -- "$STATE_FILE"; then
+    log "State unchanged → no commit."
+    return 0
+  fi
 
-# Normalize: if headers missing, fall back to previous values where sensible
-[[ -n "$etag_jumps_new" ]] || etag_jumps_new="$old_etag_jumps"
-[[ -n "$etag_kills_new" ]] || etag_kills_new="$old_etag_kills"
-
-expires_jumps_iso="$(to_iso_or_empty "$expires_jumps_raw")"
-expires_kills_iso="$(to_iso_or_empty "$expires_kills_raw")"
-lm_jumps_iso="$(to_iso_or_empty "$lm_jumps_raw")"
-lm_kills_iso="$(to_iso_or_empty "$lm_kills_raw")"
-
-# next_eligible_run_at = max(expires) + 60s
-expires_j_epoch=0
-expires_k_epoch=0
-[[ -n "$expires_jumps_raw" ]] && expires_j_epoch="$(date -u -d "$expires_jumps_raw" +%s 2>/dev/null || echo 0)"
-[[ -n "$expires_kills_raw" ]] && expires_k_epoch="$(date -u -d "$expires_kills_raw" +%s 2>/dev/null || echo 0)"
-max_exp_epoch=$(( expires_j_epoch > expires_k_epoch ? expires_j_epoch : expires_k_epoch ))
-next_eligible_epoch=$(( max_exp_epoch + 60 ))
-next_eligible_iso="$(date -u -d "@$next_eligible_epoch" +"%Y-%m-%d %H:%M:%S+00:00" 2>/dev/null || echo "")"
-
-changed_jumps=false
-changed_kills=false
-if [[ "$code_jumps" == "200" && -n "$etag_jumps_new" && "$etag_jumps_new" != "$old_etag_jumps" ]]; then changed_jumps=true; fi
-if [[ "$code_kills" == "200" && -n "$etag_kills_new" && "$etag_kills_new" != "$old_etag_kills" ]]; then changed_kills=true; fi
-
-# Keep your current functional rule: ingest only if BOTH changed
-should_ingest=false
-if [[ "$changed_jumps" == "true" && "$changed_kills" == "true" ]]; then
-  should_ingest=true
-fi
-
-# If any 304, do not ingest (no body)
-if [[ "$code_jumps" == "304" || "$code_kills" == "304" ]]; then
-  should_ingest=false
-fi
-
-echo "Status: jumps=$code_jumps changed=$changed_jumps | kills=$code_kills changed=$changed_kills | ingest=$should_ingest"
+  git config user.name "github-actions[bot]"
+  git config user.email "github-actions[bot]@users.noreply.github.com"
+  git add "$STATE_FILE"
+  git commit -m "orch: update ESI system stats state ($(utc_now_rfc3339))"
+  git push
+  log "State committed."
+}
 
 # -----------------------------
-# BigQuery (schema + load)
+# Main
 # -----------------------------
-BQ_LOCATION="$(detect_bq_location || true)"
-if [[ -z "$BQ_LOCATION" ]]; then
-  echo "ERROR: Could not detect dataset location for ${GCP_PROJECT_ID}:${BQ_DATASET}" >&2
-  exit 1
+ensure_state_file
+
+LINE1="$(sed -n '1p' "$STATE_FILE")"
+OLD_ETAG_JUMPS="$(read_state_field "$LINE1" '.etag_jumps')"
+OLD_ETAG_KILLS="$(read_state_field "$LINE1" '.etag_kills')"
+NEXT_ELIGIBLE_OLD="$(read_state_field "$LINE1" '.next_eligible_run_at')"
+
+if ! should_gate_by_next_eligible "$NEXT_ELIGIBLE_OLD"; then
+  exit 0
 fi
 
-if [[ "$should_ingest" == "true" && "$DRY_RUN" != "true" ]]; then
-  # Validate bodies (must be JSON arrays)
-  jq -e 'type=="array"' "$tmpdir/jumps.json" >/dev/null
-  jq -e 'type=="array"' "$tmpdir/kills.json" >/dev/null
+TMPDIR="$(mktemp -d)"
+cleanup() { rm -rf "$TMPDIR"; }
+trap cleanup EXIT
 
-  ensure_tables
+# Fetch both endpoints (use old ETags as validators)
+J_RES="$(fetch_one "jumps" "$URL_JUMPS" "$OLD_ETAG_JUMPS" "$TMPDIR")"
+K_RES="$(fetch_one "kills" "$URL_KILLS" "$OLD_ETAG_KILLS" "$TMPDIR")"
 
-  # at_time from Last-Modified (fallback now_iso)
-  at_time_j="${lm_jumps_iso:-$now_iso}"
-  at_time_k="${lm_kills_iso:-$now_iso}"
+J_HDR="${J_RES%%|*}"; rest="${J_RES#*|}"; J_BODY="${rest%%|*}"; J_CODE="${rest#*|}"
+K_HDR="${K_RES%%|*}"; rest="${K_RES#*|}"; K_BODY="${rest%%|*}"; K_CODE="${rest#*|}"
 
-  jumps_ndjson="$tmpdir/jumps.ndjson"
-  kills_ndjson="$tmpdir/kills.ndjson"
+# Parse headers
+J_ETAG="$(strip_etag_quotes "$(get_hdr "$J_HDR" "etag")")"
+K_ETAG="$(strip_etag_quotes "$(get_hdr "$K_HDR" "etag")")"
 
-  # Only columns requested
-  jq -c \
-    --arg at_time "$at_time_j" \
-    '.[] | {
-      at_time: $at_time,
-      system_id: (.system_id|tonumber),
-      ship_jumps: (.ship_jumps|tonumber)
-    }' "$tmpdir/jumps.json" > "$jumps_ndjson"
+J_LM_HTTP="$(get_hdr "$J_HDR" "last-modified")"
+K_LM_HTTP="$(get_hdr "$K_HDR" "last-modified")"
+J_EXP_HTTP="$(get_hdr "$J_HDR" "expires")"
+K_EXP_HTTP="$(get_hdr "$K_HDR" "expires")"
 
-  jq -c \
-    --arg at_time "$at_time_k" \
-    '.[] | {
-      at_time: $at_time,
-      system_id: (.system_id|tonumber),
-      ship_kills: (.ship_kills|tonumber),
-      npc_kills:  (.npc_kills|tonumber),
-      pod_kills:  (.pod_kills|tonumber)
-    }' "$tmpdir/kills.json" > "$kills_ndjson"
+J_LAST_MODIFIED="$(httpdate_to_rfc3339z "$J_LM_HTTP")"
+K_LAST_MODIFIED="$(httpdate_to_rfc3339z "$K_LM_HTTP")"
+J_EXPIRES="$(httpdate_to_rfc3339z "$J_EXP_HTTP")"
+K_EXPIRES="$(httpdate_to_rfc3339z "$K_EXP_HTTP")"
 
-  load_ndjson_append "system_jumps" "$jumps_ndjson"
-  load_ndjson_append "system_kills" "$kills_ndjson"
+# Compute next_eligible_run_at = max(expires_*) + 60s
+J_EXP_EPOCH="$(rfc3339z_to_epoch "$J_EXPIRES")"
+K_EXP_EPOCH="$(rfc3339z_to_epoch "$K_EXPIRES")"
+MAX_EXP_EPOCH="$J_EXP_EPOCH"
+if [[ -n "$K_EXP_EPOCH" ]] && [[ -n "$MAX_EXP_EPOCH" ]] && (( K_EXP_EPOCH > MAX_EXP_EPOCH )); then
+  MAX_EXP_EPOCH="$K_EXP_EPOCH"
+fi
+if [[ -z "$MAX_EXP_EPOCH" ]]; then
+  NEXT_ELIGIBLE_NEW=""
 else
-  echo "No ingestion performed (either no change or DRY_RUN=true)."
+  NEXT_ELIGIBLE_NEW="$(epoch_to_rfc3339z $((MAX_EXP_EPOCH + 60)))"
 fi
 
-# -----------------------------
-# Update state line 1
-# -----------------------------
-# Rule:
-# - Always update expires_* and next_eligible_run_at
-# - Only update etags + last_modified_* if we ingested (both changed)
-new_etag_jumps="$old_etag_jumps"
-new_etag_kills="$old_etag_kills"
-prev_lm_jumps="$(echo "$line1" | jq -r '.last_modified_jumps // ""' 2>/dev/null || echo "")"
-prev_lm_kills="$(echo "$line1" | jq -r '.last_modified_kills // ""' 2>/dev/null || echo "")"
-new_lm_jumps="$prev_lm_jumps"
-new_lm_kills="$prev_lm_kills"
+# Determine "changed" based on ETag differences
+CHANGED_J="false"
+CHANGED_K="false"
+if [[ "$J_CODE" == "200" ]]; then
+  [[ -z "$OLD_ETAG_JUMPS" || "$J_ETAG" != "$OLD_ETAG_JUMPS" ]] && CHANGED_J="true"
+fi
+if [[ "$K_CODE" == "200" ]]; then
+  [[ -z "$OLD_ETAG_KILLS" || "$K_ETAG" != "$OLD_ETAG_KILLS" ]] && CHANGED_K="true"
+fi
+# If 304, it means "not modified" under the validator logic.
+if [[ "$J_CODE" == "304" ]]; then CHANGED_J="false"; fi
+if [[ "$K_CODE" == "304" ]]; then CHANGED_K="false"; fi
 
-if [[ "$should_ingest" == "true" ]]; then
-  new_etag_jumps="$etag_jumps_new"
-  new_etag_kills="$etag_kills_new"
-  [[ -n "$lm_jumps_iso" ]] && new_lm_jumps="$lm_jumps_iso"
-  [[ -n "$lm_kills_iso" ]] && new_lm_kills="$lm_kills_iso"
+# Decide ingestion: only when BOTH changed and BOTH are 200 (we need both bodies)
+INGEST="false"
+if [[ "$CHANGED_J" == "true" && "$CHANGED_K" == "true" && "$J_CODE" == "200" && "$K_CODE" == "200" ]]; then
+  INGEST="true"
 fi
 
-line1_new="$(jq -cn \
+log "Status: jumps=${J_CODE} changed=${CHANGED_J} | kills=${K_CODE} changed=${CHANGED_K} | ingest=${INGEST}"
+
+# If ingest, validate JSON bodies and load to BigQuery
+if [[ "$INGEST" == "true" && "$DRY_RUN" != "true" ]]; then
+  jq -e 'type=="array"' "$J_BODY" >/dev/null
+  jq -e 'type=="array"' "$K_BODY" >/dev/null
+
+  BQ_LOCATION="$(detect_bq_location)"
+  log "BQ_LOCATION=${BQ_LOCATION}"
+
+  ensure_tables "$BQ_LOCATION"
+
+  # Snapshot ts (TIMESTAMP) comes from Last-Modified (normalized RFC3339Z).
+  # This matches HTTP semantics: Last-Modified is when the server believes the resource last changed. :contentReference[oaicite:3]{index=3}
+  TS_J="$J_LAST_MODIFIED"
+  TS_K="$K_LAST_MODIFIED"
+  [[ -z "$TS_J" || -z "$TS_K" ]] && { log "ERROR: Missing Last-Modified (cannot derive ts)"; exit 1; }
+
+  J_NDJSON="${TMPDIR}/jumps.ndjson"
+  K_NDJSON="${TMPDIR}/kills.ndjson"
+
+  jq -c --arg ts "$TS_J" '
+    .[] | {
+      ts: $ts,
+      system_id: (.system_id|tonumber),
+      ship_jumps: (if (.ship_jumps // null) == null then null else (.ship_jumps|tonumber) end)
+    }' "$J_BODY" > "$J_NDJSON"
+
+  jq -c --arg ts "$TS_K" '
+    .[] | {
+      ts: $ts,
+      system_id: (.system_id|tonumber),
+      ship_kills: (if (.ship_kills // null) == null then null else (.ship_kills|tonumber) end),
+      npc_kills:  (if (.npc_kills  // null) == null then null else (.npc_kills|tonumber) end),
+      pod_kills:  (if (.pod_kills  // null) == null then null else (.pod_kills|tonumber) end)
+    }' "$K_BODY" > "$K_NDJSON"
+
+  load_ndjson_append "$BQ_LOCATION" "system_jumps" "$J_NDJSON"
+  load_ndjson_append "$BQ_LOCATION" "system_kills" "$K_NDJSON"
+else
+  log "No ingestion performed (either no change or DRY_RUN=true)."
+fi
+
+# Update state.jsonl EVERY run (as requested): store ETag/Last-Modified/Expires + computed next_eligible_run_at
+NOW="$(utc_now_rfc3339)"
+
+LINE1_NEW="$(jq -cn \
   --arg type "ESI_ETAG_STATE" \
-  --arg updated_at "$now_iso" \
-  --arg workflow "$workflow_yaml" \
-  --arg etag_jumps "$new_etag_jumps" \
-  --arg etag_kills "$new_etag_kills" \
-  --arg last_modified_jumps "$new_lm_jumps" \
-  --arg last_modified_kills "$new_lm_kills" \
-  --arg expires_jumps "$expires_jumps_iso" \
-  --arg expires_kills "$expires_kills_iso" \
-  --arg next_eligible_run_at "$next_eligible_iso" \
+  --arg updated_at "$NOW" \
+  --arg workflow "$WORKFLOW_YAML" \
+  --arg etag_jumps "$J_ETAG" \
+  --arg etag_kills "$K_ETAG" \
+  --arg last_modified_jumps "$J_LAST_MODIFIED" \
+  --arg last_modified_kills "$K_LAST_MODIFIED" \
+  --arg expires_jumps "$J_EXPIRES" \
+  --arg expires_kills "$K_EXPIRES" \
+  --arg next_eligible_run_at "$NEXT_ELIGIBLE_NEW" \
   '{
     type: $type,
     updated_at: $updated_at,
@@ -285,21 +348,7 @@ line1_new="$(jq -cn \
   }'
 )"
 
-printf "%s\n%s\n" "$line1_new" "$line2" > "$STATE_FILE"
+LINE2="$(sed -n '2p' "$STATE_FILE")"
+printf "%s\n%s\n" "$LINE1_NEW" "$LINE2" > "$STATE_FILE"
 
-if [[ "$DRY_RUN" == "true" ]]; then
-  echo "DRY_RUN=true → no commit."
-  exit 0
-fi
-
-# Commit only if state file changed
-if ! git diff --quiet -- "$STATE_FILE"; then
-  git config user.name "github-actions[bot]"
-  git config user.email "github-actions[bot]@users.noreply.github.com"
-  git add "$STATE_FILE"
-  git commit -m "orch: update ESI system stats state ($now_iso)"
-  git push
-  echo "State committed."
-else
-  echo "No state changes to commit."
-fi
+commit_state_if_needed
