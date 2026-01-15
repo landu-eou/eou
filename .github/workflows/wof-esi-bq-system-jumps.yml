@@ -14,10 +14,6 @@ on:
   repository_dispatch:
     types: [esi_system_jumps]
 
-concurrency:
-  group: esi-system-jumps
-  cancel-in-progress: false
-
 permissions:
   contents: write
   id-token: write
@@ -28,18 +24,22 @@ jobs:
     env:
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       BQ_DATASET: eou
-      STATE_FILE: .orch/state.jsonl
 
       # ESI
       ESI_BASE_URL: https://esi.evetech.net/latest
       ESI_DATASOURCE: tranquility
-
-      # Contacto real para buenas prácticas
       USER_AGENT: "landu-eou/eou (ESI system_jumps) contact: landueve78@gmail.com"
+
+      # Estado por endpoint (archivo + rama dedicada)
+      ENDPOINT: system_jumps
+      STATE_FILE: .orch/state/system_jumps.json
+      STATE_BRANCH: orch-state-system-jumps
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install jq
         run: |
