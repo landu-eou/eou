@@ -202,16 +202,21 @@ echo "Status: jumps=$code_jumps changed=$changed_jumps | kills=$code_kills chang
 
 # ---- Ensure tables exist (DDL only; no DML, compatible con Sandbox) ----
 detect_bq_location() {
-  local out
-  out="$(bq show --format=prettyjson "${GCP_PROJECT_ID}:${BQ_DATASET}" 2>/dev/null || true)"
-  if [[ -z "$out" ]]; then
-    echo ""
+  local out json
+  # Captura stdout+stderr por si el warning se va a cualquiera de los dos
+  out="$(bq show --format=prettyjson "${GCP_PROJECT_ID}:${BQ_DATASET}" 2>&1 || true)"
+
+  # Quédate solo con el JSON (desde la primera línea que empieza por '{' hasta el final)
+  json="$(printf '%s\n' "$out" | awk 'BEGIN{p=0} /^[[:space:]]*{/{p=1} p{print}')"
+
+  if [[ -z "$json" ]]; then
     return 0
   fi
-  if echo "$out" | jq -e . >/dev/null 2>&1; then
-    echo "$out" | jq -r '.location // empty'
+
+  if echo "$json" | jq -e . >/dev/null 2>&1; then
+    echo "$json" | jq -r '.location // empty'
   else
-    echo ""
+    return 0
   fi
 }
 
@@ -222,7 +227,6 @@ if [[ -z "$BQ_LOCATION" ]]; then
   exit 1
 fi
 echo "BQ_LOCATION=$BQ_LOCATION"
-
 
 ensure_tables() {
   bq --location="$BQ_LOCATION" query --use_legacy_sql=false "
