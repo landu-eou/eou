@@ -1,4 +1,4 @@
-echo "SCRIPT VERSION: $(git rev-parse --short HEAD 2>/dev/null || echo no-git)"
+echo "SCRIPT VERSION: $(git rev-parse --short HEAD 2 || echo no-git)"
 
 #!/usr/bin/env bash
 set -euo pipefail
@@ -39,22 +39,22 @@ printf "%s" "$line1" | head -c 16 | xxd -p || true
 [[ -n "$line2" ]] || line2='{"type":"BQ_REFRESH_STATE"}'
 
 # Fallback si el JSON está corrupto (BOM, basura, etc.)
-if ! echo "$line1" | jq -e . >/dev/null 2>&1; then
+if ! echo "$line1" | jq -e .  2>&1; then
   echo "ERROR: state line1 is not valid JSON; falling back to {}"
   line1='{}'
 fi
-if ! echo "$line2" | jq -e . >/dev/null 2>&1; then
+if ! echo "$line2" | jq -e .  2>&1; then
   echo "ERROR: state line2 is not valid JSON; falling back to default"
   line2='{"type":"BQ_REFRESH_STATE"}'
 fi
 
-old_etag_jumps="$(echo "$line1" | jq -r '.etag_jumps // ""' 2>/dev/null || echo "")"
-old_etag_kills="$(echo "$line1" | jq -r '.etag_kills // ""' 2>/dev/null || echo "")"
-next_eligible="$(echo "$line1" | jq -r '.next_eligible_run_at // ""' 2>/dev/null || echo "")"
+old_etag_jumps="$(echo "$line1" | jq -r '.etag_jumps // ""' 2 || echo "")"
+old_etag_kills="$(echo "$line1" | jq -r '.etag_kills // ""' 2 || echo "")"
+next_eligible="$(echo "$line1" | jq -r '.next_eligible_run_at // ""' 2 || echo "")"
 
 
 if [[ "${FORCE}" != "true" && -n "$next_eligible" && "$next_eligible" != "null" ]]; then
-  next_epoch="$(date -u -d "$next_eligible" +%s 2>/dev/null || echo 0)"
+  next_epoch="$(date -u -d "$next_eligible" +%s 2 || echo 0)"
   if (( now_epoch < next_epoch )); then
     echo "Too early. next_eligible_run_at=$next_eligible (now=$now_iso). Exiting without ESI calls."
     exit 0
@@ -113,12 +113,12 @@ echo "----------------------------------------"
 
 # If 200, validate JSON and type
 if [[ "$code_jumps" == "200" ]]; then
-  if ! jq -e . "$tmpdir/jumps.json" >/dev/null 2>&1; then
+  if ! jq -e . "$tmpdir/jumps.json"  2>&1; then
     echo "ERROR: jumps body is not valid JSON. First 300 bytes:"
     head -c 300 "$tmpdir/jumps.json" | sed 's/[^[:print:]\t]/?/g'
     exit 1
   fi
-  if ! jq -e 'type=="array"' "$tmpdir/jumps.json" >/dev/null 2>&1; then
+  if ! jq -e 'type=="array"' "$tmpdir/jumps.json"  2>&1; then
     echo "ERROR: jumps JSON is not an array. Body (first 400 chars):"
     jq -c . "$tmpdir/jumps.json" | head -c 400
     echo
@@ -127,12 +127,12 @@ if [[ "$code_jumps" == "200" ]]; then
 fi
 
 if [[ "$code_kills" == "200" ]]; then
-  if ! jq -e . "$tmpdir/kills.json" >/dev/null 2>&1; then
+  if ! jq -e . "$tmpdir/kills.json"  2>&1; then
     echo "ERROR: kills body is not valid JSON. First 300 bytes:"
     head -c 300 "$tmpdir/kills.json" | sed 's/[^[:print:]\t]/?/g'
     exit 1
   fi
-  if ! jq -e 'type=="array"' "$tmpdir/kills.json" >/dev/null 2>&1; then
+  if ! jq -e 'type=="array"' "$tmpdir/kills.json"  2>&1; then
     echo "ERROR: kills JSON is not an array. Body (first 400 chars):"
     jq -c . "$tmpdir/kills.json" | head -c 400
     echo
@@ -171,7 +171,7 @@ lm_kills_raw="$(hdr_get "$tmpdir/kills.hdr" "Last-Modified")"
 to_iso_or_empty() {
   local rfc="$1"
   if [[ -z "$rfc" ]]; then echo ""; return; fi
-  date -u -d "$rfc" +"%Y-%m-%d %H:%M:%S+00:00" 2>/dev/null || echo ""
+  date -u -d "$rfc" +"%Y-%m-%d %H:%M:%S+00:00" 2 || echo ""
 }
 
 expires_jumps_iso="$(to_iso_or_empty "$expires_jumps_raw")"
@@ -182,11 +182,11 @@ lm_kills_iso="$(to_iso_or_empty "$lm_kills_raw")"
 # Compute next_eligible_run_at = max(expires) + 60s (anti-polling)
 expires_j_epoch=0
 expires_k_epoch=0
-if [[ -n "$expires_jumps_raw" ]]; then expires_j_epoch="$(date -u -d "$expires_jumps_raw" +%s 2>/dev/null || echo 0)"; fi
-if [[ -n "$expires_kills_raw" ]]; then expires_k_epoch="$(date -u -d "$expires_kills_raw" +%s 2>/dev/null || echo 0)"; fi
+if [[ -n "$expires_jumps_raw" ]]; then expires_j_epoch="$(date -u -d "$expires_jumps_raw" +%s 2 || echo 0)"; fi
+if [[ -n "$expires_kills_raw" ]]; then expires_k_epoch="$(date -u -d "$expires_kills_raw" +%s 2 || echo 0)"; fi
 max_exp_epoch=$(( expires_j_epoch > expires_k_epoch ? expires_j_epoch : expires_k_epoch ))
 next_eligible_epoch=$(( max_exp_epoch + 60 ))
-next_eligible_iso="$(date -u -d "@$next_eligible_epoch" +"%Y-%m-%d %H:%M:%S+00:00" 2>/dev/null || echo "")"
+next_eligible_iso="$(date -u -d "@$next_eligible_epoch" +"%Y-%m-%d %H:%M:%S+00:00" 2 || echo "")"
 
 changed_jumps=false
 changed_kills=false
@@ -203,8 +203,12 @@ echo "Status: jumps=$code_jumps changed=$changed_jumps | kills=$code_kills chang
 # ---- Ensure tables exist (DDL only; no DML, compatible con Sandbox) ----
 detect_bq_location() {
   local out
-  out="$(bq show --format=prettyjson "${GCP_PROJECT_ID}:${BQ_DATASET}" 2>/dev/null || true)"
-  if echo "$out" | jq -e . >/dev/null 2>&1; then
+  out="$(bq show --format=prettyjson "${GCP_PROJECT_ID}:${BQ_DATASET}" 2 || true)"
+  if [[ -z "$out" ]]; then
+    echo ""
+    return 0
+  fi
+  if echo "$out" | jq -e .  2>&1; then
     echo "$out" | jq -r '.location // empty'
   else
     echo ""
@@ -212,7 +216,12 @@ detect_bq_location() {
 }
 
 BQ_LOCATION="$(detect_bq_location || true)"
-[[ -n "$BQ_LOCATION" ]] || BQ_LOCATION="US"
+
+if [[ -z "$BQ_LOCATION" ]]; then
+  echo "ERROR: Could not detect dataset location for ${GCP_PROJECT_ID}:${BQ_DATASET}. Refusing to default to US."
+  exit 1
+fi
+
 
 ensure_tables() {
   bq --location="$BQ_LOCATION" query --use_legacy_sql=false "
@@ -237,7 +246,7 @@ ensure_tables() {
     pod_kills       INT64
   )
   CLUSTER BY system_id, consolidated_at;
-  " >/dev/null
+  " 
 }
 
 load_ndjson_append() {
@@ -263,25 +272,25 @@ fi
 
 # Validate JSON bodies if we are going to ingest
 if [[ "$should_ingest" == "true" ]]; then
-  if ! jq -e . "$tmpdir/jumps.json" >/dev/null 2>&1; then
+  if ! jq -e . "$tmpdir/jumps.json"  2>&1; then
     echo "ERROR: jumps body is not valid JSON"
     head -c 400 "$tmpdir/jumps.json" | sed 's/[^[:print:]\t]/?/g'
     exit 1
   fi
 
-  if ! jq -e . "$tmpdir/kills.json" >/dev/null 2>&1; then
+  if ! jq -e . "$tmpdir/kills.json"  2>&1; then
     echo "ERROR: kills body is not valid JSON"
     head -c 400 "$tmpdir/kills.json" | sed 's/[^[:print:]\t]/?/g'
     exit 1
   fi
 
-  if ! jq -e 'type=="array"' "$tmpdir/jumps.json" >/dev/null; then
+  if ! jq -e 'type=="array"' "$tmpdir/jumps.json" ; then
     echo "ERROR: jumps JSON is not an array. Body:"
     jq -c . "$tmpdir/jumps.json" | head -c 400
     exit 1
   fi
 
-  if ! jq -e 'type=="array"' "$tmpdir/kills.json" >/dev/null; then
+  if ! jq -e 'type=="array"' "$tmpdir/kills.json" ; then
     echo "ERROR: kills JSON is not an array. Body:"
     jq -c . "$tmpdir/kills.json" | head -c 400
     exit 1
@@ -387,8 +396,8 @@ if ! git diff --quiet -- "$STATE_FILE"; then
   git config user.name "github-actions[bot]"
   git config user.email "github-actions[bot]@users.noreply.github.com"
   git add "$STATE_FILE"
-  git commit -m "orch: update ESI system stats state ($now_iso)" >/dev/null
-  git push >/dev/null
+  git commit -m "orch: update ESI system stats state ($now_iso)" 
+  git push 
   echo "State committed."
 else
   echo "No state changes to commit."
