@@ -1,9 +1,8 @@
-echo "SCRIPT VERSION: $(git rev-parse --short HEAD 2>/dev/null || echo no-git)"
-
 #!/usr/bin/env bash
 set -euo pipefail
 trap 'echo "ERROR at line $LINENO";' ERR
 
+echo "SCRIPT VERSION: $(git rev-parse --short HEAD 2>/dev/null || echo no-git)"
 
 : "${GCP_PROJECT_ID:?Missing GCP_PROJECT_ID}"
 : "${BQ_DATASET:=eou}"
@@ -38,25 +37,25 @@ printf "%s" "$line1" | head -c 16 | xxd -p || true
 [[ -n "$line1" ]] || line1='{}'
 [[ -n "$line2" ]] || line2='{"type":"BQ_REFRESH_STATE"}'
 
-# Fallback si el JSON está corrupto (BOM, basura, etc.)
-if ! echo "$line1" | jq -e .  2>&1; then
+# Fallback si el JSON está corrupto
+if ! echo "$line1" | jq -e . >/dev/null 2>&1; then
   echo "ERROR: state line1 is not valid JSON; falling back to {}"
   line1='{}'
 fi
-if ! echo "$line2" | jq -e .  2>&1; then
+if ! echo "$line2" | jq -e . >/dev/null 2>&1; then
   echo "ERROR: state line2 is not valid JSON; falling back to default"
   line2='{"type":"BQ_REFRESH_STATE"}'
 fi
 
 old_etag_jumps="$(echo "$line1" | jq -r '.etag_jumps // ""' 2>/dev/null || echo "")"
 old_etag_kills="$(echo "$line1" | jq -r '.etag_kills // ""' 2>/dev/null || echo "")"
-next_eligible="$(echo "$line1" | jq -r '.next_eligible_run_at // ""' 2>/dev/null || echo "")"
+prev_next_eligible="$(echo "$line1" | jq -r '.next_eligible_run_at // ""' 2>/dev/null || echo "")"
 
-
-if [[ "${FORCE}" != "true" && -n "$next_eligible" && "$next_eligible" != "null" ]]; then
-  next_epoch="$(date -u -d "$next_eligible" +%s 2 || echo 0)"
-  if (( now_epoch < next_epoch )); then
-    echo "Too early. next_eligible_run_at=$next_eligible (now=$now_iso). Exiting without ESI calls."
+# Anti-polling: si no FORCE y todavía no llegamos a next_eligible_run_at, salir sin tocar ESI
+if [[ "${FORCE}" != "true" && -n "$prev_next_eligible" && "$prev_next_eligible" != "null" ]]; then
+  prev_next_epoch="$(date -u -d "$prev_next_eligible" +%s 2>/dev/null || echo 0)"
+  if (( now_epoch < prev_next_epoch )); then
+    echo "Too early. next_eligible_run_at=$prev_next_eligible (now=$now_iso). Exiting without ESI calls."
     exit 0
   fi
 fi
@@ -65,10 +64,36 @@ tmpdir="$(mktemp -d)"
 cleanup() { rm -rf "$tmpdir"; }
 trap 'rc=$?; if [[ $rc -ne 0 ]]; then echo "Keeping tmpdir for debugging: $tmpdir"; else cleanup; fi; exit $rc' EXIT
 
+# Header extractor robusto (case-insensitive, CRLF safe)
 hdr_get() {
   local file="$1" key="$2"
-  # returns last match (some responses include multiple header blocks on redirects etc.)
+  # last match por si hay múltiples bloques de headers
   grep -i "^${key}:" "$file" | tail -n 1 | cut -d: -f2- | tr -d '\r' | xargs || true
+}
+
+to_iso_or_empty() {
+  local rfc="$1"
+  if [[ -z "$rfc" ]]; then echo ""; return; fi
+  date -u -d "$rfc" +"%Y-%m-%d %H:%M:%S+00:00" 2>/dev/null || echo ""
+}
+
+epoch_from_rfc() {
+  local rfc="$1"
+  [[ -n "$rfc" ]] || { echo 0; return; }
+  date -u -d "$rfc" +%s 2>/dev/null || echo 0
+}
+
+detect_bq_location() {
+  local out json
+  # Captura stdout+stderr; a veces el CLI mete WARNING en stdout
+  out="$(bq show --format=prettyjson "${GCP_PROJECT_ID}:${BQ_DATASET}" 2>&1 || true)"
+  json="$(printf '%s\n' "$out" | awk 'BEGIN{p=0} /^[[:space:]]*{/{p=1} p{print}')"
+  if [[ -z "$json" ]]; then return 0; fi
+  if echo "$json" | jq -e . >/dev/null 2>&1; then
+    echo "$json" | jq -r '.location // empty'
+  else
+    return 0
+  fi
 }
 
 fetch_one() {
@@ -105,41 +130,12 @@ fetch_one "kills" "$url_kills" "$old_etag_kills"
 code_jumps="$(cat "$tmpdir/jumps.code")"
 code_kills="$(cat "$tmpdir/kills.code")"
 
-# ---- DEBUG/VALIDATION: ensure responses are valid JSON arrays before jq transforms ----
 echo "---- Debug headers (first 30 lines) ----"
 echo "[jumps headers]"; head -n 30 "$tmpdir/jumps.hdr" || true
 echo "[kills headers]"; head -n 30 "$tmpdir/kills.hdr" || true
 echo "----------------------------------------"
 
-# If 200, validate JSON and type
-if [[ "$code_jumps" == "200" ]]; then
-  if ! jq -e . "$tmpdir/jumps.json"  2>&1; then
-    echo "ERROR: jumps body is not valid JSON. First 300 bytes:"
-    head -c 300 "$tmpdir/jumps.json" | sed 's/[^[:print:]\t]/?/g'
-    exit 1
-  fi
-  if ! jq -e 'type=="array"' "$tmpdir/jumps.json"  2>&1; then
-    echo "ERROR: jumps JSON is not an array. Body (first 400 chars):"
-    jq -c . "$tmpdir/jumps.json" | head -c 400
-    echo
-    exit 1
-  fi
-fi
-
-if [[ "$code_kills" == "200" ]]; then
-  if ! jq -e . "$tmpdir/kills.json"  2>&1; then
-    echo "ERROR: kills body is not valid JSON. First 300 bytes:"
-    head -c 300 "$tmpdir/kills.json" | sed 's/[^[:print:]\t]/?/g'
-    exit 1
-  fi
-  if ! jq -e 'type=="array"' "$tmpdir/kills.json"  2>&1; then
-    echo "ERROR: kills JSON is not an array. Body (first 400 chars):"
-    jq -c . "$tmpdir/kills.json" | head -c 400
-    echo
-    exit 1
-  fi
-fi
-
+# Aceptamos solo 200 o 304 (cualquier otra cosa: abortar para no quemar budget)
 if [[ ! "$code_jumps" =~ ^(200|304)$ ]]; then
   echo "ESI jumps returned HTTP $code_jumps — aborting to avoid burning error budget."
   exit 1
@@ -149,7 +145,7 @@ if [[ ! "$code_kills" =~ ^(200|304)$ ]]; then
   exit 1
 fi
 
-# Error limit headers (log only; if you want, you can hard-stop when remain is low)
+# Log de budget (solo informativo)
 err_remain_j="$(hdr_get "$tmpdir/jumps.hdr" "X-ESI-Error-Limit-Remain")"
 err_reset_j="$(hdr_get "$tmpdir/jumps.hdr" "X-ESI-Error-Limit-Reset")"
 err_remain_k="$(hdr_get "$tmpdir/kills.hdr" "X-ESI-Error-Limit-Remain")"
@@ -157,37 +153,34 @@ err_reset_k="$(hdr_get "$tmpdir/kills.hdr" "X-ESI-Error-Limit-Reset")"
 echo "ESI error budget (jumps): remain=${err_remain_j:-?}, reset_s=${err_reset_j:-?}"
 echo "ESI error budget (kills): remain=${err_remain_k:-?}, reset_s=${err_reset_k:-?}"
 
-etag_jumps_new="$(hdr_get "$tmpdir/jumps.hdr" "ETag")"
-etag_kills_new="$(hdr_get "$tmpdir/kills.hdr" "ETag")"
+# ---- Parse headers (SIEMPRE, haya ingest o no) ----
+etag_jumps_hdr="$(hdr_get "$tmpdir/jumps.hdr" "ETag")"
+etag_kills_hdr="$(hdr_get "$tmpdir/kills.hdr" "ETag")"
 expires_jumps_raw="$(hdr_get "$tmpdir/jumps.hdr" "Expires")"
 expires_kills_raw="$(hdr_get "$tmpdir/kills.hdr" "Expires")"
 lm_jumps_raw="$(hdr_get "$tmpdir/jumps.hdr" "Last-Modified")"
 lm_kills_raw="$(hdr_get "$tmpdir/kills.hdr" "Last-Modified")"
 
-# Normalize / fallback
-[[ -n "$etag_jumps_new" ]] || etag_jumps_new="$old_etag_jumps"
-[[ -n "$etag_kills_new" ]] || etag_kills_new="$old_etag_kills"
-
-to_iso_or_empty() {
-  local rfc="$1"
-  if [[ -z "$rfc" ]]; then echo ""; return; fi
-  date -u -d "$rfc" +"%Y-%m-%d %H:%M:%S+00:00" 2 || echo ""
-}
-
+# Normaliza ISO (lo guardamos siempre en state)
 expires_jumps_iso="$(to_iso_or_empty "$expires_jumps_raw")"
 expires_kills_iso="$(to_iso_or_empty "$expires_kills_raw")"
 lm_jumps_iso="$(to_iso_or_empty "$lm_jumps_raw")"
 lm_kills_iso="$(to_iso_or_empty "$lm_kills_raw")"
 
-# Compute next_eligible_run_at = max(expires) + 60s (anti-polling)
-expires_j_epoch=0
-expires_k_epoch=0
-if [[ -n "$expires_jumps_raw" ]]; then expires_j_epoch="$(date -u -d "$expires_jumps_raw" +%s 2 || echo 0)"; fi
-if [[ -n "$expires_kills_raw" ]]; then expires_k_epoch="$(date -u -d "$expires_kills_raw" +%s 2 || echo 0)"; fi
+# next_eligible_run_at = max(Expires) + 60s
+expires_j_epoch="$(epoch_from_rfc "$expires_jumps_raw")"
+expires_k_epoch="$(epoch_from_rfc "$expires_kills_raw")"
 max_exp_epoch=$(( expires_j_epoch > expires_k_epoch ? expires_j_epoch : expires_k_epoch ))
 next_eligible_epoch=$(( max_exp_epoch + 60 ))
-next_eligible_iso="$(date -u -d "@$next_eligible_epoch" +"%Y-%m-%d %H:%M:%S+00:00" 2 || echo "")"
+next_eligible_iso="$(date -u -d "@$next_eligible_epoch" +"%Y-%m-%d %H:%M:%S+00:00" 2>/dev/null || echo "")"
 
+# Fallback de ETag si viene vacío (no debería)
+etag_jumps_new="$etag_jumps_hdr"
+etag_kills_new="$etag_kills_hdr"
+[[ -n "$etag_jumps_new" ]] || etag_jumps_new="$old_etag_jumps"
+[[ -n "$etag_kills_new" ]] || etag_kills_new="$old_etag_kills"
+
+# Detecta cambios (tu regla: solo ingerir si los dos cambiaron)
 changed_jumps=false
 changed_kills=false
 if [[ "$code_jumps" == "200" && -n "$etag_jumps_new" && "$etag_jumps_new" != "$old_etag_jumps" ]]; then changed_jumps=true; fi
@@ -198,28 +191,23 @@ if [[ "$changed_jumps" == "true" && "$changed_kills" == "true" ]]; then
   should_ingest=true
 fi
 
+# Si alguno es 304, NO ingerir (y no intentar parsear body)
+if [[ "$code_jumps" == "304" || "$code_kills" == "304" ]]; then
+  echo "At least one endpoint returned 304; skipping body parsing and ingestion."
+  should_ingest=false
+fi
+
 echo "Status: jumps=$code_jumps changed=$changed_jumps | kills=$code_kills changed=$changed_kills | ingest=$should_ingest"
 
-# ---- Ensure tables exist (DDL only; no DML, compatible con Sandbox) ----
-detect_bq_location() {
-  local out json
-  # Captura stdout+stderr por si el warning se va a cualquiera de los dos
-  out="$(bq show --format=prettyjson "${GCP_PROJECT_ID}:${BQ_DATASET}" 2>&1 || true)"
+# ---- Validación JSON solo si vamos a ingerir ----
+if [[ "$should_ingest" == "true" ]]; then
+  jq -e . "$tmpdir/jumps.json" >/dev/null 2>&1 || { echo "ERROR: jumps body not valid JSON"; head -c 400 "$tmpdir/jumps.json"; exit 1; }
+  jq -e . "$tmpdir/kills.json" >/dev/null 2>&1 || { echo "ERROR: kills body not valid JSON"; head -c 400 "$tmpdir/kills.json"; exit 1; }
+  jq -e 'type=="array"' "$tmpdir/jumps.json" >/dev/null 2>&1 || { echo "ERROR: jumps JSON not array"; exit 1; }
+  jq -e 'type=="array"' "$tmpdir/kills.json" >/dev/null 2>&1 || { echo "ERROR: kills JSON not array"; exit 1; }
+fi
 
-  # Quédate solo con el JSON (desde la primera línea que empieza por '{' hasta el final)
-  json="$(printf '%s\n' "$out" | awk 'BEGIN{p=0} /^[[:space:]]*{/{p=1} p{print}')"
-
-  if [[ -z "$json" ]]; then
-    return 0
-  fi
-
-  if echo "$json" | jq -e . >/dev/null 2>&1; then
-    echo "$json" | jq -r '.location // empty'
-  else
-    return 0
-  fi
-}
-
+# ---- BigQuery ----
 BQ_LOCATION="$(detect_bq_location || true)"
 if [[ -z "$BQ_LOCATION" ]]; then
   echo "ERROR: Could not detect dataset location for ${GCP_PROJECT_ID}:${BQ_DATASET}"
@@ -251,7 +239,7 @@ ensure_tables() {
     pod_kills       INT64
   )
   CLUSTER BY system_id, consolidated_at;
-  " 
+  "
 }
 
 load_ndjson_append() {
@@ -267,45 +255,11 @@ load_ndjson_append() {
     "$file"
 }
 
-# --- DEFENSIVE CHECKS BEFORE jq PARSING ---
-
-# If any endpoint returned 304, do not try to parse body
-if [[ "$code_jumps" == "304" || "$code_kills" == "304" ]]; then
-  echo "At least one endpoint returned 304; skipping body parsing and ingestion."
-  should_ingest=false
-fi
-
-# Validate JSON bodies if we are going to ingest
-if [[ "$should_ingest" == "true" ]]; then
-  if ! jq -e . "$tmpdir/jumps.json"  2>&1; then
-    echo "ERROR: jumps body is not valid JSON"
-    head -c 400 "$tmpdir/jumps.json" | sed 's/[^[:print:]\t]/?/g'
-    exit 1
-  fi
-
-  if ! jq -e . "$tmpdir/kills.json"  2>&1; then
-    echo "ERROR: kills body is not valid JSON"
-    head -c 400 "$tmpdir/kills.json" | sed 's/[^[:print:]\t]/?/g'
-    exit 1
-  fi
-
-  if ! jq -e 'type=="array"' "$tmpdir/jumps.json" ; then
-    echo "ERROR: jumps JSON is not an array. Body:"
-    jq -c . "$tmpdir/jumps.json" | head -c 400
-    exit 1
-  fi
-
-  if ! jq -e 'type=="array"' "$tmpdir/kills.json" ; then
-    echo "ERROR: kills JSON is not an array. Body:"
-    jq -c . "$tmpdir/kills.json" | head -c 400
-    exit 1
-  fi
-fi
-
+# ---- Ingest ----
 if [[ "$should_ingest" == "true" && "$DRY_RUN" != "true" ]]; then
   ensure_tables
 
-  # Build NDJSON with consolidated_at from Last-Modified (per tu requisito)
+  # Tu requisito: consolidated_at = Last-Modified (por endpoint)
   consolidated_j="${lm_jumps_iso:-$now_iso}"
   consolidated_k="${lm_kills_iso:-$now_iso}"
 
@@ -349,19 +303,14 @@ else
 fi
 
 # ---- Update state line 1 ----
-# Regla:
-# - Siempre actualizar expires_* y next_eligible_run_at (anti-abuso / anti-polling).
-# - Solo actualizar ETags persistidos cuando se haya ingerido (ambos changed).
+# Reglas:
+# - SIEMPRE guardar last_modified_* / expires_* / next_eligible_run_at desde headers del run
+# - Solo actualizar etags persistidos si hubo ingesta (ambos cambiaron)
 new_etag_jumps="$old_etag_jumps"
 new_etag_kills="$old_etag_kills"
-new_lm_jumps="$(echo "$line1" | jq -r '.last_modified_jumps // ""')"
-new_lm_kills="$(echo "$line1" | jq -r '.last_modified_kills // ""')"
-
 if [[ "$should_ingest" == "true" ]]; then
   new_etag_jumps="$etag_jumps_new"
   new_etag_kills="$etag_kills_new"
-  [[ -n "$lm_jumps_iso" ]] && new_lm_jumps="$lm_jumps_iso"
-  [[ -n "$lm_kills_iso" ]] && new_lm_kills="$lm_kills_iso"
 fi
 
 line1_new="$(jq -cn \
@@ -370,8 +319,8 @@ line1_new="$(jq -cn \
   --arg workflow "$workflow_yaml" \
   --arg etag_jumps "$new_etag_jumps" \
   --arg etag_kills "$new_etag_kills" \
-  --arg last_modified_jumps "$new_lm_jumps" \
-  --arg last_modified_kills "$new_lm_kills" \
+  --arg last_modified_jumps "$lm_jumps_iso" \
+  --arg last_modified_kills "$lm_kills_iso" \
   --arg expires_jumps "$expires_jumps_iso" \
   --arg expires_kills "$expires_kills_iso" \
   --arg next_eligible_run_at "$next_eligible_iso" \
@@ -401,8 +350,8 @@ if ! git diff --quiet -- "$STATE_FILE"; then
   git config user.name "github-actions[bot]"
   git config user.email "github-actions[bot]@users.noreply.github.com"
   git add "$STATE_FILE"
-  git commit -m "orch: update ESI system stats state ($now_iso)" 
-  git push 
+  git commit -m "orch: update ESI system stats state ($now_iso)"
+  git push
   echo "State committed."
 else
   echo "No state changes to commit."
