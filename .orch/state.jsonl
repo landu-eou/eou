@@ -1,2 +1,3 @@
-{"type":"ESI_ETAG_STATE","updated_at":"2026-01-15T10:22:44Z","workflow":"wof-esi-bq-system-stats.yml","etag_jumps":"070932c37e8d62f5784b0a7cd9eca64baf26034dad053e3cfe3c42c5","etag_kills":"189183ba409c942818497ffb844e65603f7e8bc51b5dd20b87762294","last_modified_jumps":"2026-01-15T09:51:28Z","last_modified_kills":"2026-01-15T10:16:47Z","expires_jumps":"2026-01-15T10:51:28Z","expires_kills":"2026-01-15T11:16:47Z","next_eligible_run_at":"2026-01-15T11:17:47Z"}
+{"type":"ESI_ENDPOINT_STATE","endpoint":"system_jumps","updated_at":null,"workflow":"wof-esi-bq-system-jumps.yml","etag":null,"last_modified":null,"expires":null,"next_eligible_run_at":null}
+{"type":"ESI_ENDPOINT_STATE","endpoint":"system_kills","updated_at":null,"workflow":"wof-esi-bq-system-kills.yml","etag":null,"last_modified":null,"expires":null,"next_eligible_run_at":null}
 {"type":"BQ_REFRESH_STATE","updated_at":null,"workflow":null,"last_refresh_at":null,"next_refresh_at":null}
