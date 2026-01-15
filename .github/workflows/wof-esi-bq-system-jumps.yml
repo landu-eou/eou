@@ -1,0 +1,65 @@
+name: "ESI → BigQuery · system_jumps"
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Ignora next_eligible_run_at y ejecuta igualmente"
+        required: false
+        default: "false"
+      dry_run:
+        description: "No escribe en BigQuery ni commitea state (solo prueba)"
+        required: false
+        default: "false"
+  repository_dispatch:
+    types: [esi_system_jumps]
+
+concurrency:
+  group: esi-system-jumps
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      BQ_DATASET: eou
+      STATE_FILE: .orch/state.jsonl
+
+      # ESI
+      ESI_BASE_URL: https://esi.evetech.net/latest
+      ESI_DATASOURCE: tranquility
+
+      # Contacto real para buenas prácticas
+      USER_AGENT: "landu-eou/eou (ESI system_jumps) contact: landueve78@gmail.com"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Auth to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Run ingest (ESI → BQ)
+        env:
+          FORCE: ${{ inputs.force || github.event.client_payload.force || 'false' }}
+          DRY_RUN: ${{ inputs.dry_run || github.event.client_payload.dry_run || 'false' }}
+        run: |
+          bash scripts/systems/esi_system_jumps_to_bq.sh
