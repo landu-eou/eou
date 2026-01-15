@@ -62,4 +62,4 @@ jobs:
           FORCE: ${{ inputs.force || github.event.client_payload.force || 'false' }}
           DRY_RUN: ${{ inputs.dry_run || github.event.client_payload.dry_run || 'false' }}
         run: |
-          bash -x scripts/esi_system_stats_to_bq.sh
+          bash scripts/esi_system_stats_to_bq.sh
