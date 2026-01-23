@@ -11,7 +11,7 @@ jobs:
     env:
       WORKFLOW_ROW: "2"       # Fila fija (workflows row 2)
       EXPIRES: "300"          # Segundos
-      LOCK_SECONDS: "1200"    # Anti-solape (segundos)
+      LOCK_SECONDS: "300"    # Anti-solape (segundos)
     # ===========================================
 
     steps:
