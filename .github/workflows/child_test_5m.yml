@@ -1,0 +1,60 @@
+name: child_test_5m
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # 1º y 2º: CRÍTICO nada más empezar el run
+      - name: Mark start (last_run + next_run=+300s)
+        id: start
+        shell: bash
+        run: |
+          set -euo pipefail
+          resp="$(curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -nc \
+              --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
+              --arg action "start" \
+              --arg workflow "child_test_5m.yml" \
+              --argjson row 2 \
+              '{key:$key, action:$action, workflow:$workflow, row:$row, lock_seconds:1200}' \
+            )")"
+          echo "$resp" > start.json
+          echo "last_run=$(jq -r .last_run start.json)" >> "$GITHUB_OUTPUT"
+
+      # ... aquí va la lógica del workflow (muy simple para test)
+      - name: Do work (test)
+        run: |
+          echo "Hello from child_test_5m"
+          sleep 2
+
+      # 3º: CRÍTICO lo último antes de finalizar (siempre, incluso si falla)
+      - name: Mark end (set final next_run)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          last_run="${{ steps.start.outputs.last_run }}"
+          if [ -z "${last_run:-}" ] || [ "${last_run}" = "null" ]; then
+            last_run="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          fi
+          next_run="$(date -u -d "${last_run} + 300 seconds" +%Y-%m-%dT%H:%M:%SZ)"
+
+          # job.status -> success|failure|cancelled
+          conclusion="${{ job.status }}"
+
+          curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -nc \
+              --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
+              --arg action "end" \
+              --arg workflow "child_test_5m.yml" \
+              --argjson row 2 \
+              --arg status "completed" \
+              --arg conclusion "${conclusion}" \
+              --arg next_run "${next_run}" \
+              '{key:$key, action:$action, workflow:$workflow, row:$row, status:$status, conclusion:$conclusion, next_run:$next_run}' \
+            )" >/dev/null
