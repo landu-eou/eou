@@ -2,63 +2,151 @@ name: child_test_5m
 
 on:
   workflow_dispatch:
-    inputs:
-      row:
-        description: "Fila en el sheet 'workflows'"
-        required: true
-        default: "2"
-      orchestrator:
-        description: "Nombre del orquestador que dispara"
-        required: false
 
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    # ====== EDITA AQUÍ FÁCIL ======
+    env:
+      ROW: "2"
+      EXPIRES: "300"
+      LOCK_SECONDS: "300"
+    # ==============================
+
     steps:
-      - name: Mark start (last_run + next_run=+300s)
+      - name: Mark start (gateway start)
         id: start
         shell: bash
         run: |
           set -euo pipefail
-          echo "Triggered by orchestrator=${{ github.event.inputs.orchestrator }}"
-          resp="$(curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
-            -H 'Content-Type: application/json' \
-            -d "$(jq -nc \
-              --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
-              --arg action "start" \
-              --arg workflow "child_test_5m.yml" \
-              --argjson row "${{ github.event.inputs.row }}" \
-              '{key:$key, action:$action, workflow:$workflow, row:$row, lock_seconds:1200}' \
-            )")"
-          echo "$resp" > start.json
-          echo "last_run=$(jq -r .last_run start.json)" >> "$GITHUB_OUTPUT"
+
+          row="${ROW}"
+          expires="${EXPIRES}"
+          lock="${LOCK_SECONDS}"
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          payload="$(jq -nc \
+            --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
+            --arg action "start" \
+            --argjson row "${row}" \
+            --argjson expires "${expires}" \
+            --argjson lock_seconds "${lock}" \
+            --arg now "${now}" \
+            '{key:$key, action:$action, row:$row, expires:$expires, lock_seconds:$lock_seconds, now:$now}' \
+          )"
+
+          echo "GATEWAY_START_PAYLOAD=$payload"
+
+          # Ejecuta request y captura:
+          # - body en resp_body.txt
+          # - headers en resp_headers.txt
+          # - http code en http_code
+          http_code="$(
+            curl -sS --location --post301 --post302 --post303 \
+              -D resp_headers.txt \
+              -o resp_body.txt \
+              -H 'Content-Type: application/json' \
+              -H 'Accept: application/json' \
+              -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
+              --data-binary "$payload" \
+              -w "%{http_code}"
+          )"
+
+          echo "GATEWAY_START_HTTP_CODE=$http_code"
+          content_type="$(awk -F': ' 'BEGIN{IGNORECASE=1} $1=="content-type"{print $2}' resp_headers.txt | tail -n 1 | tr -d '\r')"
+          echo "GATEWAY_START_CONTENT_TYPE=${content_type:-unknown}"
+
+          resp="$(cat resp_body.txt)"
+          echo "GATEWAY_START_RESPONSE=$resp"
+
+          # Si no es 200, explica y falla
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "Gateway start failed: HTTP $http_code"
+            exit 1
+          fi
+
+          # Si no parece JSON, explica y falla (evita jq parse error opaco)
+          if ! echo "$resp" | jq -e . >/dev/null 2>&1; then
+            echo "Gateway start did not return JSON. Check SHEET_GATEWAY_URL (must be /exec web app URL)."
+            exit 1
+          fi
+
+          ok="$(echo "$resp" | jq -r '.ok // false')"
+          if [ "$ok" != "true" ]; then
+            echo "Gateway start returned ok=false: $resp"
+            exit 1
+          fi
+
+          echo "row=${row}" >> "$GITHUB_OUTPUT"
+          echo "expires=${expires}" >> "$GITHUB_OUTPUT"
 
       - name: Do work (test)
         run: |
           echo "Hello from child_test_5m"
           sleep 2
 
-      - name: Mark end (set final next_run)
+      - name: Mark end (gateway end; next_run = now + expires)
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          last_run="${{ steps.start.outputs.last_run }}"
-          if [ -z "${last_run:-}" ] || [ "${last_run}" = "null" ]; then
-            last_run="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          fi
-          next_run="$(date -u -d "${last_run} + 300 seconds" +%Y-%m-%dT%H:%M:%SZ)"
+
+          row="${{ steps.start.outputs.row }}"
+          expires="${{ steps.start.outputs.expires }}"
+          if [ -z "${row:-}" ]; then row="${ROW}"; fi
+          if [ -z "${expires:-}" ]; then expires="${EXPIRES}"; fi
+
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          next_run="$(date -u -d "${now} + ${expires} seconds" +%Y-%m-%dT%H:%M:%SZ)"
+
+          status="completed"
           conclusion="${{ job.status }}"
 
-          curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
-            -H 'Content-Type: application/json' \
-            -d "$(jq -nc \
-              --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
-              --arg action "end" \
-              --arg workflow "child_test_5m.yml" \
-              --argjson row "${{ github.event.inputs.row }}" \
-              --arg status "completed" \
-              --arg conclusion "${conclusion}" \
-              --arg next_run "${next_run}" \
-              '{key:$key, action:$action, workflow:$workflow, row:$row, status:$status, conclusion:$conclusion, next_run:$next_run}' \
-            )" >/dev/null
+          payload2="$(jq -nc \
+            --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
+            --arg action "end" \
+            --argjson row "${row}" \
+            --argjson expires "${expires}" \
+            --arg status "${status}" \
+            --arg conclusion "${conclusion}" \
+            --arg now "${now}" \
+            --arg next_run "${next_run}" \
+            '{key:$key, action:$action, row:$row, expires:$expires, status:$status, conclusion:$conclusion, now:$now, next_run:$next_run}' \
+          )"
+
+          echo "GATEWAY_END_PAYLOAD=$payload2"
+
+          http_code2="$(
+            curl -sS --location --post301 --post302 --post303 \
+              -D resp2_headers.txt \
+              -o resp2_body.txt \
+              -H 'Content-Type: application/json' \
+              -H 'Accept: application/json' \
+              -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
+              --data-binary "$payload2" \
+              -w "%{http_code}"
+          )"
+
+          echo "GATEWAY_END_HTTP_CODE=$http_code2"
+          content_type2="$(awk -F': 'BEGIN{IGNORECASE=1} $1=="content-type"{print $2}' resp2_headers.txt | tail -n 1 | tr -d '\r')"
+          echo "GATEWAY_END_CONTENT_TYPE=${content_type2:-unknown}"
+
+          resp2="$(cat resp2_body.txt)"
+          echo "GATEWAY_END_RESPONSE=$resp2"
+
+          if [ "$http_code2" -lt 200 ] || [ "$http_code2" -ge 300 ]; then
+            echo "Gateway end failed: HTTP $http_code2"
+            exit 1
+          fi
+
+          if ! echo "$resp2" | jq -e . >/dev/null 2>&1; then
+            echo "Gateway end did not return JSON. Check SHEET_GATEWAY_URL (must be /exec web app URL)."
+            exit 1
+          fi
+
+          ok2="$(echo "$resp2" | jq -r '.ok // false')"
+          if [ "$ok2" != "true" ]; then
+            echo "Gateway end returned ok=false: $resp2"
+            exit 1
+          fi
