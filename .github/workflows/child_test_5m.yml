@@ -15,7 +15,7 @@ jobs:
     # ==============================
 
     steps:
-      - name: Mark start (C last_run, D lock_until, E in_progress)
+      - name: Mark start (gateway start)
         id: start
         shell: bash
         run: |
@@ -38,31 +38,32 @@ jobs:
 
           echo "GATEWAY_START_PAYLOAD=$payload"
 
-          resp="$(curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
+          # -L/--location: sigue redirects
+          # --post30x: mantiene POST tras 301/302/303
+          resp="$(curl -sS --location --post301 --post302 --post303 \
             -H 'Content-Type: application/json' \
-            -d "$payload" \
-          )"
+            -H 'Accept: application/json' \
+            -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
+            -d "$payload")"
 
           echo "GATEWAY_START_RESPONSE=$resp"
-          echo "$resp" > start.json
 
+          # Validar JSON + ok:true (si resp es HTML, jq fallará y el step fallará)
           ok="$(echo "$resp" | jq -r '.ok // false')"
           if [ "$ok" != "true" ]; then
             echo "Gateway start failed"
             exit 1
           fi
 
-          # Exponer outputs por si quieres usarlos más adelante
           echo "row=${row}" >> "$GITHUB_OUTPUT"
           echo "expires=${expires}" >> "$GITHUB_OUTPUT"
-          echo "start_now=$(echo "$resp" | jq -r '.now // empty')" >> "$GITHUB_OUTPUT"
 
       - name: Do work (test)
         run: |
           echo "Hello from child_test_5m"
           sleep 2
 
-      - name: Mark end (G next_run = now + expires)
+      - name: Mark end (gateway end; next_run = now + expires)
         if: always()
         shell: bash
         run: |
@@ -93,10 +94,11 @@ jobs:
 
           echo "GATEWAY_END_PAYLOAD=$payload2"
 
-          resp2="$(curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
+          resp2="$(curl -sS --location --post301 --post302 --post303 \
             -H 'Content-Type: application/json' \
-            -d "$payload2" \
-          )"
+            -H 'Accept: application/json' \
+            -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
+            -d "$payload2")"
 
           echo "GATEWAY_END_RESPONSE=$resp2"
 
