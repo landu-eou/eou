@@ -2,108 +2,63 @@ name: child_test_5m
 
 on:
   workflow_dispatch:
+    inputs:
+      row:
+        description: "Fila en el sheet 'workflows'"
+        required: true
+        default: "2"
+      orchestrator:
+        description: "Nombre del orquestador que dispara"
+        required: false
 
 jobs:
   test:
     runs-on: ubuntu-latest
-
-    # ====== EDITA AQUÍ FÁCIL ======
-    env:
-      ROW: "2"            # Fila del tab 'workflows' que controla este child
-      EXPIRES: "300"      # Segundos. next_run FINAL = now + EXPIRES
-      LOCK_SECONDS: "300" # Segundos. lock_until = now + LOCK_SECONDS (anti-solape)
-    # ==============================
-
     steps:
-      - name: Mark start (gateway start)
+      - name: Mark start (last_run + next_run=+300s)
         id: start
         shell: bash
         run: |
           set -euo pipefail
-
-          row="${ROW}"
-          expires="${EXPIRES}"
-          lock="${LOCK_SECONDS}"
-          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-          payload="$(jq -nc \
-            --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
-            --arg action "start" \
-            --argjson row "${row}" \
-            --argjson expires "${expires}" \
-            --argjson lock_seconds "${lock}" \
-            --arg now "${now}" \
-            '{key:$key, action:$action, row:$row, expires:$expires, lock_seconds:$lock_seconds, now:$now}' \
-          )"
-
-          echo "GATEWAY_START_PAYLOAD=$payload"
-
-          # -L/--location: sigue redirects
-          # --post30x: mantiene POST tras 301/302/303
-          resp="$(curl -sS --location --post301 --post302 --post303 \
+          echo "Triggered by orchestrator=${{ github.event.inputs.orchestrator }}"
+          resp="$(curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
             -H 'Content-Type: application/json' \
-            -H 'Accept: application/json' \
-            -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
-            -d "$payload")"
-
-          echo "GATEWAY_START_RESPONSE=$resp"
-
-          # Validar JSON + ok:true (si resp es HTML, jq fallará y el step fallará)
-          ok="$(echo "$resp" | jq -r '.ok // false')"
-          if [ "$ok" != "true" ]; then
-            echo "Gateway start failed"
-            exit 1
-          fi
-
-          echo "row=${row}" >> "$GITHUB_OUTPUT"
-          echo "expires=${expires}" >> "$GITHUB_OUTPUT"
+            -d "$(jq -nc \
+              --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
+              --arg action "start" \
+              --arg workflow "child_test_5m.yml" \
+              --argjson row "${{ github.event.inputs.row }}" \
+              '{key:$key, action:$action, workflow:$workflow, row:$row, lock_seconds:1200}' \
+            )")"
+          echo "$resp" > start.json
+          echo "last_run=$(jq -r .last_run start.json)" >> "$GITHUB_OUTPUT"
 
       - name: Do work (test)
         run: |
           echo "Hello from child_test_5m"
           sleep 2
 
-      - name: Mark end (gateway end; next_run = now + expires)
+      - name: Mark end (set final next_run)
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-
-          row="${{ steps.start.outputs.row }}"
-          expires="${{ steps.start.outputs.expires }}"
-          if [ -z "${row:-}" ]; then row="${ROW}"; fi
-          if [ -z "${expires:-}" ]; then expires="${EXPIRES}"; fi
-
-          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          next_run="$(date -u -d "${now} + ${expires} seconds" +%Y-%m-%dT%H:%M:%SZ)"
-
-          status="completed"
-          conclusion="${{ job.status }}"  # success|failure|cancelled
-
-          payload2="$(jq -nc \
-            --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
-            --arg action "end" \
-            --argjson row "${row}" \
-            --argjson expires "${expires}" \
-            --arg status "${status}" \
-            --arg conclusion "${conclusion}" \
-            --arg now "${now}" \
-            --arg next_run "${next_run}" \
-            '{key:$key, action:$action, row:$row, expires:$expires, status:$status, conclusion:$conclusion, now:$now, next_run:$next_run}' \
-          )"
-
-          echo "GATEWAY_END_PAYLOAD=$payload2"
-
-          resp2="$(curl -sS --location --post301 --post302 --post303 \
-            -H 'Content-Type: application/json' \
-            -H 'Accept: application/json' \
-            -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
-            -d "$payload2")"
-
-          echo "GATEWAY_END_RESPONSE=$resp2"
-
-          ok2="$(echo "$resp2" | jq -r '.ok // false')"
-          if [ "$ok2" != "true" ]; then
-            echo "Gateway end failed"
-            exit 1
+          last_run="${{ steps.start.outputs.last_run }}"
+          if [ -z "${last_run:-}" ] || [ "${last_run}" = "null" ]; then
+            last_run="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           fi
+          next_run="$(date -u -d "${last_run} + 300 seconds" +%Y-%m-%dT%H:%M:%SZ)"
+          conclusion="${{ job.status }}"
+
+          curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -nc \
+              --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
+              --arg action "end" \
+              --arg workflow "child_test_5m.yml" \
+              --argjson row "${{ github.event.inputs.row }}" \
+              --arg status "completed" \
+              --arg conclusion "${conclusion}" \
+              --arg next_run "${next_run}" \
+              '{key:$key, action:$action, workflow:$workflow, row:$row, status:$status, conclusion:$conclusion, next_run:$next_run}' \
+            )" >/dev/null
