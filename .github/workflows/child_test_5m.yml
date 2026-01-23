@@ -2,63 +2,77 @@ name: child_test_5m
 
 on:
   workflow_dispatch:
-    inputs:
-      row:
-        description: "Fila en el sheet 'workflows'"
-        required: true
-        default: "2"
-      orchestrator:
-        description: "Nombre del orquestador que dispara"
-        required: false
 
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    # ====== FÁCIL DE EDITAR POR EL USUARIO ======
+    env:
+      WORKFLOW_ROW: "2"       # Fila fija (workflows row 2)
+      EXPIRES: "300"          # Segundos
+      LOCK_SECONDS: "1200"    # Anti-solape (segundos)
+    # ===========================================
+
     steps:
-      - name: Mark start (last_run + next_run=+300s)
+      - name: Mark start (C=last_run, D=lock_until, E=in_progress)
         id: start
         shell: bash
         run: |
           set -euo pipefail
-          echo "Triggered by orchestrator=${{ github.event.inputs.orchestrator }}"
+          row="${WORKFLOW_ROW}"
+          expires="${EXPIRES}"
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          # NOTA: No enviamos "workflow". El gateway debe leerlo del sheet (col A, fila=row).
           resp="$(curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
             -H 'Content-Type: application/json' \
             -d "$(jq -nc \
               --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
               --arg action "start" \
-              --arg workflow "child_test_5m.yml" \
-              --argjson row "${{ github.event.inputs.row }}" \
-              '{key:$key, action:$action, workflow:$workflow, row:$row, lock_seconds:1200}' \
+              --argjson row "${row}" \
+              --argjson expires "${expires}" \
+              --argjson lock_seconds "${LOCK_SECONDS}" \
+              --arg now "${now}" \
+              '{key:$key, action:$action, row:$row, expires:$expires, lock_seconds:$lock_seconds, now:$now}' \
             )")"
+
           echo "$resp" > start.json
-          echo "last_run=$(jq -r .last_run start.json)" >> "$GITHUB_OUTPUT"
+          echo "row=${row}" >> "$GITHUB_OUTPUT"
+          echo "expires=${expires}" >> "$GITHUB_OUTPUT"
 
       - name: Do work (test)
         run: |
           echo "Hello from child_test_5m"
           sleep 2
 
-      - name: Mark end (set final next_run)
+      - name: Mark end (G=next_run = now + expires)
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          last_run="${{ steps.start.outputs.last_run }}"
-          if [ -z "${last_run:-}" ] || [ "${last_run}" = "null" ]; then
-            last_run="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          fi
-          next_run="$(date -u -d "${last_run} + 300 seconds" +%Y-%m-%dT%H:%M:%SZ)"
-          conclusion="${{ job.status }}"
+          row="${{ steps.start.outputs.row }}"
+          expires="${{ steps.start.outputs.expires }}"
+          if [ -z "${row:-}" ]; then row="${WORKFLOW_ROW}"; fi
+          if [ -z "${expires:-}" ]; then expires="${EXPIRES}"; fi
 
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          next_run="$(date -u -d "${now} + ${expires} seconds" +%Y-%m-%dT%H:%M:%SZ)"
+
+          conclusion="${{ job.status }}"  # success|failure|cancelled
+          status="completed"
+
+          # NOTA: No enviamos "workflow". El gateway debe leerlo del sheet (col A, fila=row).
           curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
             -H 'Content-Type: application/json' \
             -d "$(jq -nc \
               --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
               --arg action "end" \
-              --arg workflow "child_test_5m.yml" \
-              --argjson row "${{ github.event.inputs.row }}" \
-              --arg status "completed" \
+              --argjson row "${row}" \
+              --argjson expires "${expires}" \
+              --arg status "${status}" \
               --arg conclusion "${conclusion}" \
+              --arg now "${now}" \
               --arg next_run "${next_run}" \
-              '{key:$key, action:$action, workflow:$workflow, row:$row, status:$status, conclusion:$conclusion, next_run:$next_run}' \
+              '{key:$key, action:$action, row:$row, expires:$expires, status:$status, conclusion:$conclusion, now:$now, next_run:$next_run}' \
             )" >/dev/null
