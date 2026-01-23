@@ -7,72 +7,101 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
-    # ====== FÁCIL DE EDITAR POR EL USUARIO ======
+    # ====== EDITA AQUÍ FÁCIL ======
     env:
-      WORKFLOW_ROW: "2"       # Fila fija (workflows row 2)
-      EXPIRES: "300"          # Segundos
-      LOCK_SECONDS: "300"    # Anti-solape (segundos)
-    # ===========================================
+      ROW: "2"            # Fila del tab 'workflows' que controla este child
+      EXPIRES: "300"      # Segundos. next_run FINAL = now + EXPIRES
+      LOCK_SECONDS: "300" # Segundos. lock_until = now + LOCK_SECONDS (anti-solape)
+    # ==============================
 
     steps:
-      - name: Mark start (C=last_run, D=lock_until, E=in_progress)
+      - name: Mark start (C last_run, D lock_until, E in_progress)
         id: start
         shell: bash
         run: |
           set -euo pipefail
-          row="${WORKFLOW_ROW}"
+
+          row="${ROW}"
           expires="${EXPIRES}"
+          lock="${LOCK_SECONDS}"
           now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-          # NOTA: No enviamos "workflow". El gateway debe leerlo del sheet (col A, fila=row).
+          payload="$(jq -nc \
+            --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
+            --arg action "start" \
+            --argjson row "${row}" \
+            --argjson expires "${expires}" \
+            --argjson lock_seconds "${lock}" \
+            --arg now "${now}" \
+            '{key:$key, action:$action, row:$row, expires:$expires, lock_seconds:$lock_seconds, now:$now}' \
+          )"
+
+          echo "GATEWAY_START_PAYLOAD=$payload"
+
           resp="$(curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
             -H 'Content-Type: application/json' \
-            -d "$(jq -nc \
-              --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
-              --arg action "start" \
-              --argjson row "${row}" \
-              --argjson expires "${expires}" \
-              --argjson lock_seconds "${LOCK_SECONDS}" \
-              --arg now "${now}" \
-              '{key:$key, action:$action, row:$row, expires:$expires, lock_seconds:$lock_seconds, now:$now}' \
-            )")"
+            -d "$payload" \
+          )"
 
+          echo "GATEWAY_START_RESPONSE=$resp"
           echo "$resp" > start.json
+
+          ok="$(echo "$resp" | jq -r '.ok // false')"
+          if [ "$ok" != "true" ]; then
+            echo "Gateway start failed"
+            exit 1
+          fi
+
+          # Exponer outputs por si quieres usarlos más adelante
           echo "row=${row}" >> "$GITHUB_OUTPUT"
           echo "expires=${expires}" >> "$GITHUB_OUTPUT"
+          echo "start_now=$(echo "$resp" | jq -r '.now // empty')" >> "$GITHUB_OUTPUT"
 
       - name: Do work (test)
         run: |
           echo "Hello from child_test_5m"
           sleep 2
 
-      - name: Mark end (G=next_run = now + expires)
+      - name: Mark end (G next_run = now + expires)
         if: always()
         shell: bash
         run: |
           set -euo pipefail
+
           row="${{ steps.start.outputs.row }}"
           expires="${{ steps.start.outputs.expires }}"
-          if [ -z "${row:-}" ]; then row="${WORKFLOW_ROW}"; fi
+          if [ -z "${row:-}" ]; then row="${ROW}"; fi
           if [ -z "${expires:-}" ]; then expires="${EXPIRES}"; fi
 
           now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           next_run="$(date -u -d "${now} + ${expires} seconds" +%Y-%m-%dT%H:%M:%SZ)"
 
-          conclusion="${{ job.status }}"  # success|failure|cancelled
           status="completed"
+          conclusion="${{ job.status }}"  # success|failure|cancelled
 
-          # NOTA: No enviamos "workflow". El gateway debe leerlo del sheet (col A, fila=row).
-          curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
+          payload2="$(jq -nc \
+            --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
+            --arg action "end" \
+            --argjson row "${row}" \
+            --argjson expires "${expires}" \
+            --arg status "${status}" \
+            --arg conclusion "${conclusion}" \
+            --arg now "${now}" \
+            --arg next_run "${next_run}" \
+            '{key:$key, action:$action, row:$row, expires:$expires, status:$status, conclusion:$conclusion, now:$now, next_run:$next_run}' \
+          )"
+
+          echo "GATEWAY_END_PAYLOAD=$payload2"
+
+          resp2="$(curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
             -H 'Content-Type: application/json' \
-            -d "$(jq -nc \
-              --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
-              --arg action "end" \
-              --argjson row "${row}" \
-              --argjson expires "${expires}" \
-              --arg status "${status}" \
-              --arg conclusion "${conclusion}" \
-              --arg now "${now}" \
-              --arg next_run "${next_run}" \
-              '{key:$key, action:$action, row:$row, expires:$expires, status:$status, conclusion:$conclusion, now:$now, next_run:$next_run}' \
-            )" >/dev/null
+            -d "$payload2" \
+          )"
+
+          echo "GATEWAY_END_RESPONSE=$resp2"
+
+          ok2="$(echo "$resp2" | jq -r '.ok // false')"
+          if [ "$ok2" != "true" ]; then
+            echo "Gateway end failed"
+            exit 1
+          fi
