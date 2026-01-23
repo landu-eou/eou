@@ -9,9 +9,9 @@ jobs:
 
     # ====== EDITA AQUÍ FÁCIL ======
     env:
-      ROW: "2"
-      EXPIRES: "300"
-      LOCK_SECONDS: "300"
+      ROW: "2"            # Fila del tab 'workflows'
+      EXPIRES: "300"      # Segundos. next_run FINAL = now + EXPIRES
+      LOCK_SECONDS: "300" # Segundos. lock_until = now + LOCK_SECONDS
     # ==============================
 
     steps:
@@ -20,6 +20,48 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          call_gateway() {
+            local url="$1"
+            local payload="$2"
+
+            # 1) Primer POST sin seguir redirects: capturamos headers/body
+            local code
+            code="$(curl -sS \
+              -D /tmp/h.txt -o /tmp/b.txt \
+              -H 'Content-Type: application/json' \
+              -H 'Accept: application/json' \
+              -X POST "${url}" \
+              --data-binary "${payload}" \
+              -w "%{http_code}")"
+
+            # Si es 302/303, extraemos Location y reenviamos POST ahí
+            if [ "${code}" = "302" ] || [ "${code}" = "303" ]; then
+              local loc
+              loc="$(awk -F': ' 'BEGIN{IGNORECASE=1} $1=="location"{print $2}' /tmp/h.txt | tail -n 1 | tr -d '\r')"
+              if [ -z "${loc}" ]; then
+                echo "ERROR: redirect without Location header"
+                cat /tmp/h.txt
+                return 1
+              fi
+
+              # 2) Segundo POST a la Location (normalmente script.googleusercontent.com)
+              code="$(curl -sS \
+                -D /tmp/h2.txt -o /tmp/b2.txt \
+                -H 'Content-Type: application/json' \
+                -H 'Accept: application/json' \
+                -X POST "${loc}" \
+                --data-binary "${payload}" \
+                -w "%{http_code}")"
+
+              echo "HTTP=${code}"
+              cat /tmp/b2.txt
+              return 0
+            fi
+
+            echo "HTTP=${code}"
+            cat /tmp/b.txt
+          }
 
           row="${ROW}"
           expires="${EXPIRES}"
@@ -38,43 +80,28 @@ jobs:
 
           echo "GATEWAY_START_PAYLOAD=$payload"
 
-          # Ejecuta request y captura:
-          # - body en resp_body.txt
-          # - headers en resp_headers.txt
-          # - http code en http_code
-          http_code="$(
-            curl -sS --location --post301 --post302 --post303 \
-              -D resp_headers.txt \
-              -o resp_body.txt \
-              -H 'Content-Type: application/json' \
-              -H 'Accept: application/json' \
-              -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
-              --data-binary "$payload" \
-              -w "%{http_code}"
-          )"
+          resp="$(call_gateway "${{ secrets.SHEET_GATEWAY_URL }}?api=1" "${payload}")"
+          echo "GATEWAY_START_RAW=$resp"
 
-          echo "GATEWAY_START_HTTP_CODE=$http_code"
-          content_type="$(awk -F': ' 'BEGIN{IGNORECASE=1} $1=="content-type"{print $2}' resp_headers.txt | tail -n 1 | tr -d '\r')"
-          echo "GATEWAY_START_CONTENT_TYPE=${content_type:-unknown}"
+          http_code="$(echo "$resp" | head -n 1 | sed 's/^HTTP=//')"
+          body="$(echo "$resp" | tail -n +2)"
 
-          resp="$(cat resp_body.txt)"
-          echo "GATEWAY_START_RESPONSE=$resp"
+          echo "GATEWAY_START_HTTP_CODE=${http_code}"
+          echo "GATEWAY_START_BODY=${body}"
 
-          # Si no es 200, explica y falla
-          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-            echo "Gateway start failed: HTTP $http_code"
+          if [ -z "${http_code}" ] || [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 300 ]; then
+            echo "Gateway start failed: HTTP ${http_code}"
             exit 1
           fi
 
-          # Si no parece JSON, explica y falla (evita jq parse error opaco)
-          if ! echo "$resp" | jq -e . >/dev/null 2>&1; then
-            echo "Gateway start did not return JSON. Check SHEET_GATEWAY_URL (must be /exec web app URL)."
+          if ! echo "$body" | jq -e . >/dev/null 2>&1; then
+            echo "Gateway start did not return JSON. This usually means wrong deployment access or wrong URL."
             exit 1
           fi
 
-          ok="$(echo "$resp" | jq -r '.ok // false')"
+          ok="$(echo "$body" | jq -r '.ok // false')"
           if [ "$ok" != "true" ]; then
-            echo "Gateway start returned ok=false: $resp"
+            echo "Gateway start returned ok=false: $body"
             exit 1
           fi
 
@@ -92,6 +119,45 @@ jobs:
         run: |
           set -euo pipefail
 
+          call_gateway() {
+            local url="$1"
+            local payload="$2"
+
+            local code
+            code="$(curl -sS \
+              -D /tmp/h.txt -o /tmp/b.txt \
+              -H 'Content-Type: application/json' \
+              -H 'Accept: application/json' \
+              -X POST "${url}" \
+              --data-binary "${payload}" \
+              -w "%{http_code}")"
+
+            if [ "${code}" = "302" ] || [ "${code}" = "303" ]; then
+              local loc
+              loc="$(awk -F': 'BEGIN{IGNORECASE=1} $1=="location"{print $2}' /tmp/h.txt | tail -n 1 | tr -d '\r')"
+              if [ -z "${loc}" ]; then
+                echo "ERROR: redirect without Location header"
+                cat /tmp/h.txt
+                return 1
+              fi
+
+              code="$(curl -sS \
+                -D /tmp/h2.txt -o /tmp/b2.txt \
+                -H 'Content-Type: application/json' \
+                -H 'Accept: application/json' \
+                -X POST "${loc}" \
+                --data-binary "${payload}" \
+                -w "%{http_code}")"
+
+              echo "HTTP=${code}"
+              cat /tmp/b2.txt
+              return 0
+            fi
+
+            echo "HTTP=${code}"
+            cat /tmp/b.txt
+          }
+
           row="${{ steps.start.outputs.row }}"
           expires="${{ steps.start.outputs.expires }}"
           if [ -z "${row:-}" ]; then row="${ROW}"; fi
@@ -101,7 +167,7 @@ jobs:
           next_run="$(date -u -d "${now} + ${expires} seconds" +%Y-%m-%dT%H:%M:%SZ)"
 
           status="completed"
-          conclusion="${{ job.status }}"
+          conclusion="${{ job.status }}"  # success|failure|cancelled
 
           payload2="$(jq -nc \
             --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
@@ -117,36 +183,27 @@ jobs:
 
           echo "GATEWAY_END_PAYLOAD=$payload2"
 
-          http_code2="$(
-            curl -sS --location --post301 --post302 --post303 \
-              -D resp2_headers.txt \
-              -o resp2_body.txt \
-              -H 'Content-Type: application/json' \
-              -H 'Accept: application/json' \
-              -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
-              --data-binary "$payload2" \
-              -w "%{http_code}"
-          )"
+          resp2="$(call_gateway "${{ secrets.SHEET_GATEWAY_URL }}?api=1" "${payload2}")"
+          echo "GATEWAY_END_RAW=$resp2"
 
-          echo "GATEWAY_END_HTTP_CODE=$http_code2"
-          content_type2="$(awk -F': 'BEGIN{IGNORECASE=1} $1=="content-type"{print $2}' resp2_headers.txt | tail -n 1 | tr -d '\r')"
-          echo "GATEWAY_END_CONTENT_TYPE=${content_type2:-unknown}"
+          http_code2="$(echo "$resp2" | head -n 1 | sed 's/^HTTP=//')"
+          body2="$(echo "$resp2" | tail -n +2)"
 
-          resp2="$(cat resp2_body.txt)"
-          echo "GATEWAY_END_RESPONSE=$resp2"
+          echo "GATEWAY_END_HTTP_CODE=${http_code2}"
+          echo "GATEWAY_END_BODY=${body2}"
 
-          if [ "$http_code2" -lt 200 ] || [ "$http_code2" -ge 300 ]; then
-            echo "Gateway end failed: HTTP $http_code2"
+          if [ -z "${http_code2}" ] || [ "${http_code2}" -lt 200 ] || [ "${http_code2}" -ge 300 ]; then
+            echo "Gateway end failed: HTTP ${http_code2}"
             exit 1
           fi
 
-          if ! echo "$resp2" | jq -e . >/dev/null 2>&1; then
-            echo "Gateway end did not return JSON. Check SHEET_GATEWAY_URL (must be /exec web app URL)."
+          if ! echo "$body2" | jq -e . >/dev/null 2>&1; then
+            echo "Gateway end did not return JSON. This usually means wrong deployment access or wrong URL."
             exit 1
           fi
 
-          ok2="$(echo "$resp2" | jq -r '.ok // false')"
+          ok2="$(echo "$body2" | jq -r '.ok // false')"
           if [ "$ok2" != "true" ]; then
-            echo "Gateway end returned ok=false: $resp2"
+            echo "Gateway end returned ok=false: $body2"
             exit 1
           fi
