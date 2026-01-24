@@ -26,13 +26,16 @@ jobs:
         run: |
           set -euo pipefail
           NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
           BODY=$(jq -nc \
             --arg workflow_id "$WORKFLOW_ID" \
             --argjson row "$SHEET_ROW" \
             --arg phase "start" \
             --argjson expires "$EXPIRES" \
             --argjson lock_seconds "$LOCK_SECONDS" \
-            '{workflow_id:$workflow_id,row:$row,phase:$phase,expires:$expires,lock_seconds:$lock_seconds,now:$NOW}')
+            --arg now "$NOW" \
+            '{workflow_id:$workflow_id,row:$row,phase:$phase,expires:$expires,lock_seconds:$lock_seconds,now:$now}')
+
           SIG=$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')
           RESP=$(curl -sS -X POST "${GATEWAY_URL}?sig=${SIG}" -H "Content-Type: application/json" -d "$BODY")
           echo "resp=$RESP" >> "$GITHUB_OUTPUT"
@@ -59,7 +62,6 @@ jobs:
           GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
         run: |
           set -euo pipefail
-          # job.status -> success|failure|cancelled
           STATUS="${{ job.status }}"
           case "$STATUS" in
             success) CONCLUSION="success" ;;
@@ -67,7 +69,9 @@ jobs:
             cancelled) CONCLUSION="cancelled" ;;
             *) CONCLUSION="neutral" ;;
           esac
+
           NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
           BODY=$(jq -nc \
             --arg workflow_id "$WORKFLOW_ID" \
             --argjson row "$SHEET_ROW" \
@@ -75,6 +79,8 @@ jobs:
             --arg conclusion "$CONCLUSION" \
             --argjson expires "$EXPIRES" \
             --argjson lock_seconds "$LOCK_SECONDS" \
-            '{workflow_id:$workflow_id,row:$row,phase:$phase,conclusion:$conclusion,expires:$expires,lock_seconds:$lock_seconds,now:$NOW}')
+            --arg now "$NOW" \
+            '{workflow_id:$workflow_id,row:$row,phase:$phase,conclusion:$conclusion,expires:$expires,lock_seconds:$lock_seconds,now:$now}')
+
           SIG=$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')
           curl -sS -X POST "${GATEWAY_URL}?sig=${SIG}" -H "Content-Type: application/json" -d "$BODY" >/dev/null
