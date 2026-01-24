@@ -3,207 +3,66 @@ name: child_test_5m
 on:
   workflow_dispatch:
 
+# ====== FÁCIL DE EDITAR POR EL USUARIO ======
+env:
+  WORKFLOW_ID: child_test_5m.yml
+  ROW: "2"
+  EXPIRES: "300"         # segundos: next_run_final = now + expires
+  LOCK_SECONDS: "1200"   # evita solapes durante ~20 min
+
 jobs:
   test:
     runs-on: ubuntu-latest
-
-    # ====== EDITA AQUÍ FÁCIL ======
-    env:
-      ROW: "2"            # Fila del tab 'workflows'
-      EXPIRES: "300"      # Segundos. next_run FINAL = now + EXPIRES
-      LOCK_SECONDS: "300" # Segundos. lock_until = now + LOCK_SECONDS
-    # ==============================
-
     steps:
-      - name: Mark start (gateway start)
+      - name: Mark start (set last_run + lock_until + status=in_progress)
         id: start
         shell: bash
         run: |
           set -euo pipefail
 
-          call_gateway() {
-            local url="$1"
-            local payload="$2"
+          resp="$(curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -nc \
+              --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
+              --arg action "start" \
+              --arg workflow "${WORKFLOW_ID}" \
+              --argjson row "${ROW}" \
+              --argjson expires "${EXPIRES}" \
+              --argjson lock_seconds "${LOCK_SECONDS}" \
+              '{key:$key, action:$action, workflow:$workflow, row:$row, expires:$expires, lock_seconds:$lock_seconds}' \
+            )")"
 
-            # 1) Primer POST sin seguir redirects: capturamos headers/body
-            local code
-            code="$(curl -sS \
-              -D /tmp/h.txt -o /tmp/b.txt \
-              -H 'Content-Type: application/json' \
-              -H 'Accept: application/json' \
-              -X POST "${url}" \
-              --data-binary "${payload}" \
-              -w "%{http_code}")"
-
-            # Si es 302/303, extraemos Location y reenviamos POST ahí
-            if [ "${code}" = "302" ] || [ "${code}" = "303" ]; then
-              local loc
-              loc="$(awk -F': ' 'BEGIN{IGNORECASE=1} $1=="location"{print $2}' /tmp/h.txt | tail -n 1 | tr -d '\r')"
-              if [ -z "${loc}" ]; then
-                echo "ERROR: redirect without Location header"
-                cat /tmp/h.txt
-                return 1
-              fi
-
-              # 2) Segundo POST a la Location (normalmente script.googleusercontent.com)
-              code="$(curl -sS \
-                -D /tmp/h2.txt -o /tmp/b2.txt \
-                -H 'Content-Type: application/json' \
-                -H 'Accept: application/json' \
-                -X POST "${loc}" \
-                --data-binary "${payload}" \
-                -w "%{http_code}")"
-
-              echo "HTTP=${code}"
-              cat /tmp/b2.txt
-              return 0
-            fi
-
-            echo "HTTP=${code}"
-            cat /tmp/b.txt
-          }
-
-          row="${ROW}"
-          expires="${EXPIRES}"
-          lock="${LOCK_SECONDS}"
-          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-          payload="$(jq -nc \
-            --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
-            --arg action "start" \
-            --argjson row "${row}" \
-            --argjson expires "${expires}" \
-            --argjson lock_seconds "${lock}" \
-            --arg now "${now}" \
-            '{key:$key, action:$action, row:$row, expires:$expires, lock_seconds:$lock_seconds, now:$now}' \
-          )"
-
-          echo "GATEWAY_START_PAYLOAD=$payload"
-
-          resp="$(call_gateway "${{ secrets.SHEET_GATEWAY_URL }}?api=1" "${payload}")"
-          echo "GATEWAY_START_RAW=$resp"
-
-          http_code="$(echo "$resp" | head -n 1 | sed 's/^HTTP=//')"
-          body="$(echo "$resp" | tail -n +2)"
-
-          echo "GATEWAY_START_HTTP_CODE=${http_code}"
-          echo "GATEWAY_START_BODY=${body}"
-
-          if [ -z "${http_code}" ] || [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 300 ]; then
-            echo "Gateway start failed: HTTP ${http_code}"
-            exit 1
-          fi
-
-          if ! echo "$body" | jq -e . >/dev/null 2>&1; then
-            echo "Gateway start did not return JSON. This usually means wrong deployment access or wrong URL."
-            exit 1
-          fi
-
-          ok="$(echo "$body" | jq -r '.ok // false')"
-          if [ "$ok" != "true" ]; then
-            echo "Gateway start returned ok=false: $body"
-            exit 1
-          fi
-
-          echo "row=${row}" >> "$GITHUB_OUTPUT"
-          echo "expires=${expires}" >> "$GITHUB_OUTPUT"
+          echo "$resp" > start.json
+          echo "last_run=$(jq -r .last_run start.json)" >> "$GITHUB_OUTPUT"
 
       - name: Do work (test)
         run: |
           echo "Hello from child_test_5m"
           sleep 2
 
-      - name: Mark end (gateway end; next_run = now + expires)
+      - name: Mark end (set conclusion + next_run = now + expires)
         if: always()
         shell: bash
         run: |
           set -euo pipefail
 
-          call_gateway() {
-            local url="$1"
-            local payload="$2"
-
-            local code
-            code="$(curl -sS \
-              -D /tmp/h.txt -o /tmp/b.txt \
-              -H 'Content-Type: application/json' \
-              -H 'Accept: application/json' \
-              -X POST "${url}" \
-              --data-binary "${payload}" \
-              -w "%{http_code}")"
-
-            if [ "${code}" = "302" ] || [ "${code}" = "303" ]; then
-              local loc
-              loc="$(awk -F': 'BEGIN{IGNORECASE=1} $1=="location"{print $2}' /tmp/h.txt | tail -n 1 | tr -d '\r')"
-              if [ -z "${loc}" ]; then
-                echo "ERROR: redirect without Location header"
-                cat /tmp/h.txt
-                return 1
-              fi
-
-              code="$(curl -sS \
-                -D /tmp/h2.txt -o /tmp/b2.txt \
-                -H 'Content-Type: application/json' \
-                -H 'Accept: application/json' \
-                -X POST "${loc}" \
-                --data-binary "${payload}" \
-                -w "%{http_code}")"
-
-              echo "HTTP=${code}"
-              cat /tmp/b2.txt
-              return 0
-            fi
-
-            echo "HTTP=${code}"
-            cat /tmp/b.txt
-          }
-
-          row="${{ steps.start.outputs.row }}"
-          expires="${{ steps.start.outputs.expires }}"
-          if [ -z "${row:-}" ]; then row="${ROW}"; fi
-          if [ -z "${expires:-}" ]; then expires="${EXPIRES}"; fi
-
+          # now (UTC ISO 8601) y next_run_final = now + expires
           now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          next_run="$(date -u -d "${now} + ${expires} seconds" +%Y-%m-%dT%H:%M:%SZ)"
+          next_run="$(date -u -d "${now} + ${EXPIRES} seconds" +%Y-%m-%dT%H:%M:%SZ)"
 
-          status="completed"
-          conclusion="${{ job.status }}"  # success|failure|cancelled
+          # job.status -> success|failure|cancelled
+          conclusion="${{ job.status }}"
 
-          payload2="$(jq -nc \
-            --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
-            --arg action "end" \
-            --argjson row "${row}" \
-            --argjson expires "${expires}" \
-            --arg status "${status}" \
-            --arg conclusion "${conclusion}" \
-            --arg now "${now}" \
-            --arg next_run "${next_run}" \
-            '{key:$key, action:$action, row:$row, expires:$expires, status:$status, conclusion:$conclusion, now:$now, next_run:$next_run}' \
-          )"
-
-          echo "GATEWAY_END_PAYLOAD=$payload2"
-
-          resp2="$(call_gateway "${{ secrets.SHEET_GATEWAY_URL }}?api=1" "${payload2}")"
-          echo "GATEWAY_END_RAW=$resp2"
-
-          http_code2="$(echo "$resp2" | head -n 1 | sed 's/^HTTP=//')"
-          body2="$(echo "$resp2" | tail -n +2)"
-
-          echo "GATEWAY_END_HTTP_CODE=${http_code2}"
-          echo "GATEWAY_END_BODY=${body2}"
-
-          if [ -z "${http_code2}" ] || [ "${http_code2}" -lt 200 ] || [ "${http_code2}" -ge 300 ]; then
-            echo "Gateway end failed: HTTP ${http_code2}"
-            exit 1
-          fi
-
-          if ! echo "$body2" | jq -e . >/dev/null 2>&1; then
-            echo "Gateway end did not return JSON. This usually means wrong deployment access or wrong URL."
-            exit 1
-          fi
-
-          ok2="$(echo "$body2" | jq -r '.ok // false')"
-          if [ "$ok2" != "true" ]; then
-            echo "Gateway end returned ok=false: $body2"
-            exit 1
-          fi
+          curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -nc \
+              --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
+              --arg action "end" \
+              --arg workflow "${WORKFLOW_ID}" \
+              --argjson row "${ROW}" \
+              --argjson expires "${EXPIRES}" \
+              --arg status "completed" \
+              --arg conclusion "${conclusion}" \
+              --arg next_run "${next_run}" \
+              '{key:$key, action:$action, workflow:$workflow, row:$row, expires:$expires, status:$status, conclusion:$conclusion, next_run:$next_run}' \
+            )" >/dev/null
