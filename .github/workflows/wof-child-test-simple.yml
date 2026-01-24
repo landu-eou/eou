@@ -1,0 +1,80 @@
+name: child_test_simple
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    env:
+      WORKFLOW_ID: wf_test_simple_001
+      SHEET_ROW: "2"
+      EXPIRES: "300"
+      LOCK_SECONDS: "650"
+
+    steps:
+      - name: START (lock + last_run)
+        id: start
+        shell: bash
+        env:
+          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
+          GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
+        run: |
+          set -euo pipefail
+          NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          BODY=$(jq -nc \
+            --arg workflow_id "$WORKFLOW_ID" \
+            --argjson row "$SHEET_ROW" \
+            --arg phase "start" \
+            --argjson expires "$EXPIRES" \
+            --argjson lock_seconds "$LOCK_SECONDS" \
+            '{workflow_id:$workflow_id,row:$row,phase:$phase,expires:$expires,lock_seconds:$lock_seconds,now:$NOW}')
+          SIG=$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')
+          RESP=$(curl -sS -X POST "${GATEWAY_URL}?sig=${SIG}" -H "Content-Type: application/json" -d "$BODY")
+          echo "resp=$RESP" >> "$GITHUB_OUTPUT"
+          LOCKED=$(printf "%s" "$RESP" | jq -r '.locked // false')
+          echo "locked=$LOCKED" >> "$GITHUB_OUTPUT"
+
+      - name: Exit fast if locked
+        if: steps.start.outputs.locked == 'true'
+        run: |
+          echo "Already locked; exiting fast."
+          exit 0
+
+      - name: DO WORK (dummy)
+        run: |
+          echo "Doing simple test work..."
+          sleep 3
+          echo "Done."
+
+      - name: FINISH (status/conclusion + next_run)
+        if: always() && steps.start.outputs.locked != 'true'
+        shell: bash
+        env:
+          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
+          GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
+        run: |
+          set -euo pipefail
+          # job.status -> success|failure|cancelled
+          STATUS="${{ job.status }}"
+          case "$STATUS" in
+            success) CONCLUSION="success" ;;
+            failure) CONCLUSION="failure" ;;
+            cancelled) CONCLUSION="cancelled" ;;
+            *) CONCLUSION="neutral" ;;
+          esac
+          NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          BODY=$(jq -nc \
+            --arg workflow_id "$WORKFLOW_ID" \
+            --argjson row "$SHEET_ROW" \
+            --arg phase "finish" \
+            --arg conclusion "$CONCLUSION" \
+            --argjson expires "$EXPIRES" \
+            --argjson lock_seconds "$LOCK_SECONDS" \
+            '{workflow_id:$workflow_id,row:$row,phase:$phase,conclusion:$conclusion,expires:$expires,lock_seconds:$lock_seconds,now:$NOW}')
+          SIG=$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')
+          curl -sS -X POST "${GATEWAY_URL}?sig=${SIG}" -H "Content-Type: application/json" -d "$BODY" >/dev/null
