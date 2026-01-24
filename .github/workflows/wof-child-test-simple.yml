@@ -17,40 +17,18 @@ jobs:
       LOCK_SECONDS: "650"
 
     steps:
-      - name: Show gateway url (masked in logs if secret)
-        shell: bash
-        env:
-          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
-        run: |
-          set -euo pipefail
-          echo "GATEWAY_URL=$GATEWAY_URL"
-          if [[ "$GATEWAY_URL" != https://script.google.com/macros/s/*/exec ]]; then
-            echo "ERROR: GATEWAY_URL must be https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec"
-            exit 1
-          fi
-
-      - name: Preflight GET (must be JSON + service=eou_gateway_webapp)
+      - name: Preflight GET healthcheck
         shell: bash
         env:
           GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
         run: |
           set -euo pipefail
           RESP="$(curl -sS -L "$GATEWAY_URL" || true)"
-          echo "GET first 200 chars:"
           echo "$RESP" | head -c 200 || true
           echo
-          if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
-            echo "ERROR: GET /exec did not return JSON. Wrong URL or not public."
-            exit 1
-          fi
-          SVC="$(echo "$RESP" | jq -r '.service // ""')"
-          if [[ "$SVC" != "eou_gateway_webapp" ]]; then
-            echo "ERROR: /exec is not the gateway (service mismatch). service=$SVC"
-            exit 1
-          fi
-          echo "Preflight OK."
+          echo "$RESP" | jq -e '.service=="eou_gateway_webapp"' >/dev/null
 
-      - name: START (signed POST) + diagnostics
+      - name: START (GET signed payload)
         id: start
         shell: bash
         env:
@@ -70,41 +48,18 @@ jobs:
             '{workflow_id:$workflow_id,row:$row,phase:$phase,expires:$expires,lock_seconds:$lock_seconds,now:$now}')"
 
           SIG="$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-          URL="${GATEWAY_URL}?sig=${SIG}"
 
-          # 1) Capture body + http_code
-          HTTP_CODE="$(curl -sS \
-            --location --post301 --post302 --post303 \
-            --max-redirs 10 \
-            -o /tmp/start_body.txt -w "%{http_code}" \
-            -H "Content-Type: application/json" \
-            -H "Accept: application/json" \
-            --data-binary "$BODY" \
-            "$URL" || true)"
+          # base64url encode BODY (no padding)
+          P="$(printf "%s" "$BODY" | openssl base64 -A | tr '+/' '-_' | tr -d '=')"
 
-          # 2) Capture final effective URL (separate call, no output)
-          FINAL_URL="$(curl -sS \
-            --location --post301 --post302 --post303 \
-            --max-redirs 10 \
-            -o /dev/null -w "%{url_effective}" \
-            -H "Content-Type: application/json" \
-            -H "Accept: application/json" \
-            --data-binary "$BODY" \
-            "$URL" || true)"
+          URL="${GATEWAY_URL}?p=${P}&sig=${SIG}"
 
-          RESP="$(cat /tmp/start_body.txt || true)"
-
-          echo "HTTP_CODE=$HTTP_CODE"
-          echo "FINAL_URL=$FINAL_URL"
-          echo "RESP first 250 chars:"
-          echo "$RESP" | head -c 250 || true
+          RESP="$(curl -sS -L -H "Accept: application/json" "$URL" || true)"
+          echo "RESP first 200:"
+          echo "$RESP" | head -c 200 || true
           echo
 
-          if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
-            echo "ERROR: Gateway did not return JSON on START."
-            exit 1
-          fi
-
+          echo "$RESP" | jq -e . >/dev/null
           LOCKED="$(echo "$RESP" | jq -r '.locked // false')"
           echo "locked=$LOCKED" >> "$GITHUB_OUTPUT"
 
@@ -116,10 +71,9 @@ jobs:
 
       - name: DO WORK (dummy)
         run: |
-          echo "work..."
           sleep 3
 
-      - name: FINISH (signed POST) + diagnostics
+      - name: FINISH (GET signed payload)
         if: always() && steps.start.outputs.locked != 'true'
         shell: bash
         env:
@@ -148,37 +102,13 @@ jobs:
             '{workflow_id:$workflow_id,row:$row,phase:$phase,conclusion:$conclusion,expires:$expires,lock_seconds:$lock_seconds,now:$now}')"
 
           SIG="$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-          URL="${GATEWAY_URL}?sig=${SIG}"
+          P="$(printf "%s" "$BODY" | openssl base64 -A | tr '+/' '-_' | tr -d '=')"
+          URL="${GATEWAY_URL}?p=${P}&sig=${SIG}"
 
-          HTTP_CODE="$(curl -sS \
-            --location --post301 --post302 --post303 \
-            --max-redirs 10 \
-            -o /tmp/finish_body.txt -w "%{http_code}" \
-            -H "Content-Type: application/json" \
-            -H "Accept: application/json" \
-            --data-binary "$BODY" \
-            "$URL" || true)"
-
-          FINAL_URL="$(curl -sS \
-            --location --post301 --post302 --post303 \
-            --max-redirs 10 \
-            -o /dev/null -w "%{url_effective}" \
-            -H "Content-Type: application/json" \
-            -H "Accept: application/json" \
-            --data-binary "$BODY" \
-            "$URL" || true)"
-
-          RESP="$(cat /tmp/finish_body.txt || true)"
-
-          echo "HTTP_CODE=$HTTP_CODE"
-          echo "FINAL_URL=$FINAL_URL"
-          echo "RESP first 250 chars:"
-          echo "$RESP" | head -c 250 || true
+          RESP="$(curl -sS -L -H "Accept: application/json" "$URL" || true)"
+          echo "RESP first 200:"
+          echo "$RESP" | head -c 200 || true
           echo
 
-          if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
-            echo "ERROR: Gateway did not return JSON on FINISH."
-            exit 1
-          fi
-
+          echo "$RESP" | jq -e . >/dev/null
           echo "Finish OK: $(echo "$RESP" | jq -c .)"
