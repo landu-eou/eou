@@ -39,7 +39,7 @@ jobs:
           SIG=$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')
 
           # Llama al gateway
-          RESP="$(curl -sS -X POST "${GATEWAY_URL}?sig=${SIG}" -H "Content-Type: application/json" -d "$BODY" || true)"
+          RESP="$(curl -sSL -X POST "${GATEWAY_URL}?sig=${SIG}" -H "Content-Type: application/json" -d "$BODY" || true)"
 
           # Si NO es JSON, muestra diagnóstico y falla (así lo arreglas rápido)
           if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
@@ -94,7 +94,7 @@ jobs:
             '{workflow_id:$workflow_id,row:$row,phase:$phase,conclusion:$conclusion,expires:$expires,lock_seconds:$lock_seconds,now:$now}')
 
           SIG=$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')
-          RESP="$(curl -sS -X POST "${GATEWAY_URL}?sig=${SIG}" -H "Content-Type: application/json" -d "$BODY" || true)"
+          RESP="$(curl -sSL -X POST "${GATEWAY_URL}?sig=${SIG}" -H "Content-Type: application/json" -d "$BODY" || true)"
 
           if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
             echo "Gateway did not return JSON on finish."
