@@ -3,17 +3,26 @@ name: child_test_5m
 on:
   workflow_dispatch:
 
+# ====== FÁCIL DE EDITAR POR EL USUARIO ======
 env:
+  # Identificador del workflow (debe coincidir con lo que haya en workflows!A2 si lo validas en el gateway)
   WORKFLOW_ID: child_test_5m.yml
+
+  # Fila fija en el tab 'workflows'
   ROW: "2"
+
+  # expires (segundos). next_run final = now + EXPIRES
   EXPIRES: "300"
+
+  # lock_until (segundos). evita solapes mientras corre
   LOCK_SECONDS: "1200"
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Mark start
+      # 1º: CRÍTICO nada más empezar el run
+      - name: Mark start (set last_run + lock_until + status=in_progress)
         id: start
         shell: bash
         run: |
@@ -33,12 +42,14 @@ jobs:
 
           echo "$resp" > start.json
 
-      - name: Do work
+      # ... aquí va la lógica del workflow (muy simple para test)
+      - name: Do work (test)
         run: |
           echo "Hello from child_test_5m"
           sleep 2
 
-      - name: Mark end
+      # 3º: CRÍTICO lo último antes de finalizar (siempre, incluso si falla)
+      - name: Mark end (set final next_run = now + expires)
         if: always()
         shell: bash
         run: |
@@ -46,6 +57,8 @@ jobs:
 
           now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           next_run="$(date -u -d "${now} + ${EXPIRES} seconds" +%Y-%m-%dT%H:%M:%SZ)"
+
+          # job.status -> success|failure|cancelled
           conclusion="${{ job.status }}"
 
           curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
