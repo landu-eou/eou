@@ -17,7 +17,19 @@ jobs:
       LOCK_SECONDS: "650"
 
     steps:
-      - name: START (last_run + lock_until + temp next_run)
+      - name: Validate gateway URL format
+        shell: bash
+        env:
+          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
+        run: |
+          set -euo pipefail
+          echo "GATEWAY_URL=$GATEWAY_URL"
+          if [[ "$GATEWAY_URL" != https://script.google.com/macros/s/*/exec ]]; then
+            echo "ERROR: GATEWAY_URL must be: https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec"
+            exit 1
+          fi
+
+      - name: START
         id: start
         shell: bash
         env:
@@ -38,22 +50,14 @@ jobs:
 
           SIG="$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
 
-          # Capture body + effective URL + code
-          HTTP_CODE="$(curl -sS -L -o /tmp/body.txt -w "%{http_code}" \
+          RESP="$(curl -sS \
+            --location --post301 --post302 --post303 \
             -H "Content-Type: application/json" \
-            -X POST "${GATEWAY_URL}?sig=${SIG}" \
-            -d "$BODY" || true)"
-          FINAL_URL="$(curl -sS -L -o /dev/null -w "%{url_effective}" \
-            -H "Content-Type: application/json" \
-            -X POST "${GATEWAY_URL}?sig=${SIG}" \
-            -d "$BODY" || true)"
-
-          RESP="$(cat /tmp/body.txt || true)"
+            --data-binary "$BODY" \
+            "${GATEWAY_URL}?sig=${SIG}" || true)"
 
           if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
             echo "Gateway did not return JSON."
-            echo "HTTP_CODE=$HTTP_CODE"
-            echo "FINAL_URL=$FINAL_URL"
             echo "First 400 chars:"
             echo "$RESP" | head -c 400 || true
             echo
@@ -73,7 +77,7 @@ jobs:
         run: |
           sleep 3
 
-      - name: FINISH (completed + conclusion + run_ended + final next_run)
+      - name: FINISH
         if: always() && steps.start.outputs.locked != 'true'
         shell: bash
         env:
@@ -103,21 +107,14 @@ jobs:
 
           SIG="$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
 
-          HTTP_CODE="$(curl -sS -L -o /tmp/body2.txt -w "%{http_code}" \
+          RESP="$(curl -sS \
+            --location --post301 --post302 --post303 \
             -H "Content-Type: application/json" \
-            -X POST "${GATEWAY_URL}?sig=${SIG}" \
-            -d "$BODY" || true)"
-          FINAL_URL="$(curl -sS -L -o /dev/null -w "%{url_effective}" \
-            -H "Content-Type: application/json" \
-            -X POST "${GATEWAY_URL}?sig=${SIG}" \
-            -d "$BODY" || true)"
-
-          RESP="$(cat /tmp/body2.txt || true)"
+            --data-binary "$BODY" \
+            "${GATEWAY_URL}?sig=${SIG}" || true)"
 
           if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
             echo "Gateway did not return JSON on finish."
-            echo "HTTP_CODE=$HTTP_CODE"
-            echo "FINAL_URL=$FINAL_URL"
             echo "First 400 chars:"
             echo "$RESP" | head -c 400 || true
             echo
