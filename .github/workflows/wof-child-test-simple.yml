@@ -27,7 +27,6 @@ jobs:
           set -euo pipefail
 
           NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
           BODY="$(jq -nc \
             --arg workflow_id "$WORKFLOW_ID" \
             --argjson row "$SHEET_ROW" \
@@ -39,15 +38,22 @@ jobs:
 
           SIG="$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
 
-          RESP="$(curl -sS -L \
+          # Capture body + effective URL + code
+          HTTP_CODE="$(curl -sS -L -o /tmp/body.txt -w "%{http_code}" \
+            -H "Content-Type: application/json" \
+            -X POST "${GATEWAY_URL}?sig=${SIG}" \
+            -d "$BODY" || true)"
+          FINAL_URL="$(curl -sS -L -o /dev/null -w "%{url_effective}" \
             -H "Content-Type: application/json" \
             -X POST "${GATEWAY_URL}?sig=${SIG}" \
             -d "$BODY" || true)"
 
-          # Must be JSON
+          RESP="$(cat /tmp/body.txt || true)"
+
           if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
             echo "Gateway did not return JSON."
-            echo "GATEWAY_URL must be the GATEWAY Web App /exec URL (not a Sheet/Docs URL)."
+            echo "HTTP_CODE=$HTTP_CODE"
+            echo "FINAL_URL=$FINAL_URL"
             echo "First 400 chars:"
             echo "$RESP" | head -c 400 || true
             echo
@@ -65,9 +71,7 @@ jobs:
 
       - name: DO WORK (dummy)
         run: |
-          echo "Doing simple test work..."
           sleep 3
-          echo "Done."
 
       - name: FINISH (completed + conclusion + run_ended + final next_run)
         if: always() && steps.start.outputs.locked != 'true'
@@ -87,7 +91,6 @@ jobs:
           esac
 
           NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
           BODY="$(jq -nc \
             --arg workflow_id "$WORKFLOW_ID" \
             --argjson row "$SHEET_ROW" \
@@ -100,13 +103,21 @@ jobs:
 
           SIG="$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
 
-          RESP="$(curl -sS -L \
+          HTTP_CODE="$(curl -sS -L -o /tmp/body2.txt -w "%{http_code}" \
+            -H "Content-Type: application/json" \
+            -X POST "${GATEWAY_URL}?sig=${SIG}" \
+            -d "$BODY" || true)"
+          FINAL_URL="$(curl -sS -L -o /dev/null -w "%{url_effective}" \
             -H "Content-Type: application/json" \
             -X POST "${GATEWAY_URL}?sig=${SIG}" \
             -d "$BODY" || true)"
 
+          RESP="$(cat /tmp/body2.txt || true)"
+
           if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
             echo "Gateway did not return JSON on finish."
+            echo "HTTP_CODE=$HTTP_CODE"
+            echo "FINAL_URL=$FINAL_URL"
             echo "First 400 chars:"
             echo "$RESP" | head -c 400 || true
             echo
