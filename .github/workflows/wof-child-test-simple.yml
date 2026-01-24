@@ -17,7 +17,7 @@ jobs:
       LOCK_SECONDS: "650"
 
     steps:
-      - name: Validate gateway URL format
+      - name: Show gateway url (masked in logs if secret)
         shell: bash
         env:
           GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
@@ -29,7 +29,7 @@ jobs:
             exit 1
           fi
 
-      - name: Preflight GET must return JSON service
+      - name: Preflight GET (must be JSON + service=eou_gateway_webapp)
         shell: bash
         env:
           GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
@@ -40,17 +40,17 @@ jobs:
           echo "$RESP" | head -c 200 || true
           echo
           if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
-            echo "ERROR: GET /exec did not return JSON. Deployment is not public or wrong project/deployment."
+            echo "ERROR: GET /exec did not return JSON. Wrong URL or not public."
             exit 1
           fi
           SVC="$(echo "$RESP" | jq -r '.service // ""')"
           if [[ "$SVC" != "eou_gateway_webapp" ]]; then
-            echo "ERROR: This /exec is not the gateway (service mismatch)."
-            echo "service=$SVC"
+            echo "ERROR: /exec is not the gateway (service mismatch). service=$SVC"
             exit 1
           fi
+          echo "Preflight OK."
 
-      - name: START
+      - name: START (signed POST) + diagnostics
         id: start
         shell: bash
         env:
@@ -70,17 +70,38 @@ jobs:
             '{workflow_id:$workflow_id,row:$row,phase:$phase,expires:$expires,lock_seconds:$lock_seconds,now:$now}')"
 
           SIG="$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
+          URL="${GATEWAY_URL}?sig=${SIG}"
 
-          RESP="$(curl -sS \
+          # 1) Capture body + http_code
+          HTTP_CODE="$(curl -sS \
             --location --post301 --post302 --post303 \
+            --max-redirs 10 \
+            -o /tmp/start_body.txt -w "%{http_code}" \
             -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
             --data-binary "$BODY" \
-            "${GATEWAY_URL}?sig=${SIG}" || true)"
+            "$URL" || true)"
+
+          # 2) Capture final effective URL (separate call, no output)
+          FINAL_URL="$(curl -sS \
+            --location --post301 --post302 --post303 \
+            --max-redirs 10 \
+            -o /dev/null -w "%{url_effective}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            --data-binary "$BODY" \
+            "$URL" || true)"
+
+          RESP="$(cat /tmp/start_body.txt || true)"
+
+          echo "HTTP_CODE=$HTTP_CODE"
+          echo "FINAL_URL=$FINAL_URL"
+          echo "RESP first 250 chars:"
+          echo "$RESP" | head -c 250 || true
+          echo
 
           if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
-            echo "Gateway did not return JSON on START."
-            echo "$RESP" | head -c 400 || true
-            echo
+            echo "ERROR: Gateway did not return JSON on START."
             exit 1
           fi
 
@@ -95,9 +116,10 @@ jobs:
 
       - name: DO WORK (dummy)
         run: |
+          echo "work..."
           sleep 3
 
-      - name: FINISH
+      - name: FINISH (signed POST) + diagnostics
         if: always() && steps.start.outputs.locked != 'true'
         shell: bash
         env:
@@ -126,17 +148,36 @@ jobs:
             '{workflow_id:$workflow_id,row:$row,phase:$phase,conclusion:$conclusion,expires:$expires,lock_seconds:$lock_seconds,now:$now}')"
 
           SIG="$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
+          URL="${GATEWAY_URL}?sig=${SIG}"
 
-          RESP="$(curl -sS \
+          HTTP_CODE="$(curl -sS \
             --location --post301 --post302 --post303 \
+            --max-redirs 10 \
+            -o /tmp/finish_body.txt -w "%{http_code}" \
             -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
             --data-binary "$BODY" \
-            "${GATEWAY_URL}?sig=${SIG}" || true)"
+            "$URL" || true)"
+
+          FINAL_URL="$(curl -sS \
+            --location --post301 --post302 --post303 \
+            --max-redirs 10 \
+            -o /dev/null -w "%{url_effective}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            --data-binary "$BODY" \
+            "$URL" || true)"
+
+          RESP="$(cat /tmp/finish_body.txt || true)"
+
+          echo "HTTP_CODE=$HTTP_CODE"
+          echo "FINAL_URL=$FINAL_URL"
+          echo "RESP first 250 chars:"
+          echo "$RESP" | head -c 250 || true
+          echo
 
           if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
-            echo "Gateway did not return JSON on FINISH."
-            echo "$RESP" | head -c 400 || true
-            echo
+            echo "ERROR: Gateway did not return JSON on FINISH."
             exit 1
           fi
 
