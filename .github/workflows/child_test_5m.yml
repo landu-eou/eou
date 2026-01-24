@@ -3,18 +3,17 @@ name: child_test_5m
 on:
   workflow_dispatch:
 
-# ====== FÁCIL DE EDITAR POR EL USUARIO ======
 env:
   WORKFLOW_ID: child_test_5m.yml
   ROW: "2"
-  EXPIRES: "300"         # segundos: next_run_final = now + expires
-  LOCK_SECONDS: "1200"   # evita solapes durante ~20 min
+  EXPIRES: "300"
+  LOCK_SECONDS: "1200"
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Mark start (set last_run + lock_until + status=in_progress)
+      - name: Mark start
         id: start
         shell: bash
         run: |
@@ -26,31 +25,27 @@ jobs:
               --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
               --arg action "start" \
               --arg workflow "${WORKFLOW_ID}" \
-              --argjson row "${ROW}" \
-              --argjson expires "${EXPIRES}" \
-              --argjson lock_seconds "${LOCK_SECONDS}" \
+              --arg row "${ROW}" \
+              --arg expires "${EXPIRES}" \
+              --arg lock_seconds "${LOCK_SECONDS}" \
               '{key:$key, action:$action, workflow:$workflow, row:$row, expires:$expires, lock_seconds:$lock_seconds}' \
             )")"
 
           echo "$resp" > start.json
-          echo "last_run=$(jq -r .last_run start.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Do work (test)
+      - name: Do work
         run: |
           echo "Hello from child_test_5m"
           sleep 2
 
-      - name: Mark end (set conclusion + next_run = now + expires)
+      - name: Mark end
         if: always()
         shell: bash
         run: |
           set -euo pipefail
 
-          # now (UTC ISO 8601) y next_run_final = now + expires
           now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           next_run="$(date -u -d "${now} + ${EXPIRES} seconds" +%Y-%m-%dT%H:%M:%SZ)"
-
-          # job.status -> success|failure|cancelled
           conclusion="${{ job.status }}"
 
           curl -sS -X POST "${{ secrets.SHEET_GATEWAY_URL }}?api=1" \
@@ -59,8 +54,8 @@ jobs:
               --arg key "${{ secrets.SHEET_GATEWAY_KEY }}" \
               --arg action "end" \
               --arg workflow "${WORKFLOW_ID}" \
-              --argjson row "${ROW}" \
-              --argjson expires "${EXPIRES}" \
+              --arg row "${ROW}" \
+              --arg expires "${EXPIRES}" \
               --arg status "completed" \
               --arg conclusion "${conclusion}" \
               --arg next_run "${next_run}" \
