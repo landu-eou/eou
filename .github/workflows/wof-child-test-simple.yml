@@ -17,7 +17,7 @@ jobs:
       LOCK_SECONDS: "650"
 
     steps:
-      - name: START (lock + last_run)
+      - name: START (last_run + lock_until + temp next_run)
         id: start
         shell: bash
         env:
@@ -25,27 +25,31 @@ jobs:
           GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
         run: |
           set -euo pipefail
+
           NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-          BODY=$(jq -nc \
+          BODY="$(jq -nc \
             --arg workflow_id "$WORKFLOW_ID" \
             --argjson row "$SHEET_ROW" \
             --arg phase "start" \
             --argjson expires "$EXPIRES" \
             --argjson lock_seconds "$LOCK_SECONDS" \
             --arg now "$NOW" \
-            '{workflow_id:$workflow_id,row:$row,phase:$phase,expires:$expires,lock_seconds:$lock_seconds,now:$now}')
+            '{workflow_id:$workflow_id,row:$row,phase:$phase,expires:$expires,lock_seconds:$lock_seconds,now:$now}')"
 
-          SIG=$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')
+          SIG="$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
 
-          # Llama al gateway
-          RESP="$(curl -sSL -X POST "${GATEWAY_URL}?sig=${SIG}" -H "Content-Type: application/json" -d "$BODY" || true)"
+          RESP="$(curl -sS -L \
+            -H "Content-Type: application/json" \
+            -X POST "${GATEWAY_URL}?sig=${SIG}" \
+            -d "$BODY" || true)"
 
-          # Si NO es JSON, muestra diagnóstico y falla (así lo arreglas rápido)
+          # Must be JSON
           if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
-            echo "Gateway did not return JSON. Check GATEWAY_URL (/exec), deployment access, and that it is the GATEWAY (not monitor)."
-            echo "First 300 chars of response:"
-            echo "$RESP" | head -c 300 || true
+            echo "Gateway did not return JSON."
+            echo "GATEWAY_URL must be the GATEWAY Web App /exec URL (not a Sheet/Docs URL)."
+            echo "First 400 chars:"
+            echo "$RESP" | head -c 400 || true
             echo
             exit 1
           fi
@@ -56,7 +60,7 @@ jobs:
       - name: Exit fast if locked
         if: steps.start.outputs.locked == 'true'
         run: |
-          echo "Already locked; exiting fast."
+          echo "Locked already. Exiting fast."
           exit 0
 
       - name: DO WORK (dummy)
@@ -65,7 +69,7 @@ jobs:
           sleep 3
           echo "Done."
 
-      - name: FINISH (status/conclusion + next_run)
+      - name: FINISH (completed + conclusion + run_ended + final next_run)
         if: always() && steps.start.outputs.locked != 'true'
         shell: bash
         env:
@@ -73,6 +77,7 @@ jobs:
           GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
         run: |
           set -euo pipefail
+
           STATUS="${{ job.status }}"
           case "$STATUS" in
             success) CONCLUSION="success" ;;
@@ -83,7 +88,7 @@ jobs:
 
           NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-          BODY=$(jq -nc \
+          BODY="$(jq -nc \
             --arg workflow_id "$WORKFLOW_ID" \
             --argjson row "$SHEET_ROW" \
             --arg phase "finish" \
@@ -91,15 +96,19 @@ jobs:
             --argjson expires "$EXPIRES" \
             --argjson lock_seconds "$LOCK_SECONDS" \
             --arg now "$NOW" \
-            '{workflow_id:$workflow_id,row:$row,phase:$phase,conclusion:$conclusion,expires:$expires,lock_seconds:$lock_seconds,now:$now}')
+            '{workflow_id:$workflow_id,row:$row,phase:$phase,conclusion:$conclusion,expires:$expires,lock_seconds:$lock_seconds,now:$now}')"
 
-          SIG=$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')
-          RESP="$(curl -sSL -X POST "${GATEWAY_URL}?sig=${SIG}" -H "Content-Type: application/json" -d "$BODY" || true)"
+          SIG="$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
+
+          RESP="$(curl -sS -L \
+            -H "Content-Type: application/json" \
+            -X POST "${GATEWAY_URL}?sig=${SIG}" \
+            -d "$BODY" || true)"
 
           if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
             echo "Gateway did not return JSON on finish."
-            echo "First 300 chars of response:"
-            echo "$RESP" | head -c 300 || true
+            echo "First 400 chars:"
+            echo "$RESP" | head -c 400 || true
             echo
             exit 1
           fi
