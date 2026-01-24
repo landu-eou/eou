@@ -28,6 +28,21 @@ jobs:
           echo
           echo "$RESP" | jq -e '.service=="eou_gateway_webapp"' >/dev/null
 
+      - name: Debug secret fingerprint (safe)
+        shell: bash
+        env:
+          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
+          GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
+        run: |
+          set -euo pipefail
+          echo "GitHub secret length:"
+          echo -n "$GATEWAY_SECRET" | wc -c
+          echo "GitHub secret sha256_b64url:"
+          echo -n "$GATEWAY_SECRET" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '='
+          echo
+          echo "Gateway secret fingerprint (from /exec?debug=1):"
+          curl -sS -L "${GATEWAY_URL}?debug=1" | jq -c .
+
       - name: START (signed GET params)
         id: start
         shell: bash
@@ -37,18 +52,23 @@ jobs:
         run: |
           set -euo pipefail
 
-          NOW_MS="$(date -u +%s%3N)"   # epoch milliseconds (safe in URL)
-          CONCLUSION="-"              # non-empty for canonical stability
+          NOW_MS="$(date -u +%s%3N)"
+          CONCLUSION="-"
 
           CANONICAL="${WORKFLOW_ID}|${SHEET_ROW}|start|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
 
           URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&row=${SHEET_ROW}&phase=start&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
-
           RESP="$(curl -sS -L -H "Accept: application/json" "$URL" || true)"
           echo "RESP: $RESP"
 
           echo "$RESP" | jq -e . >/dev/null
+          OK="$(echo "$RESP" | jq -r '.ok // false')"
+          if [[ "$OK" != "true" ]]; then
+            echo "Gateway error on START: $RESP"
+            exit 1
+          fi
+
           LOCKED="$(echo "$RESP" | jq -r '.locked // false')"
           echo "locked=$LOCKED" >> "$GITHUB_OUTPUT"
 
@@ -85,9 +105,14 @@ jobs:
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
 
           URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
-
           RESP="$(curl -sS -L -H "Accept: application/json" "$URL" || true)"
           echo "RESP: $RESP"
 
           echo "$RESP" | jq -e . >/dev/null
+          OK="$(echo "$RESP" | jq -r '.ok // false')"
+          if [[ "$OK" != "true" ]]; then
+            echo "Gateway error on FINISH: $RESP"
+            exit 1
+          fi
+
           echo "Finish OK"
