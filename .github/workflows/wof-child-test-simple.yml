@@ -37,9 +37,20 @@ jobs:
             '{workflow_id:$workflow_id,row:$row,phase:$phase,expires:$expires,lock_seconds:$lock_seconds,now:$now}')
 
           SIG=$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')
-          RESP=$(curl -sS -X POST "${GATEWAY_URL}?sig=${SIG}" -H "Content-Type: application/json" -d "$BODY")
-          echo "resp=$RESP" >> "$GITHUB_OUTPUT"
-          LOCKED=$(printf "%s" "$RESP" | jq -r '.locked // false')
+
+          # Llama al gateway
+          RESP="$(curl -sS -X POST "${GATEWAY_URL}?sig=${SIG}" -H "Content-Type: application/json" -d "$BODY" || true)"
+
+          # Si NO es JSON, muestra diagnóstico y falla (así lo arreglas rápido)
+          if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
+            echo "Gateway did not return JSON. Check GATEWAY_URL (/exec), deployment access, and that it is the GATEWAY (not monitor)."
+            echo "First 300 chars of response:"
+            echo "$RESP" | head -c 300 || true
+            echo
+            exit 1
+          fi
+
+          LOCKED="$(echo "$RESP" | jq -r '.locked // false')"
           echo "locked=$LOCKED" >> "$GITHUB_OUTPUT"
 
       - name: Exit fast if locked
@@ -83,4 +94,14 @@ jobs:
             '{workflow_id:$workflow_id,row:$row,phase:$phase,conclusion:$conclusion,expires:$expires,lock_seconds:$lock_seconds,now:$now}')
 
           SIG=$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')
-          curl -sS -X POST "${GATEWAY_URL}?sig=${SIG}" -H "Content-Type: application/json" -d "$BODY" >/dev/null
+          RESP="$(curl -sS -X POST "${GATEWAY_URL}?sig=${SIG}" -H "Content-Type: application/json" -d "$BODY" || true)"
+
+          if ! echo "$RESP" | jq -e . >/dev/null 2>&1; then
+            echo "Gateway did not return JSON on finish."
+            echo "First 300 chars of response:"
+            echo "$RESP" | head -c 300 || true
+            echo
+            exit 1
+          fi
+
+          echo "Finish OK: $(echo "$RESP" | jq -c .)"
