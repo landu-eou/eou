@@ -17,33 +17,15 @@ jobs:
       LOCK_SECONDS: "650"
 
     steps:
-      - name: Preflight GET healthcheck
+      - name: Preflight
         shell: bash
         env:
           GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
         run: |
           set -euo pipefail
-          RESP="$(curl -sS -L "$GATEWAY_URL" || true)"
-          echo "$RESP" | head -c 200 || true
-          echo
-          echo "$RESP" | jq -e '.service=="eou_gateway_webapp"' >/dev/null
+          curl -sS -L "$GATEWAY_URL" | jq -e '.service=="eou_gateway_webapp"' >/dev/null
 
-      - name: Debug secret fingerprint (safe)
-        shell: bash
-        env:
-          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
-          GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
-        run: |
-          set -euo pipefail
-          echo "GitHub secret length:"
-          echo -n "$GATEWAY_SECRET" | wc -c
-          echo "GitHub secret sha256_b64url:"
-          echo -n "$GATEWAY_SECRET" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '='
-          echo
-          echo "Gateway secret fingerprint (from /exec?debug=1):"
-          curl -sS -L "${GATEWAY_URL}?debug=1" | jq -c .
-
-      - name: START (signed GET params)
+      - name: START
         id: start
         shell: bash
         env:
@@ -51,38 +33,30 @@ jobs:
           GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
         run: |
           set -euo pipefail
-
           NOW_MS="$(date -u +%s%3N)"
           CONCLUSION="-"
-
           CANONICAL="${WORKFLOW_ID}|${SHEET_ROW}|start|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-
           URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&row=${SHEET_ROW}&phase=start&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
-          RESP="$(curl -sS -L -H "Accept: application/json" "$URL" || true)"
-          echo "RESP: $RESP"
 
+          RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
           echo "$RESP" | jq -e . >/dev/null
           OK="$(echo "$RESP" | jq -r '.ok // false')"
           if [[ "$OK" != "true" ]]; then
             echo "Gateway error on START: $RESP"
             exit 1
           fi
-
           LOCKED="$(echo "$RESP" | jq -r '.locked // false')"
           echo "locked=$LOCKED" >> "$GITHUB_OUTPUT"
 
-      - name: Exit fast if locked
+      - name: Exit if locked
         if: steps.start.outputs.locked == 'true'
-        run: |
-          echo "Locked already. Exiting."
-          exit 0
+        run: exit 0
 
       - name: DO WORK (dummy)
-        run: |
-          sleep 3
+        run: sleep 3
 
-      - name: FINISH (signed GET params)
+      - name: FINISH
         if: always() && steps.start.outputs.locked != 'true'
         shell: bash
         env:
@@ -90,7 +64,6 @@ jobs:
           GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
         run: |
           set -euo pipefail
-
           STATUS="${{ job.status }}"
           case "$STATUS" in
             success) CONCLUSION="success" ;;
@@ -100,19 +73,14 @@ jobs:
           esac
 
           NOW_MS="$(date -u +%s%3N)"
-
           CANONICAL="${WORKFLOW_ID}|${SHEET_ROW}|finish|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-
           URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
-          RESP="$(curl -sS -L -H "Accept: application/json" "$URL" || true)"
-          echo "RESP: $RESP"
 
+          RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
           echo "$RESP" | jq -e . >/dev/null
           OK="$(echo "$RESP" | jq -r '.ok // false')"
           if [[ "$OK" != "true" ]]; then
             echo "Gateway error on FINISH: $RESP"
             exit 1
           fi
-
-          echo "Finish OK"
