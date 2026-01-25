@@ -2,7 +2,7 @@
 # PARTE INICIAL (lo que cambias para un clon)
 # =======================
 
-name: child_test_simple          # <-- 001 CAMBIA el nombre visible del workflow
+name: Child Test Simple          # <-- 001 CAMBIA el nombre visible del workflow
 
 on:
   workflow_dispatch:
