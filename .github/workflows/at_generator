@@ -1,8 +1,4 @@
-# =======================
-# PARTE INICIAL (lo que cambias para un clon)
-# =======================
-
-name: at_generator          # <-- 001 CAMBIA el nombre visible del workflow
+name: eou_sso_at_refresh
 
 on:
   workflow_dispatch:
@@ -15,10 +11,10 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      WORKFLOW_ID: at_generator   # <-- 002 CAMBIA (debe estar también en ALLOW del gateway)
-      SHEET_ROW: "2"                    # <-- 003 CAMBIA (fila del tab 'workflows' que va a tocar)
-      EXPIRES: "900"                    # <-- 004 (opcional) cambia si quieres otra cadencia
-      LOCK_SECONDS: "120"                # <-- 005 (opcional) cambia si quieres otro lock
+      WORKFLOW_ID: eou_sso_at_refresh
+      SHEET_ROW: "2"
+      EXPIRES: "900"
+      LOCK_SECONDS: "120"
 
     steps:
       - name: Preflight
