@@ -16,7 +16,7 @@ jobs:
 
     env:
       WORKFLOW_ID: eou_sso_at_refresh             # <-- 002 CAMBIA (debe estar también en ALLOW del gateway)
-      WORKFLOW_NAME: "Access Token Refresh (SSO → GH)"          # <-- 001 CAMBIA el nombre visible del workflow
+      WORKFLOW_NAME: "Access Token Refresh (SSO a GH)"          # <-- 001 CAMBIA el nombre visible del workflow
       SHEET_ROW: "2"                             # <-- 003 CAMBIA (fila del tab 'workflows' que va a tocar)
       EXPIRES: "900"                              # <-- 004 (opcional) cambia si quieres otra cadencia
       LOCK_SECONDS: "120"                          # <-- 005 (opcional) cambia si quieres otro lock
