@@ -86,30 +86,3 @@ jobs:
             echo "Gateway error on FINISH: $RESP"
             exit 1
           fi
-        shell: bash
-        env:
-          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
-          GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
-        run: |
-          set -euo pipefail
-          case "${{ job.status }}" in
-            success) CONCLUSION="success" ;;
-            failure) CONCLUSION="failure" ;;
-            cancelled) CONCLUSION="cancelled" ;;
-            *) CONCLUSION="neutral" ;;
-          esac
-
-          NOW_MS="$(date -u +%s%3N)"
-          CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|finish|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
-          SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-
-          WF_NAME_ENC="$(python3 - <<'PY'
-import os, urllib.parse
-print(urllib.parse.quote(os.environ["WORKFLOW_NAME"]))
-PY
-)"
-          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ENC}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
-
-          RESP="$(curl -sS -L "$URL")"
-          echo "$RESP" | jq -e . >/dev/null
-          [[ "$(echo "$RESP" | jq -r '.ok')" == "true" ]]
