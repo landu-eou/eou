@@ -1,4 +1,8 @@
-name: Child Test Simple
+# =======================
+# PARTE INICIAL (lo que cambias para un clon)
+# =======================
+
+name: Child Test Simple                            # <-- 001 CAMBIA el nombre visible del workflow
 
 on:
   workflow_dispatch:
@@ -11,11 +15,11 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      WORKFLOW_ID: wf_test_simple_001
-      WORKFLOW_NAME: "Child Test Simple"  # NUEVO: esto irá a Col A
-      SHEET_ROW: "11"
-      EXPIRES: "300"                      # esto irá a Col B
-      LOCK_SECONDS: "60"
+      WORKFLOW_ID: wf_test_simple_001             # <-- 002 CAMBIA (debe estar también en ALLOW del gateway)
+      WORKFLOW_NAME: "Child Test Simple"          # <-- 001 CAMBIA el nombre visible del workflow
+      SHEET_ROW: "11"                             # <-- 003 CAMBIA (fila del tab 'workflows' que va a tocar)
+      EXPIRES: "300"                              # <-- 004 (opcional) cambia si quieres otra cadencia
+      LOCK_SECONDS: "60"                          # <-- 005 (opcional) cambia si quieres otro lock
 
     steps:
       - name: Preflight
@@ -55,8 +59,16 @@ jobs:
         if: steps.start.outputs.locked == 'true'
         run: exit 0
 
+# =======================
+# PARTE FUNCIÓN (solo cambia si cambia la función del workflow)
+# =======================
+
       - name: DO WORK (dummy)
         run: sleep 3
+
+# =======================
+# PARTE FINAL (normalmente NO la tocas para un clon)
+# =======================
 
       - name: FINISH
         if: always() && steps.start.outputs.locked != 'true'
