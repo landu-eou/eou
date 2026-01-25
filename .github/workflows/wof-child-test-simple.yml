@@ -1,14 +1,18 @@
+# =======================
+# PARTE INICIAL (lo que cambias para un clon)
+# =======================
+
 name: ${{ env.WORKFLOW_NAME }}
 
 on:
   workflow_dispatch:
 
 env:
-  WORKFLOW_ID: wf_test_simple_001
-  WORKFLOW_NAME: Child Test Simple
-  SHEET_ROW: "11"
-  EXPIRES: "300"
-  LOCK_SECONDS: "60"
+  WORKFLOW_ID: wf_test_simple_001    # <-- 001 CAMBIA (debe estar también en ALLOW del gateway)
+  WORKFLOW_NAME: Child Test Simple   # <-- 002 CAMBIA el nombre visible del workflow
+  SHEET_ROW: "11"                    # <-- 003 CAMBIA (fila del tab 'workflows' que va a tocar)
+  EXPIRES: "300"                     # <-- 004 (opcional) cambia si quieres otra cadencia
+  LOCK_SECONDS: "60"                 # <-- 005 (opcional) cambia si quieres otro lock
 
 permissions:
   contents: read
@@ -58,8 +62,16 @@ PY
         if: steps.start.outputs.locked == 'true'
         run: exit 0
 
+# =======================
+# PARTE FUNCIÓN (solo cambia si cambia la función del workflow)
+# =======================
+
       - name: DO WORK (dummy)
         run: sleep 3
+
+# =======================
+# PARTE FINAL (normalmente NO la tocas para un clon)
+# =======================
 
       - name: FINISH
         if: always() && steps.start.outputs.locked != 'true'
