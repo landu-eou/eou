@@ -12,7 +12,7 @@ jobs:
 
     env:
       WORKFLOW_ID: wf_test_simple_001
-      SHEET_ROW: "2"
+      SHEET_ROW: "3"
       EXPIRES: "300"
       LOCK_SECONDS: "60"
 
