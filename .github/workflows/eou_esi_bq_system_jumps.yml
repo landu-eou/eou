@@ -16,7 +16,7 @@ jobs:
 
     env:
       WORKFLOW_ID: eou_esi_bq_system_jumps             # <-- 002 CAMBIA (debe estar también en ALLOW del gateway)
-      WORKFLOW_NAME: "System Jumps (ESI → BQ)"          # <-- 001 CAMBIA el nombre visible del workflow
+      WORKFLOW_NAME: "System Jumps (ESI > BQ)"          # <-- 001 CAMBIA el nombre visible del workflow
       SHEET_ROW: "3"                             # <-- 003 CAMBIA (fila del tab 'workflows' que va a tocar)
       EXPIRES: "3600"                              # <-- 004 (opcional) cambia si quieres otra cadencia
       LOCK_SECONDS: "120"                          # <-- 005 (opcional) cambia si quieres otro lock
