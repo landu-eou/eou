@@ -27,37 +27,40 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # --- requeridos por los orquestadores ---
       WORKFLOW_ID: eou_esi_bq_system_jumps
       WORKFLOW_NAME: "System Jumps (ESI -> BQ)"
       SHEET_ROW: "3"
       EXPIRES: "1200"
       LOCK_SECONDS: "120"
 
-      # --- GCP / BQ ---
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       BQ_DATASET: eou
 
-      # --- ESI ---
       ESI_BASE_URL: https://esi.evetech.net/latest
       ESI_DATASOURCE: tranquility
       USER_AGENT: "landu-eou/eou (ESI system_jumps) contact: landueve78@gmail.com"
 
-      # --- state en main ---
       STATE_PATH: eou/state/system_jumps.json
 
     steps:
+      - name: Install jq (gateway parsing)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
+
+      # ------------------------------------------------------------
+      # Preflight: gateway healthcheck (robusto)
+      # ------------------------------------------------------------
       - name: Preflight (gateway)
-        id: preflight
         shell: bash
         env:
           GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
         run: |
           set -euo pipefail
-
-          tmp="$(mktemp -d)"
-          hdr="$tmp/hdr.txt"
-          body="$tmp/body.txt"
 
           max=5
           i=1
@@ -65,26 +68,21 @@ jobs:
 
           while (( i <= max )); do
             url="${GATEWAY_URL}?ping=1&nocache=$(date -u +%s%N)"
-
-            http_code="$(curl -sS -L \
+            resp="$(curl -sS -L \
               --connect-timeout 5 --max-time 15 \
               --retry 2 --retry-all-errors --retry-delay 1 \
-              -D "$hdr" -o "$body" -w "%{http_code}" \
+              -H "Accept: application/json" \
               "$url" || true)"
 
-            content_type="$(grep -i '^content-type:' "$hdr" | tail -n 1 | cut -d: -f2- | tr -d '\r' | xargs || true)"
-            body_len="$(wc -c < "$body" | tr -d ' ' || true)"
-
-            echo "Preflight attempt $i/$max: http_code=$http_code content_type='${content_type:-unknown}' body_len=${body_len:-0}"
-
-            if [[ "$http_code" == "200" && "${body_len:-0}" -gt 0 ]]; then
-              if head -c 200 "$body" | grep -qi '<html'; then
-                echo "WARN: preflight returned HTML. Retrying..." >&2
-              else
-                python3 -c 'import json,sys; j=json.load(sys.stdin); assert j.get("service")=="eou_gateway_webapp", j' < "$body"
+            if [[ -n "${resp:-}" ]]; then
+              service="$(printf '%s' "$resp" | jq -r '.service // empty' 2>/dev/null || true)"
+              if [[ "$service" == "eou_gateway_webapp" ]]; then
                 ok=1
                 break
               fi
+              echo "WARN: preflight got non-matching service='$service' (attempt $i/$max)" >&2
+            else
+              echo "WARN: preflight empty response (attempt $i/$max)" >&2
             fi
 
             sleep 1
@@ -93,12 +91,12 @@ jobs:
 
           if [[ "$ok" != "1" ]]; then
             echo "ERROR: gateway preflight failed after $max attempts" >&2
-            echo "Last http_code=$http_code content_type='${content_type:-unknown}' body_len=${body_len:-0}" >&2
-            echo "Body (first 200 chars):" >&2
-            head -c 200 "$body" >&2 || true
             exit 1
           fi
 
+      # ------------------------------------------------------------
+      # START: lock (robusto) -> outputs locked/started
+      # ------------------------------------------------------------
       - name: START (gateway lock)
         id: start
         shell: bash
@@ -113,7 +111,8 @@ jobs:
           ok=0
           locked="true"
 
-          WF_NAME_ESC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")"
+          # URL-encode del nombre con jq (sin python)
+          WF_NAME_ESC="$(jq -rn --arg s "$WORKFLOW_NAME" '$s|@uri')"
 
           while (( i <= max )); do
             NOW_MS="$(date -u +%s%3N)"
@@ -123,31 +122,39 @@ jobs:
 
             URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ESC}&row=${SHEET_ROW}&phase=start&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}&nocache=$(date -u +%s%N)"
 
-            RESP="$(curl -sS -L \
+            resp="$(curl -sS -L \
               --connect-timeout 5 --max-time 20 \
               --retry 2 --retry-all-errors --retry-delay 1 \
               -H "Accept: application/json" \
               "$URL" || true)"
 
-            if [[ -z "${RESP:-}" ]]; then
+            if [[ -z "${resp:-}" ]]; then
               echo "WARN: START empty response (attempt $i/$max). Retrying..." >&2
               sleep 1
               ((i++))
               continue
             fi
 
-            locked="$(python3 -c 'import json,sys; 
-try: j=json.load(sys.stdin)
-except Exception: print("PARSE_ERROR"); sys.exit(0)
-if not j.get("ok", False): print("GATEWAY_NOT_OK"); sys.exit(0)
-print("true" if j.get("locked", False) else "false")' <<<"$RESP")"
+            ok_field="$(printf '%s' "$resp" | jq -r '.ok // empty' 2>/dev/null || true)"
+            if [[ "$ok_field" != "true" ]]; then
+              echo "WARN: START gateway ok!=true (attempt $i/$max). Retrying..." >&2
+              sleep 1
+              ((i++))
+              continue
+            fi
 
-            if [[ "$locked" == "true" || "$locked" == "false" ]]; then
+            locked_field="$(printf '%s' "$resp" | jq -r '.locked // false' 2>/dev/null || true)"
+            if [[ "$locked_field" == "true" ]]; then
+              locked="true"
+              ok=1
+              break
+            elif [[ "$locked_field" == "false" ]]; then
+              locked="false"
               ok=1
               break
             fi
 
-            echo "WARN: START bad response token='$locked' (attempt $i/$max). Retrying..." >&2
+            echo "WARN: START bad locked field='$locked_field' (attempt $i/$max). Retrying..." >&2
             sleep 1
             ((i++))
           done
@@ -164,20 +171,14 @@ print("true" if j.get("locked", False) else "false")' <<<"$RESP")"
         if: steps.start.outputs.locked == 'true'
         run: exit 0
 
+      # ------------------------------------------------------------
+      # DO WORK
+      # ------------------------------------------------------------
       - name: Checkout main
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
-
-      - name: Install jq (needed by script)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y jq
-          fi
 
       - name: Auth to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
@@ -192,11 +193,14 @@ print("true" if j.get("locked", False) else "false")' <<<"$RESP")"
 
       - name: Run ingest (ESI → BQ)
         env:
-          FORCE: ${{ inputs.force || github.event.client_payload.force || 'false' }}
-          DRY_RUN: ${{ inputs.dry_run || github.event.client_payload.dry_run || 'false' }}
+          FORCE: ${{ github.event.inputs.force || github.event.client_payload.force || 'false' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || github.event.client_payload.dry_run || 'false' }}
         run: |
           bash eou/scripts/esi_system_jumps_to_bq.sh
 
+      # ------------------------------------------------------------
+      # FINISH: solo si START ocurrió y no estaba locked
+      # ------------------------------------------------------------
       - name: FINISH (gateway)
         if: always() && steps.start.outputs.started == 'true' && steps.start.outputs.locked != 'true'
         shell: bash
@@ -217,7 +221,7 @@ print("true" if j.get("locked", False) else "false")' <<<"$RESP")"
           max=5
           i=1
           ok=0
-          WF_NAME_ESC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")"
+          WF_NAME_ESC="$(jq -rn --arg s "$WORKFLOW_NAME" '$s|@uri')"
 
           while (( i <= max )); do
             NOW_MS="$(date -u +%s%3N)"
@@ -226,30 +230,26 @@ print("true" if j.get("locked", False) else "false")' <<<"$RESP")"
 
             URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ESC}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}&nocache=$(date -u +%s%N)"
 
-            RESP="$(curl -sS -L \
+            resp="$(curl -sS -L \
               --connect-timeout 5 --max-time 20 \
               --retry 2 --retry-all-errors --retry-delay 1 \
               -H "Accept: application/json" \
               "$URL" || true)"
 
-            if [[ -z "${RESP:-}" ]]; then
+            if [[ -z "${resp:-}" ]]; then
               echo "WARN: FINISH empty response (attempt $i/$max). Retrying..." >&2
               sleep 1
               ((i++))
               continue
             fi
 
-            token="$(python3 -c 'import json,sys;
-try: j=json.load(sys.stdin)
-except Exception: print("PARSE_ERROR"); sys.exit(0)
-print("OK" if j.get("ok", False) else "NOT_OK")' <<<"$RESP")"
-
-            if [[ "$token" == "OK" ]]; then
+            ok_field="$(printf '%s' "$resp" | jq -r '.ok // empty' 2>/dev/null || true)"
+            if [[ "$ok_field" == "true" ]]; then
               ok=1
               break
             fi
 
-            echo "WARN: FINISH non-ok response token='$token' (attempt $i/$max). Retrying..." >&2
+            echo "WARN: FINISH ok!=true (attempt $i/$max). Retrying..." >&2
             sleep 1
             ((i++))
           done
