@@ -60,10 +60,13 @@ jobs:
 
       - name: Exit if locked
         if: steps.start.outputs.locked == 'true'
-        run: exit 0
+        run: |
+          echo "Locked by gateway, exiting early."
+          exit 0
 
       - id: gcp_auth
         name: Auth to Google (WIF)
+        if: steps.start.outputs.locked != 'true'
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -72,6 +75,7 @@ jobs:
           access_token_scopes: https://www.googleapis.com/auth/spreadsheets
 
       - name: Refresh tokens, persist to GH Secrets, and write to Sheets
+        if: steps.start.outputs.locked != 'true'
         env:
           EOU_CLIENTS: ${{ secrets.EOU_CLIENTS }}
           EOU_REFRESH_TOKENS: ${{ secrets.EOU_REFRESH_TOKENS }}
@@ -106,7 +110,6 @@ jobs:
             return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
 
           def gh_set_secret(name: str, value: str) -> None:
-            # Importante: -R evita depender de .git
             p = subprocess.run(
               ["gh", "secret", "set", name, "-R", GH_REPO, "--app", "actions"],
               input=value.encode("utf-8"),
@@ -160,7 +163,6 @@ jobs:
             ts_keep = old.get("ts_token","")
             code_int = 0
 
-            # Defaults for sheet columns A/B
             account = str(meta.get("account",""))
             char_name = str(meta.get("char_name",""))
 
@@ -200,19 +202,15 @@ jobs:
                 payload = json.loads(r.read().decode("utf-8"))
               token_new = payload.get("access_token")
               if not token_new:
-                # success HTTP pero sin token => treat as fail
                 out[cid] = {"access_token": token_keep, "ts_token": ts_keep, "code_int": 0}
                 rows.append([account, char_name, cid, token_keep, ts_keep, 0])
                 fail += 1
                 continue
 
-              # SUCCESS
-              code_int = 200
               out[cid] = {"access_token": token_new, "ts_token": now_ts, "code_int": 200}
               rows.append([account, char_name, cid, token_new, now_ts, 200])
               ok += 1
 
-              # Rotación refresh_token (si viene)
               new_rt = payload.get("refresh_token")
               if isinstance(new_rt, str) and new_rt.strip():
                 new_item = dict(meta)
@@ -229,18 +227,15 @@ jobs:
               rows.append([account, char_name, cid, token_keep, ts_keep, 0])
               fail += 1
 
-          # Persistir secrets (estado + refresh si rotó)
           gh_set_secret("EOU_ACCESS_TOKENS", json.dumps(out, separators=(",",":"), ensure_ascii=False))
           gh_set_secret("EOU_REFRESH_TOKENS", json.dumps(refresh, separators=(",",":"), ensure_ascii=False))
 
-          # Volcar a Sheets en tu orden: rows 2..12
           start_row = 2
           end_row = start_row + len(rows) - 1
           rng = f"{TAB_NAME}!A{start_row}:F{end_row}"
           try:
             sheets_update(rng, rows)
           except urllib.error.HTTPError as e:
-            # No abortar: ya persistimos en GH
             print(f"[WARN] Sheets write failed HTTP {e.code}")
           except Exception as e:
             print(f"[WARN] Sheets write failed ({type(e).__name__})")
