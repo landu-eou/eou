@@ -14,6 +14,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     env:
       WORKFLOW_ID: eou_refresh_access_tokens
@@ -123,9 +124,11 @@ jobs:
           def sheets_update(range_a1: str, values_rows: list) -> None:
             if not G_TOKEN:
               raise RuntimeError("Missing GOOGLE_ACCESS_TOKEN")
+            # FIX: quote() está en urllib.parse, no en urllib.request
+            range_enc = urllib.parse.quote(range_a1, safe="")
             url = (
               f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}"
-              f"/values/{urllib.request.quote(range_a1)}?valueInputOption=RAW"
+              f"/values/{range_enc}?valueInputOption=RAW"
             )
             body = json.dumps({
               "range": range_a1,
@@ -144,11 +147,12 @@ jobs:
             with urllib.request.urlopen(req, timeout=25) as resp:
               resp.read()
 
-          clients = json.loads(os.environ["EOU_CLIENTS"])
-          refresh = json.loads(os.environ["EOU_REFRESH_TOKENS"])
-          prev = json.loads(os.environ.get("EOU_ACCESS_TOKENS","{}") or "{}")
+          # Parse secrets defensivamente (sin imprimir nada)
+          clients = json.loads(os.environ.get("EOU_CLIENTS","") or "{}")
+          refresh = json.loads(os.environ.get("EOU_REFRESH_TOKENS","") or "{}")
+          prev = json.loads(os.environ.get("EOU_ACCESS_TOKENS","") or "{}")
 
-          out = dict(prev)
+          out = dict(prev) if isinstance(prev, dict) else {}
           rows = []
           now_ts = iso_z()
 
@@ -161,7 +165,6 @@ jobs:
 
             token_keep = old.get("access_token","")
             ts_keep = old.get("ts_token","")
-            code_int = 0
 
             account = str(meta.get("account",""))
             char_name = str(meta.get("char_name",""))
@@ -175,7 +178,7 @@ jobs:
               fail += 1
               continue
 
-            c = clients.get(app, {})
+            c = clients.get(app, {}) if isinstance(clients, dict) else {}
             client_id = str(c.get("client_id","")).strip()
             client_secret = str(c.get("client_secret","")).strip()
             if not client_id or not client_secret:
