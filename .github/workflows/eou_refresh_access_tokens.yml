@@ -19,7 +19,7 @@ jobs:
       WORKFLOW_ID: eou_refresh_access_tokens
       WORKFLOW_NAME: "Refresh Access Tokens (SSO -> GHs)"
       SHEET_ROW: "2"
-      EXPIRES: "90"
+      EXPIRES: "900"
       LOCK_SECONDS: "60"
 
       TOKENS_SPREADSHEET_ID: "1LDi6LFPYO99Rz6OBnwt58dI60aWyw1OFLEcnyt0yHAA"
