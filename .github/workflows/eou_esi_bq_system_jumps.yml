@@ -1,4 +1,4 @@
-esi: System Jumps (ESI → BQ)
+name: System Jumps (ESI → BQ)
 
 on:
   workflow_dispatch:
