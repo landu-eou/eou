@@ -1,4 +1,4 @@
-name: Refresh Access Tokens (SSO → GHs)
+name: Refresh Access Tokens (SSO → GHs + GS)
 
 on:
   workflow_dispatch: {}
@@ -19,7 +19,7 @@ jobs:
     env:
       # Gateway contract
       WORKFLOW_ID: eou_refresh_access_tokens
-      WORKFLOW_NAME: "Refresh Access Tokens (SSO -> GHs)"
+      WORKFLOW_NAME: "Refresh Access Tokens (SSO -> GHs + GS)"
       SHEET_ROW: "2"         # fila de control del gateway (tu lock)
       EXPIRES: "900"         # lease del lock (seg)
       LOCK_SECONDS: "60"     # lock mínimo (seg)
