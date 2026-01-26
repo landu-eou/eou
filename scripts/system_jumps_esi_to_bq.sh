@@ -7,7 +7,7 @@ trap 'echo "ERROR at line $LINENO" >&2' ERR
 
 BQ_DATASET="${BQ_DATASET:-eou}"
 ESI_BASE_URL="${ESI_BASE_URL:-https://esi.evetech.net/latest}"
-ESI_DATASOURCE="${ESI_D:contentReference[oaicite:10]{index=10}y}"
+ESI_DATASOURCE="${ESI_DATASOURCE:-tranquility}"
 
 ENDPOINT="system_jumps"
 STATE_PATH="${STATE_PATH:-eou/state/system_jumps.json}"
