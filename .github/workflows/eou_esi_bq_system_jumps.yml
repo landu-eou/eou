@@ -47,9 +47,6 @@ jobs:
       STATE_PATH: eou/state/system_jumps.json
 
     steps:
-      # -------------------------------------------------------------------
-      # PRECHECK: validar que el gateway responde JSON correcto (robusto)
-      # -------------------------------------------------------------------
       - name: Preflight (gateway)
         id: preflight
         shell: bash
@@ -84,11 +81,7 @@ jobs:
               if head -c 200 "$body" | grep -qi '<html'; then
                 echo "WARN: preflight returned HTML. Retrying..." >&2
               else
-                python3 - <<'PY' < "$body"
-import json,sys
-j=json.load(sys.stdin)
-assert j.get("service")=="eou_gateway_webapp", j
-PY
+                python3 -c 'import json,sys; j=json.load(sys.stdin); assert j.get("service")=="eou_gateway_webapp", j' < "$body"
                 ok=1
                 break
               fi
@@ -106,9 +99,6 @@ PY
             exit 1
           fi
 
-      # -------------------------------------------------------------------
-      # START: pedir lock al gateway (robusto + output started/locked)
-      # -------------------------------------------------------------------
       - name: START (gateway lock)
         id: start
         shell: bash
@@ -123,12 +113,13 @@ PY
           ok=0
           locked="true"
 
+          WF_NAME_ESC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")"
+
           while (( i <= max )); do
             NOW_MS="$(date -u +%s%3N)"
             CONCLUSION="-"
             CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|start|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
             SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-            WF_NAME_ESC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")"
 
             URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ESC}&row=${SHEET_ROW}&phase=start&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}&nocache=$(date -u +%s%N)"
 
@@ -145,14 +136,11 @@ PY
               continue
             fi
 
-            locked="$(printf '%s' "$RESP" | python3 - <<'PY'
-import json,sys
-j=json.load(sys.stdin)
-if not j.get("ok", False):
-  raise SystemExit(2)
-print("true" if j.get("locked", False) else "false")
-PY
-            )" || locked="PARSE_OR_NOT_OK"
+            locked="$(python3 -c 'import json,sys; 
+try: j=json.load(sys.stdin)
+except Exception: print("PARSE_ERROR"); sys.exit(0)
+if not j.get("ok", False): print("GATEWAY_NOT_OK"); sys.exit(0)
+print("true" if j.get("locked", False) else "false")' <<<"$RESP")"
 
             if [[ "$locked" == "true" || "$locked" == "false" ]]; then
               ok=1
@@ -176,9 +164,6 @@ PY
         if: steps.start.outputs.locked == 'true'
         run: exit 0
 
-      # -------------------------------------------------------------------
-      # DO WORK
-      # -------------------------------------------------------------------
       - name: Checkout main
         uses: actions/checkout@v4
         with:
@@ -212,9 +197,6 @@ PY
         run: |
           bash eou/scripts/esi_system_jumps_to_bq.sh
 
-      # -------------------------------------------------------------------
-      # FINISH: SOLO si START ocurrió (y no estaba locked), robusto
-      # -------------------------------------------------------------------
       - name: FINISH (gateway)
         if: always() && steps.start.outputs.started == 'true' && steps.start.outputs.locked != 'true'
         shell: bash
@@ -235,12 +217,12 @@ PY
           max=5
           i=1
           ok=0
+          WF_NAME_ESC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")"
 
           while (( i <= max )); do
             NOW_MS="$(date -u +%s%3N)"
             CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|finish|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
             SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-            WF_NAME_ESC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")"
 
             URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ESC}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}&nocache=$(date -u +%s%N)"
 
@@ -257,13 +239,17 @@ PY
               continue
             fi
 
-            python3 - <<'PY' < <(printf '%s' "$RESP") && ok=1 && break || true
-import json,sys
-j=json.load(sys.stdin)
-assert j.get("ok", False), j
-PY
+            token="$(python3 -c 'import json,sys;
+try: j=json.load(sys.stdin)
+except Exception: print("PARSE_ERROR"); sys.exit(0)
+print("OK" if j.get("ok", False) else "NOT_OK")' <<<"$RESP")"
 
-            echo "WARN: FINISH non-ok response (attempt $i/$max). Retrying..." >&2
+            if [[ "$token" == "OK" ]]; then
+              ok=1
+              break
+            fi
+
+            echo "WARN: FINISH non-ok response token='$token' (attempt $i/$max). Retrying..." >&2
             sleep 1
             ((i++))
           done
