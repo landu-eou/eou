@@ -1,36 +1,66 @@
-# =======================
-# PARTE INICIAL (lo que cambias para un clon)
-# =======================
-
-name: System Jumps (ESI → BQ)                            # <-- 001 CAMBIA el nombre visible del workflow
+name: System Jumps (ESI → BQ)
 
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Fuerza ejecución: ignora If-None-Match (y por tanto puede reingestar el snapshot)"
+        required: false
+        default: "false"
+      dry_run:
+        description: "Solo prueba: no escribe en BigQuery ni commitea state"
+        required: false
+        default: "false"
+  repository_dispatch:
+    types: [esi_system_jumps]
 
 permissions:
-  contents: read
+  contents: write
+  id-token: write
+
+concurrency:
+  group: eou_esi_bq_system_jumps-main
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
 
     env:
-      WORKFLOW_ID: eou_esi_bq_system_jumps             # <-- 002 CAMBIA (debe estar también en ALLOW del gateway)
-      WORKFLOW_NAME: "System Jumps (ESI -> BQ)"          # <-- 001 CAMBIA el nombre visible del workflow
-      SHEET_ROW: "3"                             # <-- 003 CAMBIA (fila del tab 'workflows' que va a tocar)
-      EXPIRES: "3600"                              # <-- 004 (opcional) cambia si quieres otra cadencia
-      LOCK_SECONDS: "120"                          # <-- 005 (opcional) cambia si quieres otro lock
+      # --- requeridos por tus nuevos orquestadores ---
+      WORKFLOW_ID: eou_esi_bq_system_jumps
+      WORKFLOW_NAME: "System Jumps (ESI -> BQ)"
+      SHEET_ROW: "3"
+      EXPIRES: "1200"
+      LOCK_SECONDS: "120"
+
+      # --- GCP / BQ ---
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      BQ_DATASET: eou
+
+      # --- ESI ---
+      ESI_BASE_URL: https://esi.evetech.net/latest
+      ESI_DATASOURCE: tranquility
+      USER_AGENT: "landu-eou/eou (ESI system_jumps) contact: landueve78@gmail.com"
+
+      # --- state en main ---
+      STATE_PATH: eou/state/system_jumps.json
 
     steps:
-      - name: Preflight
+      - name: Preflight (gateway)
         shell: bash
         env:
           GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
         run: |
           set -euo pipefail
-          curl -sS -L "$GATEWAY_URL" | jq -e '.service=="eou_gateway_webapp"' >/dev/null
+          RESP="$(curl -sS -L "$GATEWAY_URL")"
+          printf '%s' "$RESP" | python3 - <<'PY'
+          import json,sys
+          j=json.load(sys.stdin)
+          assert j.get("service")=="eou_gateway_webapp", j
+          PY
 
-      - name: START
+      - name: START (gateway lock)
         id: start
         shell: bash
         env:
@@ -40,37 +70,67 @@ jobs:
           set -euo pipefail
           NOW_MS="$(date -u +%s%3N)"
           CONCLUSION="-"
-          # canonical = workflow_id|wf_name|row|phase|expires|lock_seconds|conclusion|now_ms
           CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|start|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")&row=${SHEET_ROW}&phase=start&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
+          WF_NAME_ESC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")"
+          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ESC}&row=${SHEET_ROW}&phase=start&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
 
           RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
-          echo "$RESP" | jq -e . >/dev/null
-          OK="$(echo "$RESP" | jq -r '.ok // false')"
-          if [[ "$OK" != "true" ]]; then
-            echo "Gateway error on START: $RESP"
-            exit 1
-          fi
-          LOCKED="$(echo "$RESP" | jq -r '.locked // false')"
+          LOCKED="$(printf '%s' "$RESP" | python3 - <<'PY'
+          import json,sys
+          j=json.load(sys.stdin)
+          if not j.get("ok", False):
+            print("Gateway error on START:", j, file=sys.stderr)
+            sys.exit(1)
+          v=j.get("locked", False)
+          print("true" if v else "false")
+          PY
+          )"
           echo "locked=$LOCKED" >> "$GITHUB_OUTPUT"
 
       - name: Exit if locked
         if: steps.start.outputs.locked == 'true'
         run: exit 0
 
-# =======================
-# PARTE FUNCIÓN (solo cambia si cambia la función del workflow)
-# =======================
+      - name: Checkout main
+        if: steps.start.outputs.locked != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
-      - name: DO WORK (dummy)
-        run: sleep 3
+      - name: Install jq (needed by script)
+        if: steps.start.outputs.locked != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
 
-# =======================
-# PARTE FINAL (normalmente NO la tocas para un clon)
-# =======================
+      - name: Auth to Google Cloud (WIF)
+        if: steps.start.outputs.locked != 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
-      - name: FINISH
+      - name: Setup gcloud
+        if: steps.start.outputs.locked != 'true'
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Run ingest (ESI → BQ)
+        if: steps.start.outputs.locked != 'true'
+        env:
+          FORCE: ${{ inputs.force || github.event.client_payload.force || 'false' }}
+          DRY_RUN: ${{ inputs.dry_run || github.event.client_payload.dry_run || 'false' }}
+        run: |
+          bash eou/scripts/esi_system_jumps_to_bq.sh
+
+      - name: FINISH (gateway)
         if: always() && steps.start.outputs.locked != 'true'
         shell: bash
         env:
@@ -89,12 +149,14 @@ jobs:
           NOW_MS="$(date -u +%s%3N)"
           CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|finish|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
+          WF_NAME_ESC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")"
+          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ESC}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
 
           RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
-          echo "$RESP" | jq -e . >/dev/null
-          OK="$(echo "$RESP" | jq -r '.ok // false')"
-          if [[ "$OK" != "true" ]]; then
-            echo "Gateway error on FINISH: $RESP"
-            exit 1
-          fi
+          printf '%s' "$RESP" | python3 - <<'PY'
+          import json,sys
+          j=json.load(sys.stdin)
+          if not j.get("ok", False):
+            print("Gateway error on FINISH:", j, file=sys.stderr)
+            sys.exit(1)
+          PY
