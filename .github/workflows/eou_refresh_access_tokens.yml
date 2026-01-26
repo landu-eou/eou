@@ -1,0 +1,275 @@
+name: eou_refresh_access_tokens
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# Opcional: puedes quitarlo si confías 100% en el lock del gateway
+concurrency:
+  group: eou-sso-token-refresh
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    env:
+      WORKFLOW_ID: eou_refresh_access_tokens
+      SHEET_ROW: "10"     # <-- elige una fila fija para este workflow en tu sheet de lock
+      EXPIRES: "900"      # 15 min lease del lock
+      LOCK_SECONDS: "60"  # ventana mínima lock
+
+    steps:
+      - name: Preflight
+        shell: bash
+        env:
+          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
+        run: |
+          set -euo pipefail
+          curl -sS -L "$GATEWAY_URL" | jq -e '.service=="eou_gateway_webapp"' >/dev/null
+
+      - name: START (gateway lock)
+        id: start
+        shell: bash
+        env:
+          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
+          GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
+        run: |
+          set -euo pipefail
+          NOW_MS="$(date -u +%s%3N)"
+          CONCLUSION="-"
+          CANONICAL="${WORKFLOW_ID}|${SHEET_ROW}|start|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
+          SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
+          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&row=${SHEET_ROW}&phase=start&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
+
+          RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
+          echo "$RESP" | jq -e . >/dev/null
+          OK="$(echo "$RESP" | jq -r '.ok // false')"
+          if [[ "$OK" != "true" ]]; then
+            echo "Gateway error on START: $RESP"
+            exit 1
+          fi
+          LOCKED="$(echo "$RESP" | jq -r '.locked // false')"
+          echo "locked=$LOCKED" >> "$GITHUB_OUTPUT"
+
+      - name: Exit if locked
+        if: steps.start.outputs.locked == 'true'
+        run: exit 0
+
+      - name: Refresh EVE tokens and update GitHub Secrets (no logs)
+        env:
+          # Tus secrets nuevos
+          EOU_CLIENTS: ${{ secrets.EOU_CLIENTS }}
+          EOU_REFRESH_TOKENS: ${{ secrets.EOU_REFRESH_TOKENS }}
+          EOU_ACCESS_TOKENS: ${{ secrets.EOU_ACCESS_TOKENS }}
+
+          # Token para poder actualizar secrets desde Actions
+          GH_TOKEN: ${{ secrets.GH_SECRETS_ADMIN_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import sys
+          import subprocess
+          import urllib.parse
+          import urllib.request
+          import urllib.error
+          from datetime import datetime, timezone, timedelta
+
+          TOKEN_URL = "https://login.eveonline.com/v2/oauth/token"
+
+          def iso_z(dt: datetime) -> str:
+            return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+          def log(msg: str) -> None:
+            # NUNCA incluir tokens
+            print(msg)
+
+          def gh_set_secret(name: str, value: str) -> None:
+            # Enviar el valor por STDIN para evitar exponerlo en args/logs.
+            p = subprocess.run(
+              ["gh", "secret", "set", name],
+              input=value.encode("utf-8"),
+              stdout=subprocess.DEVNULL,
+              stderr=subprocess.PIPE,
+              check=False,
+              env=os.environ.copy(),
+            )
+            if p.returncode != 0:
+              err = p.stderr.decode("utf-8", errors="replace").strip()
+              raise RuntimeError(f"gh secret set {name} failed: {err}")
+
+          # Leer secrets (strings)
+          clients_raw = os.environ.get("EOU_CLIENTS", "").strip()
+          refresh_raw = os.environ.get("EOU_REFRESH_TOKENS", "").strip()
+          access_raw  = os.environ.get("EOU_ACCESS_TOKENS", "").strip()
+
+          if not clients_raw:
+            print("Missing EOU_CLIENTS", file=sys.stderr)
+            sys.exit(2)
+          if not refresh_raw:
+            print("Missing EOU_REFRESH_TOKENS", file=sys.stderr)
+            sys.exit(2)
+
+          # Parse JSON
+          try:
+            clients = json.loads(clients_raw)
+            if not isinstance(clients, dict) or not clients:
+              raise ValueError("EOU_CLIENTS must be a non-empty object")
+          except Exception as e:
+            print(f"Invalid EOU_CLIENTS JSON: {e}", file=sys.stderr)
+            sys.exit(2)
+
+          try:
+            refresh_map = json.loads(refresh_raw)
+            if not isinstance(refresh_map, dict) or not refresh_map:
+              raise ValueError("EOU_REFRESH_TOKENS must be a non-empty object")
+          except Exception as e:
+            print(f"Invalid EOU_REFRESH_TOKENS JSON: {e}", file=sys.stderr)
+            sys.exit(2)
+
+          try:
+            existing_access = json.loads(access_raw) if access_raw else {}
+            if not isinstance(existing_access, dict):
+              existing_access = {}
+          except Exception:
+            existing_access = {}
+
+          def sort_key(k: str):
+            try:
+              return (0, int(str(k)))
+            except Exception:
+              return (1, str(k))
+
+          updated_access = dict(existing_access)
+          updated_refresh = dict(refresh_map)
+
+          ok = 0
+          fail = 0
+
+          for char_id in sorted(refresh_map.keys(), key=sort_key):
+            item = refresh_map.get(char_id)
+            if not isinstance(item, dict):
+              log(f"[WARN] char_id={char_id}: invalid entry type -> skipped")
+              fail += 1
+              continue
+
+            app = str(item.get("app", "")).strip()
+            rt  = str(item.get("refresh_token", "")).strip()
+
+            if not app or not rt:
+              log(f"[WARN] char_id={char_id}: missing app/refresh_token -> skipped")
+              fail += 1
+              continue
+
+            app_cfg = clients.get(app)
+            if not isinstance(app_cfg, dict):
+              log(f"[WARN] char_id={char_id}: app '{app}' not found in EOU_CLIENTS -> skipped")
+              fail += 1
+              continue
+
+            client_id = str(app_cfg.get("client_id", "")).strip()
+            client_secret = str(app_cfg.get("client_secret", "")).strip()
+            if not client_id or not client_secret:
+              log(f"[WARN] char_id={char_id}: app '{app}' missing client_id/client_secret -> skipped")
+              fail += 1
+              continue
+
+            basic = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("ascii")
+            headers = {
+              "Authorization": f"Basic {basic}",
+              "Content-Type": "application/x-www-form-urlencoded",
+              "Accept": "application/json",
+            }
+
+            data = urllib.parse.urlencode({
+              "grant_type": "refresh_token",
+              "refresh_token": rt,
+            }).encode("utf-8")
+
+            req = urllib.request.Request(TOKEN_URL, data=data, headers=headers, method="POST")
+
+            try:
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                body = resp.read()
+              payload = json.loads(body.decode("utf-8"))
+            except urllib.error.HTTPError as e:
+              log(f"[WARN] char_id={char_id}: HTTP {e.code} refreshing token")
+              fail += 1
+              continue
+            except Exception as e:
+              log(f"[WARN] char_id={char_id}: error refreshing token ({type(e).__name__})")
+              fail += 1
+              continue
+
+            at = payload.get("access_token")
+            expires_in = payload.get("expires_in")
+            if not at or not expires_in:
+              log(f"[WARN] char_id={char_id}: missing access_token/expires_in")
+              fail += 1
+              continue
+
+            try:
+              expires_in = int(expires_in)
+            except Exception:
+              expires_in = 0
+
+            exp = datetime.now(timezone.utc) + timedelta(seconds=max(expires_in, 0))
+
+            updated_access[str(char_id)] = {
+              "access_token": at,
+              "exp_utc": iso_z(exp),
+              "updated_utc": iso_z(datetime.now(timezone.utc)),
+            }
+
+            # Si CCP rota refresh_token, persistirlo.
+            new_rt = payload.get("refresh_token")
+            if isinstance(new_rt, str) and new_rt.strip():
+              updated_refresh[str(char_id)] = dict(item)
+              updated_refresh[str(char_id)]["refresh_token"] = new_rt.strip()
+
+            ok += 1
+
+          access_out = json.dumps(updated_access, separators=(",", ":"), ensure_ascii=False)
+          refresh_out = json.dumps(updated_refresh, separators=(",", ":"), ensure_ascii=False)
+
+          # Persistir: access siempre; refresh solo cambia si hay rotación, pero guardarlo es seguro.
+          gh_set_secret("EOU_ACCESS_TOKENS", access_out)
+          gh_set_secret("EOU_REFRESH_TOKENS", refresh_out)
+
+          log(f"[DONE] refreshed_ok={ok} refreshed_fail={fail} total={len(refresh_map)}")
+          PY
+
+      - name: FINISH (gateway unlock)
+        if: always() && steps.start.outputs.locked != 'true'
+        shell: bash
+        env:
+          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
+          GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
+        run: |
+          set -euo pipefail
+          STATUS="${{ job.status }}"
+          case "$STATUS" in
+            success) CONCLUSION="success" ;;
+            failure) CONCLUSION="failure" ;;
+            cancelled) CONCLUSION="cancelled" ;;
+            *) CONCLUSION="neutral" ;;
+          esac
+
+          NOW_MS="$(date -u +%s%3N)"
+          CANONICAL="${WORKFLOW_ID}|${SHEET_ROW}|finish|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
+          SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
+          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
+
+          RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
+          echo "$RESP" | jq -e . >/dev/null
+          OK="$(echo "$RESP" | jq -r '.ok // false')"
+          if [[ "$OK" != "true" ]]; then
+            echo "Gateway error on FINISH: $RESP"
+            exit 1
+          fi
