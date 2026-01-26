@@ -196,7 +196,7 @@ jobs:
           FORCE: ${{ github.event.inputs.force || github.event.client_payload.force || 'false' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || github.event.client_payload.dry_run || 'false' }}
         run: |
-          bash eou/scripts/system_jumps_esi_to_bq.sh
+          bash scripts/system_jumps_esi_to_bq.sh
 
       # ------------------------------------------------------------
       # FINISH: solo si START ocurrió y no estaba locked
