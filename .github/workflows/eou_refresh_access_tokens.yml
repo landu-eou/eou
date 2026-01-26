@@ -19,7 +19,7 @@ jobs:
       # Gateway contract
       WORKFLOW_ID: eou_refresh_access_tokens
       WORKFLOW_NAME: "Refresh Access Tokens (SSO -> GHs)"
-      SHEET_ROW: "5"        # <-- elige una fila fija para este workflow
+      SHEET_ROW: "2"        # <-- elige una fila fija para este workflow
       EXPIRES: "900"         # lease del lock (seg)
       LOCK_SECONDS: "60"     # lock mínimo (seg)
 
