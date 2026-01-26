@@ -48,16 +48,22 @@ jobs:
           CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|start|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
           URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ENC}&row=${SHEET_ROW}&phase=start&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
-          RESP="$(curl -sS -L "$URL")"
+          RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
           echo "$RESP" | jq -e . >/dev/null
-          [[ "$(echo "$RESP" | jq -r '.ok')" == "true" ]]
-          echo "locked=$(echo "$RESP" | jq -r '.locked')" >> "$GITHUB_OUTPUT"
+          OK="$(echo "$RESP" | jq -r '.ok // false')"
+          if [[ "$OK" != "true" ]]; then
+            echo "Gateway error on START: $RESP"
+            exit 1
+          fi
+          LOCKED="$(echo "$RESP" | jq -r '.locked // false')"
+          echo "locked=$LOCKED" >> "$GITHUB_OUTPUT"
 
       - name: Exit if locked
         if: steps.start.outputs.locked == 'true'
         run: exit 0
 
       - id: gcp_auth
+        name: Auth to Google (WIF)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -65,31 +71,75 @@ jobs:
           token_format: access_token
           access_token_scopes: https://www.googleapis.com/auth/spreadsheets
 
-      - name: Refresh tokens + write Sheets
+      - name: Refresh tokens, persist to GH Secrets, and write to Sheets
         env:
           EOU_CLIENTS: ${{ secrets.EOU_CLIENTS }}
           EOU_REFRESH_TOKENS: ${{ secrets.EOU_REFRESH_TOKENS }}
           EOU_ACCESS_TOKENS: ${{ secrets.EOU_ACCESS_TOKENS }}
+
           GH_TOKEN: ${{ secrets.GH_SECRETS_ADMIN_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+
           GOOGLE_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import base64, json, os, subprocess, urllib.parse, urllib.request
+          import base64, json, os, subprocess, urllib.parse, urllib.request, urllib.error
           from datetime import datetime, timezone
 
           TOKEN_URL = "https://login.eveonline.com/v2/oauth/token"
+
           ORDER = [
             "90734547","91939203","92017833","91412962","92006397","92006494",
             "92816858","92817160","2118026235","2118561816","2124070822"
           ]
 
-          def iso():
+          SPREADSHEET_ID = os.environ["TOKENS_SPREADSHEET_ID"]
+          TAB_NAME = os.environ["TOKENS_TAB_NAME"]
+          G_TOKEN = os.environ.get("GOOGLE_ACCESS_TOKEN","").strip()
+
+          GH_REPO = os.environ.get("GH_REPO","").strip()
+          if not GH_REPO:
+            raise RuntimeError("Missing GH_REPO (set to github.repository)")
+
+          def iso_z():
             return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
 
-          def gh_set(name, val):
-            subprocess.run(["gh","secret","set",name], input=val.encode(),
-                           stdout=subprocess.DEVNULL, check=True)
+          def gh_set_secret(name: str, value: str) -> None:
+            # Importante: -R evita depender de .git
+            p = subprocess.run(
+              ["gh", "secret", "set", name, "-R", GH_REPO, "--app", "actions"],
+              input=value.encode("utf-8"),
+              stdout=subprocess.DEVNULL,
+              stderr=subprocess.PIPE,
+              check=False,
+            )
+            if p.returncode != 0:
+              raise RuntimeError(p.stderr.decode("utf-8", errors="replace").strip())
+
+          def sheets_update(range_a1: str, values_rows: list) -> None:
+            if not G_TOKEN:
+              raise RuntimeError("Missing GOOGLE_ACCESS_TOKEN")
+            url = (
+              f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}"
+              f"/values/{urllib.request.quote(range_a1)}?valueInputOption=RAW"
+            )
+            body = json.dumps({
+              "range": range_a1,
+              "majorDimension": "ROWS",
+              "values": values_rows
+            }).encode("utf-8")
+            req = urllib.request.Request(
+              url,
+              data=body,
+              method="PUT",
+              headers={
+                "Authorization": f"Bearer {G_TOKEN}",
+                "Content-Type": "application/json; charset=utf-8",
+              },
+            )
+            with urllib.request.urlopen(req, timeout=25) as resp:
+              resp.read()
 
           clients = json.loads(os.environ["EOU_CLIENTS"])
           refresh = json.loads(os.environ["EOU_REFRESH_TOKENS"])
@@ -97,50 +147,105 @@ jobs:
 
           out = dict(prev)
           rows = []
-          now = iso()
+          now_ts = iso_z()
+
+          ok = 0
+          fail = 0
 
           for cid in ORDER:
-            meta = refresh.get(cid,{})
-            old = out.get(cid,{})
-            token = old.get("access_token","")
-            ts = old.get("ts_token","")
-            code = 0
+            meta = refresh.get(cid, {}) if isinstance(refresh.get(cid, {}), dict) else {}
+            old = out.get(cid, {}) if isinstance(out.get(cid, {}), dict) else {}
+
+            token_keep = old.get("access_token","")
+            ts_keep = old.get("ts_token","")
+            code_int = 0
+
+            # Defaults for sheet columns A/B
+            account = str(meta.get("account",""))
+            char_name = str(meta.get("char_name",""))
+
+            app = str(meta.get("app","")).strip()
+            rt = str(meta.get("refresh_token","")).strip()
+
+            if not app or not rt:
+              out[cid] = {"access_token": token_keep, "ts_token": ts_keep, "code_int": 0}
+              rows.append([account, char_name, cid, token_keep, ts_keep, 0])
+              fail += 1
+              continue
+
+            c = clients.get(app, {})
+            client_id = str(c.get("client_id","")).strip()
+            client_secret = str(c.get("client_secret","")).strip()
+            if not client_id or not client_secret:
+              out[cid] = {"access_token": token_keep, "ts_token": ts_keep, "code_int": 0}
+              rows.append([account, char_name, cid, token_keep, ts_keep, 0])
+              fail += 1
+              continue
+
+            basic = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("ascii")
+            data = urllib.parse.urlencode({"grant_type":"refresh_token","refresh_token":rt}).encode("utf-8")
+            req = urllib.request.Request(
+              TOKEN_URL,
+              data=data,
+              method="POST",
+              headers={
+                "Authorization": f"Basic {basic}",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+              },
+            )
 
             try:
-              app = meta["app"]
-              rt = meta["refresh_token"]
-              c = clients[app]
-              basic = base64.b64encode(f"{c['client_id']}:{c['client_secret']}".encode()).decode()
-              data = urllib.parse.urlencode({"grant_type":"refresh_token","refresh_token":rt}).encode()
-              req = urllib.request.Request(TOKEN_URL, data=data, method="POST",
-                headers={"Authorization":f"Basic {basic}","Content-Type":"application/x-www-form-urlencoded"})
               with urllib.request.urlopen(req, timeout=20) as r:
-                p = json.loads(r.read())
-              token = p["access_token"]
-              ts = now
-              code = 200
+                payload = json.loads(r.read().decode("utf-8"))
+              token_new = payload.get("access_token")
+              if not token_new:
+                # success HTTP pero sin token => treat as fail
+                out[cid] = {"access_token": token_keep, "ts_token": ts_keep, "code_int": 0}
+                rows.append([account, char_name, cid, token_keep, ts_keep, 0])
+                fail += 1
+                continue
+
+              # SUCCESS
+              code_int = 200
+              out[cid] = {"access_token": token_new, "ts_token": now_ts, "code_int": 200}
+              rows.append([account, char_name, cid, token_new, now_ts, 200])
+              ok += 1
+
+              # Rotación refresh_token (si viene)
+              new_rt = payload.get("refresh_token")
+              if isinstance(new_rt, str) and new_rt.strip():
+                new_item = dict(meta)
+                new_item["refresh_token"] = new_rt.strip()
+                refresh[cid] = new_item
+
             except urllib.error.HTTPError as e:
-              code = e.code
+              code_int = int(e.code)
+              out[cid] = {"access_token": token_keep, "ts_token": ts_keep, "code_int": code_int}
+              rows.append([account, char_name, cid, token_keep, ts_keep, code_int])
+              fail += 1
             except Exception:
-              code = 0
+              out[cid] = {"access_token": token_keep, "ts_token": ts_keep, "code_int": 0}
+              rows.append([account, char_name, cid, token_keep, ts_keep, 0])
+              fail += 1
 
-            out[cid] = {"access_token":token,"ts_token":ts,"code_int":code}
-            rows.append([
-              meta.get("account",""),
-              meta.get("char_name",""),
-              cid, token, ts, code
-            ])
+          # Persistir secrets (estado + refresh si rotó)
+          gh_set_secret("EOU_ACCESS_TOKENS", json.dumps(out, separators=(",",":"), ensure_ascii=False))
+          gh_set_secret("EOU_REFRESH_TOKENS", json.dumps(refresh, separators=(",",":"), ensure_ascii=False))
 
-          gh_set("EOU_ACCESS_TOKENS", json.dumps(out, separators=(",",":")))
+          # Volcar a Sheets en tu orden: rows 2..12
+          start_row = 2
+          end_row = start_row + len(rows) - 1
+          rng = f"{TAB_NAME}!A{start_row}:F{end_row}"
+          try:
+            sheets_update(rng, rows)
+          except urllib.error.HTTPError as e:
+            # No abortar: ya persistimos en GH
+            print(f"[WARN] Sheets write failed HTTP {e.code}")
+          except Exception as e:
+            print(f"[WARN] Sheets write failed ({type(e).__name__})")
 
-          rng = f"access_tokens!A2:F{1+len(rows)}"
-          url = f"https://sheets.googleapis.com/v4/spreadsheets/{os.environ['TOKENS_SPREADSHEET_ID']}/values/{urllib.parse.quote(rng)}?valueInputOption=RAW"
-          body = json.dumps({"range":rng,"majorDimension":"ROWS","values":rows}).encode()
-          req = urllib.request.Request(url, data=body, method="PUT",
-            headers={"Authorization":f"Bearer {os.environ['GOOGLE_ACCESS_TOKEN']}",
-                     "Content-Type":"application/json"})
-          urllib.request.urlopen(req).read()
-          print("[DONE]", len(rows))
+          print(f"[DONE] refreshed_ok={ok} refreshed_fail={fail} total={len(rows)} wrote_sheet_rows={len(rows)}")
           PY
 
       - name: FINISH
@@ -152,10 +257,25 @@ jobs:
         run: |
           set -euo pipefail
           WF_NAME_ENC="$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["WORKFLOW_NAME"]))')"
+
           STATUS="${{ job.status }}"
-          [[ "$STATUS" == "success" ]] && CONCLUSION="success" || CONCLUSION="failure"
+          case "$STATUS" in
+            success) CONCLUSION="success" ;;
+            failure) CONCLUSION="failure" ;;
+            cancelled) CONCLUSION="cancelled" ;;
+            *) CONCLUSION="neutral" ;;
+          esac
+
           NOW_MS="$(date -u +%s%3N)"
           CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|finish|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
+
           URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ENC}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
-          curl -sS -L "$URL" | jq -e '.ok==true' >/dev/null
+
+          RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
+          echo "$RESP" | jq -e . >/dev/null
+          OK="$(echo "$RESP" | jq -r '.ok // false')"
+          if [[ "$OK" != "true" ]]; then
+            echo "Gateway error on FINISH: $RESP"
+            exit 1
+          fi
