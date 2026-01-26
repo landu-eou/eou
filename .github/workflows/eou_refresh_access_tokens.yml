@@ -16,13 +16,15 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      # Gateway contract
       WORKFLOW_ID: eou_refresh_access_tokens
-      SHEET_ROW: "10"     # <-- elige una fila fija para este workflow en tu sheet de lock
-      EXPIRES: "900"      # 15 min lease del lock
-      LOCK_SECONDS: "60"  # ventana mínima lock
+      WORKFLOW_NAME: "EOU · Refresh Access Tokens (SSO -> GH Secrets)"
+      SHEET_ROW: "5"        # <-- elige una fila fija para este workflow
+      EXPIRES: "900"         # lease del lock (seg)
+      LOCK_SECONDS: "60"     # lock mínimo (seg)
 
     steps:
-      - name: Preflight
+      - name: Preflight (gateway sanity check)
         shell: bash
         env:
           GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
@@ -38,19 +40,28 @@ jobs:
           GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
         run: |
           set -euo pipefail
+
+          # URL-encode workflow name exactly once
+          WF_NAME_ENC="$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["WORKFLOW_NAME"]))')"
+
           NOW_MS="$(date -u +%s%3N)"
           CONCLUSION="-"
-          CANONICAL="${WORKFLOW_ID}|${SHEET_ROW}|start|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
+
+          # canonical = workflow_id|wf_name|row|phase|expires|lock_seconds|conclusion|now_ms
+          CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|start|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&row=${SHEET_ROW}&phase=start&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
+
+          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ENC}&row=${SHEET_ROW}&phase=start&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
 
           RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
           echo "$RESP" | jq -e . >/dev/null
+
           OK="$(echo "$RESP" | jq -r '.ok // false')"
           if [[ "$OK" != "true" ]]; then
             echo "Gateway error on START: $RESP"
             exit 1
           fi
+
           LOCKED="$(echo "$RESP" | jq -r '.locked // false')"
           echo "locked=$LOCKED" >> "$GITHUB_OUTPUT"
 
@@ -60,12 +71,12 @@ jobs:
 
       - name: Refresh EVE tokens and update GitHub Secrets (no logs)
         env:
-          # Tus secrets nuevos
+          # Tus secrets de configuración/estado
           EOU_CLIENTS: ${{ secrets.EOU_CLIENTS }}
           EOU_REFRESH_TOKENS: ${{ secrets.EOU_REFRESH_TOKENS }}
           EOU_ACCESS_TOKENS: ${{ secrets.EOU_ACCESS_TOKENS }}
 
-          # Token para poder actualizar secrets desde Actions
+          # Para poder actualizar secrets desde Actions
           GH_TOKEN: ${{ secrets.GH_SECRETS_ADMIN_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
@@ -87,11 +98,11 @@ jobs:
             return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
           def log(msg: str) -> None:
-            # NUNCA incluir tokens
+            # Nunca incluir tokens
             print(msg)
 
           def gh_set_secret(name: str, value: str) -> None:
-            # Enviar el valor por STDIN para evitar exponerlo en args/logs.
+            # Enviar por STDIN para no exponer en args/logs
             p = subprocess.run(
               ["gh", "secret", "set", name],
               input=value.encode("utf-8"),
@@ -104,7 +115,6 @@ jobs:
               err = p.stderr.decode("utf-8", errors="replace").strip()
               raise RuntimeError(f"gh secret set {name} failed: {err}")
 
-          # Leer secrets (strings)
           clients_raw = os.environ.get("EOU_CLIENTS", "").strip()
           refresh_raw = os.environ.get("EOU_REFRESH_TOKENS", "").strip()
           access_raw  = os.environ.get("EOU_ACCESS_TOKENS", "").strip()
@@ -116,7 +126,6 @@ jobs:
             print("Missing EOU_REFRESH_TOKENS", file=sys.stderr)
             sys.exit(2)
 
-          # Parse JSON
           try:
             clients = json.loads(clients_raw)
             if not isinstance(clients, dict) or not clients:
@@ -220,25 +229,24 @@ jobs:
               expires_in = 0
 
             exp = datetime.now(timezone.utc) + timedelta(seconds=max(expires_in, 0))
-
             updated_access[str(char_id)] = {
               "access_token": at,
               "exp_utc": iso_z(exp),
               "updated_utc": iso_z(datetime.now(timezone.utc)),
             }
 
-            # Si CCP rota refresh_token, persistirlo.
+            # Si CCP rota refresh_token, persistirlo en el mismo objeto del personaje (sin tocar metadata)
             new_rt = payload.get("refresh_token")
             if isinstance(new_rt, str) and new_rt.strip():
-              updated_refresh[str(char_id)] = dict(item)
-              updated_refresh[str(char_id)]["refresh_token"] = new_rt.strip()
+              new_item = dict(item)
+              new_item["refresh_token"] = new_rt.strip()
+              updated_refresh[str(char_id)] = new_item
 
             ok += 1
 
           access_out = json.dumps(updated_access, separators=(",", ":"), ensure_ascii=False)
           refresh_out = json.dumps(updated_refresh, separators=(",", ":"), ensure_ascii=False)
 
-          # Persistir: access siempre; refresh solo cambia si hay rotación, pero guardarlo es seguro.
           gh_set_secret("EOU_ACCESS_TOKENS", access_out)
           gh_set_secret("EOU_REFRESH_TOKENS", refresh_out)
 
@@ -253,6 +261,9 @@ jobs:
           GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
         run: |
           set -euo pipefail
+
+          WF_NAME_ENC="$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["WORKFLOW_NAME"]))')"
+
           STATUS="${{ job.status }}"
           case "$STATUS" in
             success) CONCLUSION="success" ;;
@@ -262,12 +273,16 @@ jobs:
           esac
 
           NOW_MS="$(date -u +%s%3N)"
-          CANONICAL="${WORKFLOW_ID}|${SHEET_ROW}|finish|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
+
+          # canonical = workflow_id|wf_name|row|phase|expires|lock_seconds|conclusion|now_ms
+          CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|finish|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
+
+          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ENC}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
 
           RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
           echo "$RESP" | jq -e . >/dev/null
+
           OK="$(echo "$RESP" | jq -r '.ok // false')"
           if [[ "$OK" != "true" ]]; then
             echo "Gateway error on FINISH: $RESP"
