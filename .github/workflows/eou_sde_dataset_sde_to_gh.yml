@@ -24,7 +24,7 @@ jobs:
       WORKFLOW_NAME: "SDE Dataset (SDE -> GH)"
       SHEET_ROW: "3"
       EXPIRES: "86400"
-      LOCK_SECONDS: "120"
+      LOCK_SECONDS: "60"
 
       SDE_URL: "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip"
       OUT_DIR: "data/gh_sde"
