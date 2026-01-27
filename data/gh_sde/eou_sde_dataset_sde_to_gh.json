@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "latestUrl": "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip",
+    "effectiveUrl": "https://developers.eveonline.com/static-data/tranquility/eve-online-static-data-3171578-jsonl.zip"
+  },
+  "http": {
+    "etag": "\"6358ef3006b0b857c2d8005781bfc4cb-10\"",
+    "lastModified": "Tue, 20 Jan 2026 11:34:03 GMT",
+    "contentLength": 82797336,
+    "cacheControl": "max-age=86400"
+  },
+  "build": {
+    "updated": true,
+    "forced": false,
+    "sdeChanged": true,
+    "checkedAtUtc": "2026-01-27T11:10:59.939857Z",
+    "generatedAtUtc": "2026-01-27T11:11:08.518111Z"
+  },
+  "validation": {
+    "min": {
+      "systems": 5000,
+      "regions": 50,
+      "types": 10000,
+      "stations": 1000,
+      "stargates": 1000
+    },
+    "counts": {
+      "systems": 8437,
+      "regions": 113,
+      "types": 26403,
+      "stations_written": 5154,
+      "stations_total": 5154,
+      "stargates": 13776
+    }
+  },
+  "outputs": {
+    "ss": {
+      "path": "data/gh_sde/gh_sde_ss.jsonl.gz",
+      "records": 8437
+    },
+    "rg": {
+      "path": "data/gh_sde/gh_sde_rg.jsonl.gz",
+      "records": 113
+    },
+    "ty": {
+      "path": "data/gh_sde/gh_sde_ty.jsonl.gz",
+      "records": 26403
+    },
+    "st": {
+      "path": "data/gh_sde/gh_sde_st.jsonl.gz",
+      "records": 5154
+    },
+    "sg": {
+      "path": "data/gh_sde/gh_sde_sg.jsonl.gz",
+      "records": 13776
+    }
+  }
+}
