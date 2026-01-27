@@ -5,8 +5,10 @@ on:
   repository_dispatch:
     types: [eou_sde_dataset_sde_to_gh]
 
+# Candado anti-solapamiento (mecanismo oficial GitHub)
+# Nota: cancel-in-progress=false para NO cortar una actualización a medias.
 concurrency:
-  group: eou_sde_dataset_sde_to_gh-${{ github.ref }}
+  group: eou_sde_dataset_sde_to_gh
   cancel-in-progress: false
 
 permissions:
@@ -15,6 +17,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     env:
       WORKFLOW_ID: eou_sde_dataset_sde_to_gh
@@ -51,6 +54,7 @@ jobs:
           set -euo pipefail
           NOW_MS="$(date -u +%s%3N)"
           CONCLUSION="-"
+          # canonical = workflow_id|wf_name|row|phase|expires|lock_seconds|conclusion|now_ms
           CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|start|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
           URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")&row=${SHEET_ROW}&phase=start&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
@@ -113,7 +117,7 @@ jobs:
           NOW_MS="$(date -u +%s%3N)"
           NEXT_RUN_MS="${{ steps.build.outputs.next_run_ms }}"
 
-          # expires = next_run - run_ended (según tu regla)
+          # expires = next_run - run_ended  (tu regla)
           if [[ -z "$NEXT_RUN_MS" ]]; then
             EXPIRES_SEC="${EXPIRES}"
           else
