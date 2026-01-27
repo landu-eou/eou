@@ -12,7 +12,6 @@ STATIONS_OUT="gh_sde_st.jsonl.gz"
 TYPES_OUT="gh_sde_ty.jsonl.gz"
 STARGATES_OUT="gh_sde_sg.jsonl.gz"
 
-# Validaciones duras
 MIN_SYSTEMS=5000
 MIN_REGIONS=50
 MIN_TYPES=10000
@@ -26,6 +25,17 @@ mkdir -p "$OUT_DIR"
 
 lower() { printf "%s" "$1" | tr '[:upper:]' '[:lower:]'; }
 is_true() { case "$(lower "${1:-false}")" in 1|true|yes|y|on) return 0;; *) return 1;; esac; }
+
+norm_etag() {
+  # normaliza: trim + quita comillas dobles exteriores si existen
+  local s="${1:-}"
+  s="$(printf "%s" "$s" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  # quita comillas exteriores "...."
+  if [[ "$s" =~ ^\".*\"$ ]]; then
+    s="${s:1:${#s}-2}"
+  fi
+  printf "%s" "$s"
+}
 
 hdr_get_from() {
   local file="$1" key="$2"
@@ -51,12 +61,14 @@ write_outputs() {
   fi
 }
 
-stored_etag=""
+stored_etag_raw=""
 stored_last_modified=""
 if [[ -f "$META_PATH" ]]; then
-  stored_etag="$(jq -r '.http.etag // empty' "$META_PATH" || true)"
+  stored_etag_raw="$(jq -r '.http.etag // empty' "$META_PATH" || true)"
   stored_last_modified="$(jq -r '.http.lastModified // empty' "$META_PATH" || true)"
 fi
+
+stored_etag="$(norm_etag "$stored_etag_raw")"
 
 forced="false"
 if is_true "$FORCE_REBUILD"; then forced="true"; fi
@@ -65,8 +77,8 @@ headers_file="$tmp/headers.txt"
 
 curl_head=(curl -sS -L -I -D "$headers_file" -o /dev/null -w "%{http_code}\n%{url_effective}\n")
 if [[ "$forced" != "true" ]]; then
-  if [[ -n "$stored_etag" ]]; then
-    curl_head+=(-H "If-None-Match: $stored_etag")
+  if [[ -n "$stored_etag_raw" ]]; then
+    curl_head+=(-H "If-None-Match: $stored_etag_raw")
   elif [[ -n "$stored_last_modified" ]]; then
     curl_head+=(-H "If-Modified-Since: $stored_last_modified")
   fi
@@ -77,23 +89,21 @@ info="$("${curl_head[@]}")"
 http_code="$(printf "%s" "$info" | sed -n '1p')"
 url_effective="$(printf "%s" "$info" | sed -n '2p')"
 
-etag="$(hdr_get_from "$headers_file" "ETag")"
+etag_raw="$(hdr_get_from "$headers_file" "ETag")"
 last_modified="$(hdr_get_from "$headers_file" "Last-Modified")"
 content_length="$(hdr_get_from "$headers_file" "Content-Length")"
 cache_control="$(hdr_get_from "$headers_file" "Cache-Control")"
 
-# CCP indica que Static Data soporta ETag y Last-Modified; usamos ambos. :contentReference[oaicite:3]{index=3}
-if [[ -z "$etag" ]]; then
+if [[ -z "$etag_raw" ]]; then
   echo "ERROR: falta ETag en headers."
   exit 2
 fi
+etag="$(norm_etag "$etag_raw")"
 
-# Last-Modified puede faltar en 304/CDN; fallback a meta.
 if [[ -z "$last_modified" && -n "$stored_last_modified" ]]; then
   last_modified="$stored_last_modified"
 fi
 
-# Si sigue faltando, HEAD no-condicional para intentar obtenerlo.
 if [[ -z "$last_modified" ]]; then
   echo "WARN: Last-Modified vacío en HEAD. Reintentando HEAD no condicional..."
   headers_file2="$tmp/headers2.txt"
@@ -107,36 +117,45 @@ fi
 
 if [[ -z "$last_modified" ]]; then
   echo "ERROR: Last-Modified sigue vacío. No puedo calcular next_run."
-  echo "ETag='$etag' Last-Modified='$last_modified'"
+  echo "ETag_raw='$etag_raw' Last-Modified='$last_modified'"
   exit 2
 fi
 
+# --- Decide sde_changed (solo si hay stored_etag) ---
+# Bootstrap (stored_etag vacío) NO cuenta como “cambio upstream”
 sde_changed="false"
-case "$http_code" in
-  304) sde_changed="false" ;;
-  200)
-    if [[ -n "$stored_etag" && "$etag" == "$stored_etag" ]]; then
-      sde_changed="false"
-    else
-      sde_changed="true"
-    fi
-    ;;
-  *)
-    echo "ERROR: HTTP inesperado en HEAD: $http_code"
-    exit 2
-    ;;
-esac
+bootstrap="false"
+if [[ -z "$stored_etag" ]]; then
+  bootstrap="true"
+  sde_changed="false"
+else
+  if [[ "$etag" != "$stored_etag" ]]; then
+    sde_changed="true"
+  fi
+fi
 
+# --- Decide updated ---
+# updated = forced OR sde_changed OR bootstrap (para construir la primera vez)
 updated="false"
-if [[ "$forced" == "true" || "$sde_changed" == "true" ]]; then
+if [[ "$forced" == "true" || "$sde_changed" == "true" || "$bootstrap" == "true" ]]; then
   updated="true"
 fi
 
-# Scheduling + expires_sec (robusto, siempre presente)
+# --- Decide should_update network-wise (download/parse) ---
+# Si NO updated => salir.
+# Si updated => descargar + parsear.
+# (Este diseño evita que un “bootstrap” se marque como sdeChanged.)
+# Scheduling: usa "sde_changed OR forced" como “update real”; bootstrap cae en “no-update” para ventana 10–15.
+real_update="false"
+if [[ "$forced" == "true" || "$sde_changed" == "true" ]]; then
+  real_update="true"
+fi
+
+# --- Compute next_run/expires ---
 calc_out="$tmp/sched.json"
-python3 - "$updated" "$last_modified" > "$calc_out" <<'PY'
+python3 - "$real_update" "$last_modified" > "$calc_out" <<'PY'
 import sys, json, datetime, email.utils
-updated = (sys.argv[1].lower() == "true")
+real_update = (sys.argv[1].lower() == "true")
 lm_str = sys.argv[2]
 lm_dt = email.utils.parsedate_to_datetime(lm_str)
 if lm_dt.tzinfo is None:
@@ -144,7 +163,7 @@ if lm_dt.tzinfo is None:
 lm_dt = lm_dt.astimezone(datetime.timezone.utc)
 now_dt = datetime.datetime.now(datetime.timezone.utc)
 
-if updated:
+if real_update:
     next_run = lm_dt + datetime.timedelta(days=1, minutes=10)
 else:
     h = lm_dt.hour
@@ -158,10 +177,7 @@ now_ms = int(now_dt.timestamp() * 1000)
 diff_ms = max(0, next_run_ms - now_ms)
 expires_sec = (diff_ms + 999) // 1000
 
-print(json.dumps({
-    "next_run_ms": next_run_ms,
-    "expires_sec": expires_sec,
-}))
+print(json.dumps({"next_run_ms": next_run_ms, "expires_sec": expires_sec}))
 PY
 
 next_run_ms="$(jq -r '.next_run_ms' "$calc_out")"
@@ -172,7 +188,7 @@ require_int "expires_sec" "$expires_sec"
 write_outputs "$updated" "$sde_changed" "$forced" "$next_run_ms" "$expires_sec"
 
 if [[ "$updated" != "true" ]]; then
-  echo "No update needed (304 or same ETag)."
+  echo "No update needed (same ETag, not forced)."
   exit 0
 fi
 
@@ -184,34 +200,32 @@ old_dir="${OUT_DIR}.__old"
 rm -rf "$new_dir" "$old_dir"
 mkdir -p "$new_dir"
 
-# preserva README renombrado si existe
 if [[ -f "${OUT_DIR}/eou_sde_dataset_sde_to_gh__rm.md" ]]; then
   cp -f "${OUT_DIR}/eou_sde_dataset_sde_to_gh__rm.md" "${new_dir}/eou_sde_dataset_sde_to_gh__rm.md"
 fi
 
-python3 - "$zip_path" "$new_dir" "$url_effective" "$etag" "$last_modified" "$content_length" "$cache_control" \
+python3 - "$zip_path" "$new_dir" "$url_effective" "$etag_raw" "$last_modified" "$content_length" "$cache_control" \
   "$MIN_SYSTEMS" "$MIN_REGIONS" "$MIN_TYPES" "$MIN_STATIONS" "$MIN_STARGATES" \
   "$SYSTEMS_OUT" "$REGIONS_OUT" "$TYPES_OUT" "$STATIONS_OUT" "$STARGATES_OUT" \
-  "$META_PATH" "$forced" "$sde_changed" "$updated" <<'PY'
+  "$bootstrap" "$forced" "$sde_changed" "$real_update" <<'PY'
 import sys, os, json, gzip, zipfile, datetime
 from typing import Any, Dict, Optional, Tuple
 
 zip_path, out_dir = sys.argv[1], sys.argv[2]
-url_effective, etag, last_modified, content_length, cache_control = sys.argv[3:8]
+url_effective, etag_raw, last_modified, content_length, cache_control = sys.argv[3:8]
 MIN_SYSTEMS, MIN_REGIONS, MIN_TYPES, MIN_STATIONS, MIN_STARGATES = map(int, sys.argv[8:13])
-
 SYSTEMS_OUT, REGIONS_OUT, TYPES_OUT, STATIONS_OUT, STARGATES_OUT = sys.argv[13:18]
-META_PATH = sys.argv[18]
+bootstrap = (sys.argv[18].lower() == "true")
 forced = (sys.argv[19].lower() == "true")
 sde_changed = (sys.argv[20].lower() == "true")
-updated = (sys.argv[21].lower() == "true")
+real_update = (sys.argv[21].lower() == "true")
 
 def pick_exact(z: zipfile.ZipFile, target_basename: str) -> str:
     t = target_basename.lower()
     for name in z.namelist():
         if os.path.basename(name).lower() == t:
             return name
-    raise RuntimeError(f"No encontré '{target_basename}' (basename exacto) dentro del ZIP.")
+    raise RuntimeError(f"No encontré '{target_basename}' dentro del ZIP.")
 
 def as_int(v: Any) -> Optional[int]:
     try:
@@ -273,7 +287,6 @@ with zipfile.ZipFile(zip_path) as z:
     m_npcCorporations   = pick_exact(z, "npcCorporations.jsonl")
     m_stationOperations = pick_exact(z, "stationOperations.jsonl")
 
-    # Systems
     system_name: Dict[int, str] = {}
     with z.open(m_mapSolarSystems) as f:
         for raw in f:
@@ -283,9 +296,8 @@ with zipfile.ZipFile(zip_path) as z:
             if sid is None or not name: continue
             system_name[sid] = name
     if len(system_name) < MIN_SYSTEMS:
-        raise RuntimeError(f"VALIDATION FAIL: systems={len(system_name)} < {MIN_SYSTEMS}.")
+        raise RuntimeError("systems validation fail")
 
-    # Regions
     region_name: Dict[int, str] = {}
     with z.open(m_mapRegions) as f:
         for raw in f:
@@ -295,9 +307,8 @@ with zipfile.ZipFile(zip_path) as z:
             if rid is None or not name: continue
             region_name[rid] = name
     if len(region_name) < MIN_REGIONS:
-        raise RuntimeError(f"VALIDATION FAIL: regions={len(region_name)} < {MIN_REGIONS}.")
+        raise RuntimeError("regions validation fail")
 
-    # Types (published)
     type_name: Dict[int, str] = {}
     with z.open(m_types) as f:
         for raw in f:
@@ -309,9 +320,8 @@ with zipfile.ZipFile(zip_path) as z:
             if tid is None or not name: continue
             type_name[tid] = name
     if len(type_name) < MIN_TYPES:
-        raise RuntimeError(f"VALIDATION FAIL: published types={len(type_name)} < {MIN_TYPES}.")
+        raise RuntimeError("types validation fail")
 
-    # Celestials
     stars: Dict[int, int] = {}
     planets: Dict[int, Tuple[int,int]] = {}
     moons: Dict[int, Tuple[int,int]] = {}
@@ -352,7 +362,6 @@ with zipfile.ZipFile(zip_path) as z:
             load_explicit_name(o, cid)
 
     orbit_cache: Dict[int, str] = {}
-
     def orbit_name(celestial_id: int) -> Optional[str]:
         if celestial_id in orbit_cache: return orbit_cache[celestial_id]
         if celestial_id in explicit_name:
@@ -376,7 +385,6 @@ with zipfile.ZipFile(zip_path) as z:
                 nm = f"{parent_nm} - Asteroid Belt {oidx}"; orbit_cache[celestial_id] = nm; return nm
         return None
 
-    # Corp & Operations
     corp_name: Dict[int, str] = {}
     with z.open(m_npcCorporations) as f:
         for raw in f:
@@ -393,7 +401,6 @@ with zipfile.ZipFile(zip_path) as z:
             nm = get_name_en(o, "operationName") or get_name_en(o, "name")
             if oid is not None and nm: op_name[oid] = nm
 
-    # Stations
     stations_total = 0
     stations_written = 0
     stations_rows_list = []
@@ -404,44 +411,35 @@ with zipfile.ZipFile(zip_path) as z:
             stations_total += 1
             station_id = get_int(o, "_key", "stationID", "stationId")
             if station_id is None: continue
-
             explicit_station = get_name_en(o, "name")
             if explicit_station:
                 stations_rows_list.append((station_id, {"stationID": station_id, "stationName": explicit_station}))
                 stations_written += 1
                 continue
-
             orbit_id = get_int(o, "orbitID", "orbitId")
             owner_id = get_int(o, "ownerID", "ownerId")
             op_id = get_int(o, "operationID", "operationId")
             use_op = (o.get("useOperationName") is True)
-
             ssid = get_int(o, "solarSystemID", "solarSystemId")
             ssn = system_name.get(ssid) if ssid is not None else None
-
             orb = orbit_name(orbit_id) if orbit_id is not None else None
             if not orb: orb = ssn or "Unknown"
-
             corp = corp_name.get(owner_id, f"Corp {owner_id}" if owner_id is not None else "Unknown Corp")
             if use_op:
                 opn = op_name.get(op_id, f"Op {op_id}" if op_id is not None else "Unknown Op")
                 station_name = f"{orb} - {corp} {opn}"
             else:
                 station_name = f"{orb} - {corp}"
-
             stations_rows_list.append((station_id, {"stationID": station_id, "stationName": station_name}))
             stations_written += 1
 
     if stations_written < MIN_STATIONS:
-        raise RuntimeError(f"VALIDATION FAIL: stations_written={stations_written} < {MIN_STATIONS}.")
-    if stations_total > 0:
-        ratio = stations_written / stations_total
-        if ratio < 0.90:
-            raise RuntimeError(f"VALIDATION FAIL: stations_written_ratio={ratio:.3f} < 0.90.")
+        raise RuntimeError("stations validation fail")
+    if stations_total > 0 and stations_written / stations_total < 0.90:
+        raise RuntimeError("stations ratio validation fail")
 
     stations_rows = (row for _, row in sorted(stations_rows_list, key=lambda x: x[0]))
 
-    # Stargates
     stargates_rows_list = []
     with z.open(m_mapStargates) as f:
         for raw in f:
@@ -452,25 +450,20 @@ with zipfile.ZipFile(zip_path) as z:
             dest = o.get("destination") if isinstance(o.get("destination"), dict) else {}
             dest_sid = get_int(dest, "solarSystemID", "solarSystemId")
             if origin_sid is None or dest_sid is None: continue
-
             o_name = system_name.get(origin_sid, str(origin_sid))
             d_name = system_name.get(dest_sid, str(dest_sid))
             stargate_name = f"{o_name} → {d_name}"
-
             left_sid, right_sid = (origin_sid, dest_sid) if origin_sid <= dest_sid else (dest_sid, origin_sid)
             left_name = system_name.get(left_sid, str(left_sid))
             right_name = system_name.get(right_sid, str(right_sid))
             stargate_group = f"{left_name} ↔ {right_name}"
-
             stargates_rows_list.append((gid, {"stargateId": gid, "stargateName": stargate_name, "stargateGroup": stargate_group}))
 
-    stargates_count = len(stargates_rows_list)
-    if stargates_count < MIN_STARGATES:
-        raise RuntimeError(f"VALIDATION FAIL: stargates={stargates_count} < {MIN_STARGATES}.")
+    if len(stargates_rows_list) < MIN_STARGATES:
+        raise RuntimeError("stargates validation fail")
 
     stargates_rows = (row for _, row in sorted(stargates_rows_list, key=lambda x: x[0]))
 
-    # Write outputs
     systems_rows = ({"systemId": sid, "systemName": system_name[sid]} for sid in sorted(system_name))
     regions_rows = ({"regionId": rid, "regionName": region_name[rid]} for rid in sorted(region_name))
     types_rows   = ({"typeId": tid, "typeName": type_name[tid]} for tid in sorted(type_name))
@@ -481,19 +474,6 @@ with zipfile.ZipFile(zip_path) as z:
     write_jsonl_gz(os.path.join(out_dir, STATIONS_OUT), stations_rows)
     write_jsonl_gz(os.path.join(out_dir, STARGATES_OUT), stargates_rows)
 
-    # quick non-empty validation
-    def gz_has_lines(path: str) -> int:
-        n = 0
-        with gzip.open(path, "rt", encoding="utf-8") as f:
-            for _ in f:
-                n += 1
-                if n >= 3: break
-        return n
-
-    for p in [SYSTEMS_OUT, REGIONS_OUT, TYPES_OUT, STATIONS_OUT, STARGATES_OUT]:
-        if gz_has_lines(os.path.join(out_dir, p)) == 0:
-            raise RuntimeError(f"VALIDATION FAIL: output {p} gzip tiene 0 líneas.")
-
     meta = {
         "schemaVersion": 1,
         "source": {
@@ -501,50 +481,26 @@ with zipfile.ZipFile(zip_path) as z:
             "effectiveUrl": url_effective
         },
         "http": {
-            "etag": etag,
+            "etag": etag_raw,
             "lastModified": last_modified,
             "contentLength": int(content_length) if str(content_length).isdigit() else None,
             "cacheControl": cache_control
         },
         "build": {
-            "updated": bool(updated),
+            "updated": True,
+            "bootstrap": bool(bootstrap),
             "forced": bool(forced),
             "sdeChanged": bool(sde_changed),
+            "realUpdate": bool(real_update),
             "checkedAtUtc": checked_at,
             "generatedAtUtc": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z")
-        },
-        "validation": {
-            "min": {
-                "systems": MIN_SYSTEMS,
-                "regions": MIN_REGIONS,
-                "types": MIN_TYPES,
-                "stations": MIN_STATIONS,
-                "stargates": MIN_STARGATES
-            },
-            "counts": {
-                "systems": len(system_name),
-                "regions": len(region_name),
-                "types": len(type_name),
-                "stations_written": stations_written,
-                "stations_total": stations_total,
-                "stargates": stargates_count
-            }
-        },
-        "outputs": {
-            "ss": {"path": f"data/gh_sde/{SYSTEMS_OUT}", "records": len(system_name)},
-            "rg": {"path": f"data/gh_sde/{REGIONS_OUT}", "records": len(region_name)},
-            "ty": {"path": f"data/gh_sde/{TYPES_OUT}", "records": len(type_name)},
-            "st": {"path": f"data/gh_sde/{STATIONS_OUT}", "records": stations_written},
-            "sg": {"path": f"data/gh_sde/{STARGATES_OUT}", "records": stargates_count}
         }
     }
-
-    with open(os.path.join(out_dir, os.path.basename(META_PATH)), "w", encoding="utf-8") as fmeta:
+    with open(os.path.join(out_dir, "eou_sde_dataset_sde_to_gh.json"), "w", encoding="utf-8") as fmeta:
         json.dump(meta, fmeta, ensure_ascii=False, indent=2)
         fmeta.write("\n")
 PY
 
-# Atomic swap directory
 if [[ -d "$OUT_DIR" ]]; then
   mv "$OUT_DIR" "$old_dir"
 fi
@@ -552,18 +508,3 @@ mv "$new_dir" "$OUT_DIR"
 rm -rf "$old_dir"
 
 echo "Updated datasets written to $OUT_DIR"
-
-# Bash-level non-empty validation
-for f in \
-  "$OUT_DIR/$SYSTEMS_OUT" \
-  "$OUT_DIR/$REGIONS_OUT" \
-  "$OUT_DIR/$TYPES_OUT" \
-  "$OUT_DIR/$STATIONS_OUT" \
-  "$OUT_DIR/$STARGATES_OUT" \
-  "$META_PATH"
-do
-  if [[ ! -s "$f" ]]; then
-    echo "ERROR: archivo esperado vacío o inexistente: $f"
-    exit 3
-  fi
-done
