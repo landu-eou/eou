@@ -2,6 +2,11 @@ name: SDE Dataset (SDE → GH)
 
 on:
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Force rebuild & commit even if ETag unchanged (true/false)"
+        required: false
+        default: "false"
   repository_dispatch:
     types: [eou_sde_dataset_sde_to_gh]
 
@@ -29,6 +34,9 @@ jobs:
       SDE_URL: "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip"
       OUT_DIR: "data/gh_sde"
       META_PATH: "data/gh_sde/_meta.json"
+
+      # Para forzar rebuild manual (solo aplica en workflow_dispatch)
+      FORCE_REBUILD: ${{ github.event.inputs.force_rebuild || 'false' }}
 
     steps:
       - name: Checkout
@@ -72,8 +80,6 @@ jobs:
 
           LOCKED="$(echo "$RESP" | jq -r '.locked // false')"
           echo "locked=$LOCKED" >> "$GITHUB_OUTPUT"
-
-          # Log útil (no contiene secretos)
           echo "Gateway lock status: locked=$LOCKED"
 
       - name: Build / Update datasets (SDE -> repo)
@@ -82,6 +88,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo "FORCE_REBUILD=$FORCE_REBUILD"
           bash ops/gh_sde/run.sh
 
       - name: Commit changes (only if updated)
@@ -101,9 +108,6 @@ jobs:
           git commit -m "chore(gh_sde): update SDE mappings"
           git push
 
-      # FINISH se ejecuta siempre que NO estuviera locked.
-      # - Si Build falló -> job.status=failure y aun así hacemos FINISH (always()).
-      # - Si no hubo update -> steps.build.outputs.next_run_ms igual existe (lo produce run.sh en ambos caminos).
       - name: FINISH (gateway)
         if: always() && steps.start.outputs.locked != 'true'
         shell: bash
@@ -122,15 +126,11 @@ jobs:
           esac
 
           NOW_MS="$(date -u +%s%3N)"
-          NEXT_RUN_MS="${{ steps.build.outputs.next_run_ms }}"
 
-          # expires = next_run - run_ended (tu regla)
-          if [[ -z "$NEXT_RUN_MS" ]]; then
+          # Usamos expires_sec calculado en run.sh (más robusto que recalcular aquí)
+          EXPIRES_SEC="${{ steps.build.outputs.expires_sec }}"
+          if [[ -z "${EXPIRES_SEC:-}" ]]; then
             EXPIRES_SEC="${EXPIRES}"
-          else
-            DIFF_MS=$(( NEXT_RUN_MS - NOW_MS ))
-            if (( DIFF_MS < 0 )); then DIFF_MS=0; fi
-            EXPIRES_SEC=$(( (DIFF_MS + 999) / 1000 ))  # ceil(ms/1000)
           fi
 
           CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|finish|${EXPIRES_SEC}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
@@ -148,7 +148,6 @@ jobs:
             exit 1
           fi
 
-      # Si estaba locked, terminamos explícitamente “limpio” (sin tocar nada).
       - name: Locked - no-op
         if: steps.start.outputs.locked == 'true'
         run: |
