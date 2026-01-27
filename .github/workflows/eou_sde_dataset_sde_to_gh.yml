@@ -4,14 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       force_rebuild:
-        description: "Force rebuild & commit even if ETag unchanged (true/false)"
+        description: "Force rebuild even if ETag unchanged (true/false)"
         required: false
         default: "false"
   repository_dispatch:
     types: [eou_sde_dataset_sde_to_gh]
 
-# Candado anti-solapamiento (mecanismo oficial GitHub)
-# cancel-in-progress=false para NO cortar una actualización a medias.
 concurrency:
   group: eou_sde_dataset_sde_to_gh
   cancel-in-progress: false
@@ -28,14 +26,17 @@ jobs:
       WORKFLOW_ID: eou_sde_dataset_sde_to_gh
       WORKFLOW_NAME: "SDE Dataset (SDE -> GH)"
       SHEET_ROW: "3"
+
+      # Valor por defecto “grande” de expires si faltase algo (fallback)
       EXPIRES: "86400"
+
+      # Candado anti-solape (segundos). SOLO para lock_until.
       LOCK_SECONDS: "60"
 
       SDE_URL: "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip"
       OUT_DIR: "data/gh_sde"
-      META_PATH: "data/gh_sde/_meta.json"
+      META_PATH: "data/gh_sde/eou_sde_dataset_sde_to_gh.json"
 
-      # Para forzar rebuild manual (solo aplica en workflow_dispatch)
       FORCE_REBUILD: ${{ github.event.inputs.force_rebuild || 'false' }}
 
     steps:
@@ -89,7 +90,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "FORCE_REBUILD=$FORCE_REBUILD"
-          bash ops/gh_sde/run.sh
+          bash ops/gh_sde/eou_sde_dataset_sde_to_gh.sh
 
       - name: Commit changes (only if updated)
         if: steps.start.outputs.locked != 'true' && steps.build.outputs.updated == 'true'
@@ -119,25 +120,35 @@ jobs:
 
           STATUS="${{ job.status }}"
           case "$STATUS" in
-            success) CONCLUSION="success" ;;
-            failure) CONCLUSION="failure" ;;
+            success)   CONCLUSION="success" ;;
+            failure)   CONCLUSION="failure" ;;
             cancelled) CONCLUSION="cancelled" ;;
-            *) CONCLUSION="neutral" ;;
+            *)         CONCLUSION="neutral" ;;
           esac
 
           NOW_MS="$(date -u +%s%3N)"
 
-          # Usamos expires_sec calculado en run.sh (más robusto que recalcular aquí)
-          EXPIRES_SEC="${{ steps.build.outputs.expires_sec }}"
-          if [[ -z "${EXPIRES_SEC:-}" ]]; then
-            EXPIRES_SEC="${EXPIRES}"
+          # --- Scheduling / expires ---
+          # Regla especial: en failure, reintentar pronto (15 minutos).
+          if [[ "$CONCLUSION" == "failure" ]]; then
+            EXPIRES_SEC="900"
+          else
+            # Usamos expires_sec calculado en el script (robusto).
+            EXPIRES_SEC="${{ steps.build.outputs.expires_sec }}"
+            if [[ -z "${EXPIRES_SEC:-}" ]]; then
+              EXPIRES_SEC="${EXPIRES}"
+            fi
           fi
 
-          CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|finish|${EXPIRES_SEC}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
+          # --- Lock release ---
+          # Para “liberar” inmediatamente al terminar, enviamos lock_seconds=0 en FINISH.
+          LOCK_SECONDS_FINISH="0"
+
+          CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|finish|${EXPIRES_SEC}|${LOCK_SECONDS_FINISH}|${CONCLUSION}|${NOW_MS}"
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
 
           WF_NAME_ENC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")"
-          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ENC}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES_SEC}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
+          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ENC}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES_SEC}&lock_seconds=${LOCK_SECONDS_FINISH}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
 
           RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
           echo "$RESP" | jq -e . >/dev/null
