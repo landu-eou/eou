@@ -1,14 +1,16 @@
-# =======================
-# PARTE INICIAL (lo que cambias para un clon)
-# =======================
-
-name: SDE Dataset (SDE → GH)                          # <-- 001 CAMBIA el nombre visible del workflow
+name: SDE Dataset (SDE → GH)
 
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [eou_sde_dataset_sde_to_gh]
+
+concurrency:
+  group: eou_sde_dataset_sde_to_gh-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   run:
@@ -17,12 +19,21 @@ jobs:
     env:
       WORKFLOW_ID: eou_sde_dataset_sde_to_gh
       WORKFLOW_NAME: "SDE Dataset (SDE -> GH)"
-      SHEET_ROW: "3"                             # <-- 003 CAMBIA (fila del tab 'workflows' que va a tocar)
-      EXPIRES: "300"                              # <-- 004 (opcional) cambia si quieres otra cadencia
-      LOCK_SECONDS: "60"                          # <-- 005 (opcional) cambia si quieres otro lock
+      SHEET_ROW: "3"
+      EXPIRES: "86400"
+      LOCK_SECONDS: "120"
+
+      SDE_URL: "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip"
+      OUT_DIR: "data/gh_sde"
+      META_PATH: "data/gh_sde/_meta.json"
 
     steps:
-      - name: Preflight
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Preflight (gateway)
         shell: bash
         env:
           GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
@@ -30,7 +41,7 @@ jobs:
           set -euo pipefail
           curl -sS -L "$GATEWAY_URL" | jq -e '.service=="eou_gateway_webapp"' >/dev/null
 
-      - name: START
+      - name: START (gateway lock)
         id: start
         shell: bash
         env:
@@ -40,7 +51,6 @@ jobs:
           set -euo pipefail
           NOW_MS="$(date -u +%s%3N)"
           CONCLUSION="-"
-          # canonical = workflow_id|wf_name|row|phase|expires|lock_seconds|conclusion|now_ms
           CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|start|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
           URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")&row=${SHEET_ROW}&phase=start&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
@@ -59,18 +69,31 @@ jobs:
         if: steps.start.outputs.locked == 'true'
         run: exit 0
 
-# =======================
-# PARTE FUNCIÓN (solo cambia si cambia la función del workflow)
-# =======================
+      - name: Build / Update datasets (SDE -> repo)
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ops/gh_sde/run.sh
 
-      - name: DO WORK (dummy)
-        run: sleep 3
+      - name: Commit changes (only if updated)
+        if: steps.build.outputs.updated == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-# =======================
-# PARTE FINAL (normalmente NO la tocas para un clon)
-# =======================
+          git add data/gh_sde
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
 
-      - name: FINISH
+          git commit -m "chore(gh_sde): update SDE mappings"
+          git push
+
+      - name: FINISH (gateway)
         if: always() && steps.start.outputs.locked != 'true'
         shell: bash
         env:
@@ -78,6 +101,7 @@ jobs:
           GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
         run: |
           set -euo pipefail
+
           STATUS="${{ job.status }}"
           case "$STATUS" in
             success) CONCLUSION="success" ;;
@@ -87,9 +111,20 @@ jobs:
           esac
 
           NOW_MS="$(date -u +%s%3N)"
-          CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|finish|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
+          NEXT_RUN_MS="${{ steps.build.outputs.next_run_ms }}"
+
+          # expires = next_run - run_ended (según tu regla)
+          if [[ -z "$NEXT_RUN_MS" ]]; then
+            EXPIRES_SEC="${EXPIRES}"
+          else
+            DIFF_MS=$(( NEXT_RUN_MS - NOW_MS ))
+            if (( DIFF_MS < 0 )); then DIFF_MS=0; fi
+            EXPIRES_SEC=$(( (DIFF_MS + 999) / 1000 ))  # ceil(ms/1000)
+          fi
+
+          CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|finish|${EXPIRES_SEC}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
+          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES_SEC}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
 
           RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
           echo "$RESP" | jq -e . >/dev/null
