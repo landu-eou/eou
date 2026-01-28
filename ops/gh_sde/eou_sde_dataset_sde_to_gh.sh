@@ -27,10 +27,8 @@ lower() { printf "%s" "$1" | tr '[:upper:]' '[:lower:]'; }
 is_true() { case "$(lower "${1:-false}")" in 1|true|yes|y|on) return 0;; *) return 1;; esac; }
 
 norm_etag() {
-  # normaliza: trim + quita comillas dobles exteriores si existen
   local s="${1:-}"
   s="$(printf "%s" "$s" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-  # quita comillas exteriores "...."
   if [[ "$s" =~ ^\".*\"$ ]]; then
     s="${s:1:${#s}-2}"
   fi
@@ -67,7 +65,6 @@ if [[ -f "$META_PATH" ]]; then
   stored_etag_raw="$(jq -r '.http.etag // empty' "$META_PATH" || true)"
   stored_last_modified="$(jq -r '.http.lastModified // empty' "$META_PATH" || true)"
 fi
-
 stored_etag="$(norm_etag "$stored_etag_raw")"
 
 forced="false"
@@ -100,10 +97,12 @@ if [[ -z "$etag_raw" ]]; then
 fi
 etag="$(norm_etag "$etag_raw")"
 
+# Last-Modified puede faltar en 304/CDN; fallback a meta.
 if [[ -z "$last_modified" && -n "$stored_last_modified" ]]; then
   last_modified="$stored_last_modified"
 fi
 
+# Si sigue faltando, HEAD no-condicional para intentar obtenerlo.
 if [[ -z "$last_modified" ]]; then
   echo "WARN: Last-Modified vacío en HEAD. Reintentando HEAD no condicional..."
   headers_file2="$tmp/headers2.txt"
@@ -121,8 +120,7 @@ if [[ -z "$last_modified" ]]; then
   exit 2
 fi
 
-# --- Decide sde_changed (solo si hay stored_etag) ---
-# Bootstrap (stored_etag vacío) NO cuenta como “cambio upstream”
+# Decide sde_changed (solo si hay stored_etag)
 sde_changed="false"
 bootstrap="false"
 if [[ -z "$stored_etag" ]]; then
@@ -134,24 +132,19 @@ else
   fi
 fi
 
-# --- Decide updated ---
-# updated = forced OR sde_changed OR bootstrap (para construir la primera vez)
+# updated = forced OR sde_changed OR bootstrap
 updated="false"
 if [[ "$forced" == "true" || "$sde_changed" == "true" || "$bootstrap" == "true" ]]; then
   updated="true"
 fi
 
-# --- Decide should_update network-wise (download/parse) ---
-# Si NO updated => salir.
-# Si updated => descargar + parsear.
-# (Este diseño evita que un “bootstrap” se marque como sdeChanged.)
-# Scheduling: usa "sde_changed OR forced" como “update real”; bootstrap cae en “no-update” para ventana 10–15.
+# "real_update" solo si forced o sde_changed (bootstrap no)
 real_update="false"
 if [[ "$forced" == "true" || "$sde_changed" == "true" ]]; then
   real_update="true"
 fi
 
-# --- Compute next_run/expires ---
+# Compute next_run/expires (siempre)
 calc_out="$tmp/sched.json"
 python3 - "$real_update" "$last_modified" > "$calc_out" <<'PY'
 import sys, json, datetime, email.utils
@@ -287,6 +280,7 @@ with zipfile.ZipFile(zip_path) as z:
     m_npcCorporations   = pick_exact(z, "npcCorporations.jsonl")
     m_stationOperations = pick_exact(z, "stationOperations.jsonl")
 
+    # Systems
     system_name: Dict[int, str] = {}
     with z.open(m_mapSolarSystems) as f:
         for raw in f:
@@ -298,6 +292,7 @@ with zipfile.ZipFile(zip_path) as z:
     if len(system_name) < MIN_SYSTEMS:
         raise RuntimeError("systems validation fail")
 
+    # Regions
     region_name: Dict[int, str] = {}
     with z.open(m_mapRegions) as f:
         for raw in f:
@@ -309,6 +304,7 @@ with zipfile.ZipFile(zip_path) as z:
     if len(region_name) < MIN_REGIONS:
         raise RuntimeError("regions validation fail")
 
+    # Types (published)
     type_name: Dict[int, str] = {}
     with z.open(m_types) as f:
         for raw in f:
@@ -322,6 +318,7 @@ with zipfile.ZipFile(zip_path) as z:
     if len(type_name) < MIN_TYPES:
         raise RuntimeError("types validation fail")
 
+    # Celestials
     stars: Dict[int, int] = {}
     planets: Dict[int, Tuple[int,int]] = {}
     moons: Dict[int, Tuple[int,int]] = {}
@@ -385,6 +382,7 @@ with zipfile.ZipFile(zip_path) as z:
                 nm = f"{parent_nm} - Asteroid Belt {oidx}"; orbit_cache[celestial_id] = nm; return nm
         return None
 
+    # Corp & Operations
     corp_name: Dict[int, str] = {}
     with z.open(m_npcCorporations) as f:
         for raw in f:
@@ -401,6 +399,7 @@ with zipfile.ZipFile(zip_path) as z:
             nm = get_name_en(o, "operationName") or get_name_en(o, "name")
             if oid is not None and nm: op_name[oid] = nm
 
+    # Stations
     stations_total = 0
     stations_written = 0
     stations_rows_list = []
@@ -411,26 +410,31 @@ with zipfile.ZipFile(zip_path) as z:
             stations_total += 1
             station_id = get_int(o, "_key", "stationID", "stationId")
             if station_id is None: continue
+
             explicit_station = get_name_en(o, "name")
             if explicit_station:
-                stations_rows_list.append((station_id, {"stationID": station_id, "stationName": explicit_station}))
+                stations_rows_list.append((station_id, {"stationID": station_id, "station": explicit_station}))
                 stations_written += 1
                 continue
+
             orbit_id = get_int(o, "orbitID", "orbitId")
             owner_id = get_int(o, "ownerID", "ownerId")
             op_id = get_int(o, "operationID", "operationId")
             use_op = (o.get("useOperationName") is True)
             ssid = get_int(o, "solarSystemID", "solarSystemId")
             ssn = system_name.get(ssid) if ssid is not None else None
+
             orb = orbit_name(orbit_id) if orbit_id is not None else None
             if not orb: orb = ssn or "Unknown"
+
             corp = corp_name.get(owner_id, f"Corp {owner_id}" if owner_id is not None else "Unknown Corp")
             if use_op:
                 opn = op_name.get(op_id, f"Op {op_id}" if op_id is not None else "Unknown Op")
                 station_name = f"{orb} - {corp} {opn}"
             else:
                 station_name = f"{orb} - {corp}"
-            stations_rows_list.append((station_id, {"stationID": station_id, "stationName": station_name}))
+
+            stations_rows_list.append((station_id, {"stationID": station_id, "station": station_name}))
             stations_written += 1
 
     if stations_written < MIN_STATIONS:
@@ -440,33 +444,40 @@ with zipfile.ZipFile(zip_path) as z:
 
     stations_rows = (row for _, row in sorted(stations_rows_list, key=lambda x: x[0]))
 
+    # Stargates
     stargates_rows_list = []
     with z.open(m_mapStargates) as f:
         for raw in f:
             o = json.loads(raw)
             gid = get_int(o, "_key", "stargateID", "stargateId")
             if gid is None: continue
+
             origin_sid = get_int(o, "solarSystemID", "solarSystemId")
             dest = o.get("destination") if isinstance(o.get("destination"), dict) else {}
             dest_sid = get_int(dest, "solarSystemID", "solarSystemId")
             if origin_sid is None or dest_sid is None: continue
+
             o_name = system_name.get(origin_sid, str(origin_sid))
             d_name = system_name.get(dest_sid, str(dest_sid))
-            stargate_name = f"{o_name} → {d_name}"
+
+            stargate_label = f"{o_name} → {d_name}"
+
             left_sid, right_sid = (origin_sid, dest_sid) if origin_sid <= dest_sid else (dest_sid, origin_sid)
             left_name = system_name.get(left_sid, str(left_sid))
             right_name = system_name.get(right_sid, str(right_sid))
             stargate_group = f"{left_name} ↔ {right_name}"
-            stargates_rows_list.append((gid, {"stargateId": gid, "stargateName": stargate_name, "stargateGroup": stargate_group}))
+
+            stargates_rows_list.append((gid, {"stargateId": gid, "stargate": stargate_label, "stargateGroup": stargate_group}))
 
     if len(stargates_rows_list) < MIN_STARGATES:
         raise RuntimeError("stargates validation fail")
 
     stargates_rows = (row for _, row in sorted(stargates_rows_list, key=lambda x: x[0]))
 
-    systems_rows = ({"systemId": sid, "systemName": system_name[sid]} for sid in sorted(system_name))
-    regions_rows = ({"regionId": rid, "regionName": region_name[rid]} for rid in sorted(region_name))
-    types_rows   = ({"typeId": tid, "typeName": type_name[tid]} for tid in sorted(type_name))
+    # --- OUTPUTS con el contrato pedido ---
+    systems_rows = ({"solarSystemId": sid, "solarSystem": system_name[sid]} for sid in sorted(system_name))
+    regions_rows = ({"regionId": rid, "region": region_name[rid]} for rid in sorted(region_name))
+    types_rows   = ({"typeId": tid, "type": type_name[tid]} for tid in sorted(type_name))
 
     write_jsonl_gz(os.path.join(out_dir, SYSTEMS_OUT), systems_rows)
     write_jsonl_gz(os.path.join(out_dir, REGIONS_OUT), regions_rows)
@@ -496,6 +507,7 @@ with zipfile.ZipFile(zip_path) as z:
             "generatedAtUtc": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z")
         }
     }
+
     with open(os.path.join(out_dir, "eou_sde_dataset_sde_to_gh.json"), "w", encoding="utf-8") as fmeta:
         json.dump(meta, fmeta, ensure_ascii=False, indent=2)
         fmeta.write("\n")
@@ -508,3 +520,17 @@ mv "$new_dir" "$OUT_DIR"
 rm -rf "$old_dir"
 
 echo "Updated datasets written to $OUT_DIR"
+
+for f in \
+  "$OUT_DIR/$SYSTEMS_OUT" \
+  "$OUT_DIR/$REGIONS_OUT" \
+  "$OUT_DIR/$TYPES_OUT" \
+  "$OUT_DIR/$STATIONS_OUT" \
+  "$OUT_DIR/$STARGATES_OUT" \
+  "$META_PATH"
+do
+  if [[ ! -s "$f" ]]; then
+    echo "ERROR: archivo esperado vacío o inexistente: $f"
+    exit 3
+  fi
+done
