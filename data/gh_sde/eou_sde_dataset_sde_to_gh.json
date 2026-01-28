@@ -12,9 +12,9 @@
   },
   "build": {
     "updated": true,
-    "bootstrap": true,
-    "forced": true,
-    "sdeChanged": false,
+    "bootstrap": false,
+    "forced": false,
+    "sdeChanged": true,
     "realUpdate": true,
     "checkedAtUtc": "2026-01-28T00:26:53.600022Z",
     "generatedAtUtc": "2026-01-28T00:27:02.188348Z"
