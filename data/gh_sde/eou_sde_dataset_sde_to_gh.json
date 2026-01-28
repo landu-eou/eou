@@ -5,9 +5,9 @@
     "effectiveUrl": "https://developers.eveonline.com/static-data/tranquility/eve-online-static-data-3171578-jsonl.zip"
   },
   "http": {
-    "etag": "\"6358ef3006b0b857c2d9995781bfc4cb-10\"",
-    "lastModified": "Tue, 22 Jan 2026 11:34:03 GMT",
-    "contentLength": 82797335,
+    "etag": "\"6358ef3006b0b857c2d8005781bfc4cb-10\"",
+    "lastModified": "Tue, 20 Jan 2026 11:34:03 GMT",
+    "contentLength": 82797336,
     "cacheControl": "max-age=86400"
   },
   "build": {
@@ -16,7 +16,7 @@
     "forced": false,
     "sdeChanged": true,
     "realUpdate": true,
-    "checkedAtUtc": "2026-01-28T00:26:53.600022Z",
-    "generatedAtUtc": "2026-01-28T00:27:02.188348Z"
+    "checkedAtUtc": "2026-01-28T02:44:40.992875Z",
+    "generatedAtUtc": "2026-01-28T02:44:49.647727Z"
   }
 }
