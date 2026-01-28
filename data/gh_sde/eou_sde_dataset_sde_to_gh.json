@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "source": {
     "latestUrl": "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip",
-    "effectiveUrl": "https://developers.eveonline.com/static-data/tranquility/eve-online-static-data-3171578-jsonl.zip"
+    "effectiveUrl": "https://developers.eveonline.com/static-data/tranquility/eve-online-static-data-3179999-jsonl.zip"
   },
   "http": {
-    "etag": "\"6358ef3006b0b857c2d8005781bfc4cb-10\"",
-    "lastModified": "Tue, 20 Jan 2026 11:34:03 GMT",
-    "contentLength": 82797336,
+    "etag": "\"a1b2c3d4e5f67890abcd1234567890ef-10\"",
+    "lastModified": "Wed, 28 Jan 2026 10:42:11 GMT",
+    "contentLength": 83011234,
     "cacheControl": "max-age=86400"
   },
   "build": {
@@ -16,7 +16,7 @@
     "forced": false,
     "sdeChanged": true,
     "realUpdate": true,
-    "checkedAtUtc": "2026-01-28T02:44:40.992875Z",
-    "generatedAtUtc": "2026-01-28T02:44:49.647727Z"
+    "checkedAtUtc": "2026-01-28T10:55:03.123456Z",
+    "generatedAtUtc": "2026-01-28T10:55:11.654321Z"
   }
 }
