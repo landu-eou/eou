@@ -5,9 +5,9 @@
     "effectiveUrl": "https://developers.eveonline.com/static-data/tranquility/eve-online-static-data-3171578-jsonl.zip"
   },
   "http": {
-    "etag": "\"6358ef3006b0b857c2d8005781bfc4cb-10\"",
-    "lastModified": "Tue, 20 Jan 2026 11:34:03 GMT",
-    "contentLength": 82797336,
+    "etag": "\"6358ef3006b0b857c2d9995781bfc4cb-10\"",
+    "lastModified": "Tue, 22 Jan 2026 11:34:03 GMT",
+    "contentLength": 82797335,
     "cacheControl": "max-age=86400"
   },
   "build": {
