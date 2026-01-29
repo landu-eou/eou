@@ -19,7 +19,7 @@ jobs:
       WORKFLOW_NAME: "Child Test Simple"          # <-- 001 CAMBIA el nombre visible del workflow
       SHEET_ROW: "11"                             # <-- 003 CAMBIA (fila del tab 'workflows' que va a tocar)
       EXPIRES: "420"                              # <-- 004 (opcional) cambia si quieres otra cadencia
-      LOCK_SECONDS: "60"                          # <-- 005 (opcional) cambia si quieres otro lock
+      LOCK_SECONDS: "360"                          # <-- 005 (opcional) cambia si quieres otro lock
 
     steps:
       - name: Preflight
