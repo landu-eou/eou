@@ -247,6 +247,19 @@ jobs:
 
           PY
 
+          # <-- AÑADE ESTO
+          set -a
+          source "$GITHUB_ENV"
+          set +a
+          
+          # ahora TS_ISO ya existe en este step
+          TS_ISO="${TS_ISO:-}"
+          if [[ -z "$TS_ISO" ]]; then
+            echo "Missing TS_ISO; backoff."
+            echo "NEXT_RUN_EPOCH=$(( $(date -u +%s) + 600 ))" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
           # 4) Ensure table exists (crea si falta)
           FULL_TABLE="${GCP_PROJECT_ID}:${BQ_DATASET}.${BQ_TABLE}"
           if ! bq show --format=prettyjson "$FULL_TABLE" >/dev/null 2>&1; then
