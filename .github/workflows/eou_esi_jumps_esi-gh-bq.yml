@@ -117,7 +117,7 @@ jobs:
           echo "HTTP_CODE=$HTTP_CODE"
 
           # 3) Decidir + operar (Python para parseo robusto de headers/fechas)
-          python3 - <<'PY'
+          HTTP_CODE="$HTTP_CODE" python3 - <<'PY'
           import os, json, gzip, time, urllib.request
           from email.utils import parsedate_to_datetime
 
