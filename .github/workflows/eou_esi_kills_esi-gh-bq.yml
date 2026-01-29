@@ -58,14 +58,10 @@ jobs:
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
           WF_NAME_ESC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")"
           URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ESC}&row=${SHEET_ROW}&phase=start&expires=${EXPIRES_START}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
-
           RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
           echo "$RESP" | jq -e . >/dev/null
           OK="$(echo "$RESP" | jq -r '.ok // false')"
-          if [[ "$OK" != "true" ]]; then
-            echo "Gateway error on START: $RESP"
-            exit 1
-          fi
+          if [[ "$OK" != "true" ]]; then echo "Gateway START error: $RESP"; exit 1; fi
           LOCKED="$(echo "$RESP" | jq -r '.locked // false')"
           echo "locked=$LOCKED" >> "$GITHUB_OUTPUT"
 
@@ -101,255 +97,109 @@ jobs:
           fi
 
           rm -f headers.txt body.json parsed.json out.ndjson state_new.json
+
           CURL_HEADERS=(-H "Accept: application/json" -H "User-Agent: landu-eou/eou (GitHub Actions)")
-          if [[ -n "$ETAG" && "$ETAG" != "null" ]]; then
-            CURL_HEADERS+=(-H "If-None-Match: $ETAG")
-          fi
-          if [[ -n "$LAST_MOD" && "$LAST_MOD" != "null" ]]; then
-            CURL_HEADERS+=(-H "If-Modified-Since: $LAST_MOD")
-          fi
+          if [[ -n "$ETAG" && "$ETAG" != "null" ]]; then CURL_HEADERS+=(-H "If-None-Match: $ETAG"); fi
+          if [[ -n "$LAST_MOD" && "$LAST_MOD" != "null" ]]; then CURL_HEADERS+=(-H "If-Modified-Since: $LAST_MOD"); fi
 
           HTTP_CODE="$(curl -sS --compressed -D headers.txt -o body.json -w "%{http_code}" "${CURL_HEADERS[@]}" "$ESI_URL" || true)"
           echo "HTTP_CODE=$HTTP_CODE"
 
-          HTTP_CODE="$HTTP_CODE" python3 - <<'PY'
-import os, json, gzip, time, urllib.request
-from email.utils import parsedate_to_datetime
+          ETAG_NEW="$(grep -i '^etag:' headers.txt | head -n1 | sed -E 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//; s/\r$//')"
+          LM_RFC="$(grep -i '^last-modified:' headers.txt | head -n1 | sed -E 's/^[Ll]ast-[Mm]odified:[[:space:]]*//; s/\r$//')"
+          EXP_RFC="$(grep -i '^expires:' headers.txt | head -n1 | sed -E 's/^[Ee]xpires:[[:space:]]*//; s/\r$//')"
 
-def now_epoch(): return int(time.time())
-
-def parse_headers(path: str):
-    h={}
-    try:
-        with open(path,"r",encoding="utf-8",errors="ignore") as f:
-            for line in f:
-                line=line.strip("\r\n")
-                if not line or line.lower().startswith("http/"):
-                    continue
-                if ":" in line:
-                    k,v=line.split(":",1)
-                    h[k.strip().lower()]=v.strip()
-    except FileNotFoundError:
-        pass
-    return h
-
-http_code = os.environ.get("HTTP_CODE","")
-state_path = os.environ["STATE_PATH"]
-sde_map_path = os.environ["SDE_MAP_PATH"]
-expires_fallback = int(os.environ.get("EXPIRES","86400"))
-
-h = parse_headers("headers.txt")
-etag = h.get("etag","")
-last_mod = h.get("last-modified","")
-expires = h.get("expires","")
-retry_after = h.get("retry-after","")
-err_reset = h.get("x-esi-error-limit-reset","")
-err_limited = h.get("x-esi-error-limited","")
-
-parsed = {
-    "http_code": http_code,
-    "etag": etag,
-    "last_modified_rfc1123": last_mod,
-    "expires_rfc1123": expires,
-    "ts_iso": "",
-    "early_exit": False,
-    "next_run_epoch": now_epoch() + 600,
-    "reason": ""
-}
-
-def compute_next_run_from_expires():
-    nr = now_epoch() + expires_fallback + 60
-    if expires:
-        try:
-            nr = int(parsedate_to_datetime(expires).timestamp()) + 60
-        except Exception:
-            pass
-    return nr
-
-if http_code == "420" or (err_limited and err_limited.lower()=="true"):
-    wait=600
-    for v in (retry_after, err_reset):
-        try:
-            if v: wait=max(wait,int(float(v)))
-        except Exception:
-            pass
-    parsed["early_exit"]=True
-    parsed["next_run_epoch"]=now_epoch()+wait
-    parsed["reason"]="error_limited"
-elif http_code == "304":
-    parsed["early_exit"]=True
-    parsed["next_run_epoch"]=now_epoch()+600
-    parsed["reason"]="not_modified_304"
-elif http_code != "200":
-    parsed["early_exit"]=True
-    parsed["next_run_epoch"]=now_epoch()+600
-    parsed["reason"]="http_not_200"
-elif not last_mod:
-    parsed["early_exit"]=True
-    parsed["next_run_epoch"]=now_epoch()+600
-    parsed["reason"]="missing_last_modified"
-else:
-    try:
-        if os.path.exists(state_path):
-            st=json.load(open(state_path,"r",encoding="utf-8"))
-            lc=st.get("lastCommitted") or {}
-            if lc.get("etag")==etag and lc.get("lastModifiedRfc1123")==last_mod:
-                parsed["early_exit"]=True
-                parsed["next_run_epoch"]=now_epoch()+600
-                parsed["reason"]="same_as_state"
-    except Exception:
-        pass
-
-if not parsed["early_exit"]:
-    dt = parsedate_to_datetime(last_mod)
-    ts_iso = dt.astimezone().isoformat().replace("+00:00","Z")
-    parsed["ts_iso"] = ts_iso
-    parsed["next_run_epoch"] = compute_next_run_from_expires()
-    parsed["reason"] = "ok_new_data"
-
-    with open("body.json","r",encoding="utf-8") as f:
-        data=json.load(f)
-
-    mapping={}
-    with gzip.open(sde_map_path,"rt",encoding="utf-8") as f:
-        for line in f:
-            o=json.loads(line)
-            mapping[int(o["solarSystemId"])]=o["solarSystem"]
-
-    missing=[int(x["system_id"]) for x in data if int(x["system_id"]) not in mapping]
-
-    if missing:
-        def chunks(lst,n):
-            for i in range(0,len(lst),n):
-                yield lst[i:i+n]
-        for ch in chunks(missing,500):
-            req=urllib.request.Request(
-                "https://esi.evetech.net/latest/universe/names/?datasource=tranquility",
-                data=json.dumps(ch).encode("utf-8"),
-                headers={
-                    "Content-Type":"application/json",
-                    "Accept":"application/json",
-                    "User-Agent":"landu-eou/eou (GitHub Actions)"
-                },
-                method="POST"
-            )
-            try:
-                with urllib.request.urlopen(req,timeout=20) as resp:
-                    arr=json.loads(resp.read().decode("utf-8"))
-                    for it in arr:
-                        if it.get("category")=="solar_system" and "id" in it and "name" in it:
-                            mapping[int(it["id"])]=it["name"]
-            except Exception:
-                pass
-
-    with open("out.ndjson","w",encoding="utf-8") as f:
-        for row in data:
-            sid=int(row["system_id"])
-            out={
-                "ts": ts_iso,
-                "solarSystem": mapping.get(sid,str(sid)),
-                "npc_kills": int(row.get("npc_kills",0)),
-                "pod_kills": int(row.get("pod_kills",0)),
-                "ship_kills": int(row.get("ship_kills",0))
-            }
-            f.write(json.dumps(out,ensure_ascii=False)+"\n")
-
-committed=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-state_doc={
-    "schemaVersion": 1,
-    "workflowId": os.environ["WORKFLOW_ID"],
-    "endpoint": os.environ["ESI_URL"],
-    "bq": {"dataset": os.environ["BQ_DATASET"], "table": os.environ["BQ_TABLE"]},
-    "lastCommitted": {
-        "etag": etag,
-        "lastModifiedRfc1123": last_mod,
-        "expiresRfc1123": expires,
-        "committedAtUtc": committed
-    }
-}
-os.makedirs(os.path.dirname(state_path), exist_ok=True)
-with open("state_new.json","w",encoding="utf-8") as f:
-    json.dump(state_doc,f,ensure_ascii=False,indent=2)
-    f.write("\n")
-
-with open("parsed.json","w",encoding="utf-8") as f:
-    json.dump(parsed,f,ensure_ascii=False,indent=2)
-    f.write("\n")
-PY
-
-          cat parsed.json
-
-          EARLY_EXIT="$(jq -r '.early_exit' parsed.json)"
-          NEXT_RUN_EPOCH="$(jq -r '.next_run_epoch' parsed.json)"
-          TS_ISO="$(jq -r '.ts_iso' parsed.json)"
-
-          echo "NEXT_RUN_EPOCH=$NEXT_RUN_EPOCH" >> "$GITHUB_ENV"
-
-          if [[ "$EARLY_EXIT" == "true" ]]; then
-            exit 0
-          fi
-
-          if [[ -z "$TS_ISO" || "$TS_ISO" == "null" ]]; then
-            echo "Missing TS_ISO; backoff."
-            echo "NEXT_RUN_EPOCH=$(( $(date -u +%s) + 600 ))" >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          FULL_TABLE="${GCP_PROJECT_ID}:${BQ_DATASET}.${BQ_TABLE}"
-          if ! bq show --format=prettyjson "$FULL_TABLE" >/dev/null 2>&1; then
-            echo "Table missing, creating: $FULL_TABLE"
-            bq mk --table \
-              --time_partitioning_type=DAY \
-              --time_partitioning_field=ts \
-              "$FULL_TABLE" \
-              ts:TIMESTAMP,solarSystem:STRING,npc_kills:INTEGER,pod_kills:INTEGER,ship_kills:INTEGER
-          fi
-
-          COUNT="$(bq query --use_legacy_sql=false --format=csv \
-            --parameter=ts:TIMESTAMP:"$TS_ISO" \
-            "SELECT COUNT(1) c FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\` WHERE ts=@ts" | tail -n 1 | tr -d '\r')"
-
-          if [[ "${COUNT:-0}" != "0" ]]; then
-            echo "ts already in BQ => treat as fulfilled; commit state."
-            mv -f state_new.json "$STATE_PATH"
-            echo "WILL_COMMIT_STATE=true" >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          bq load --quiet --source_format=NEWLINE_DELIMITED_JSON \
-            "${GCP_PROJECT_ID}:${BQ_DATASET}.${BQ_TABLE}" out.ndjson
-
-          mv -f state_new.json "$STATE_PATH"
-          echo "WILL_COMMIT_STATE=true" >> "$GITHUB_ENV"
-
-      - name: Commit state JSON (pull --rebase + retry)
-        if: env.WILL_COMMIT_STATE == 'true'
-        shell: bash
-        run: |
+          python3 -c "import os,json,time; from email.utils import parsedate_to_datetime as p; hc=os.environ.get('HTTP_CODE',''); et=os.environ.get('ETAG',''); lm_prev=os.environ.get('LAST_MOD',''); etn=os.environ.get('ETAG_NEW',''); lmr=os.environ.get('LM_RFC',''); exr=os.environ.get('EXP_RFC',''); now=int(time.time()); out={'http_code':hc,'etag':etn,'last_modified_rfc1123':lmr,'expires_rfc1123':exr,'ts_iso':'','early_exit':True,'next_run_epoch':now+600,'reason':''}; \
+          reason=''; \
+          if hc=='420': reason='error_limited'; \
+          elif hc=='304': reason='not_modified_304'; \
+          elif hc!='200': reason='http_not_200'; \
+          elif not lmr: reason='missing_last_modified'; \
+          elif (etn==et and lmr==lm_prev and etn!='' and lmr!=''): reason='same_as_state'; \
+          else: reason='ok_new_data'; out['early_exit']=False; out['ts_iso']=p(lmr).astimezone().isoformat().replace('+00:00','Z'); \
+          try: out['next_run_epoch']=int(p(exr).timestamp())+60 if exr else now+int(os.environ.get('EXPIRES','86400'))+60; \
+          except Exception: out['next_run_epoch']=now+int(os.environ.get('EXPIRES','86400'))+60; \
+          out['reason']=reason; \
+          open('parsed.json','w',encoding='utf-8').write(json.dumps(out,ensure_ascii=False,indent=2)+'\n')" \
+                      && true
+          
+                    cat parsed.json
+          
+                    EARLY_EXIT="$(jq -r '.early_exit' parsed.json)"
+                    NEXT_RUN_EPOCH="$(jq -r '.next_run_epoch' parsed.json)"
+                    TS_ISO="$(jq -r '.ts_iso' parsed.json)"
+                    echo "NEXT_RUN_EPOCH=$NEXT_RUN_EPOCH" >> "$GITHUB_ENV"
+          
+                    if [[ "$EARLY_EXIT" == "true" ]]; then exit 0; fi
+                    if [[ -z "$TS_ISO" || "$TS_ISO" == "null" ]]; then
+                      echo "Missing TS_ISO; backoff."
+                      echo "NEXT_RUN_EPOCH=$(( $(date -u +%s) + 600 ))" >> "$GITHUB_ENV"
+                      exit 0
+                    fi
+          
+                    FULL_TABLE="${GCP_PROJECT_ID}:${BQ_DATASET}.${BQ_TABLE}"
+                    if ! bq show --format=prettyjson "$FULL_TABLE" >/dev/null 2>&1; then
+                      bq mk --table --time_partitioning_type=DAY --time_partitioning_field=ts \
+                        "$FULL_TABLE" ts:TIMESTAMP,solarSystem:STRING,npc_kills:INTEGER,pod_kills:INTEGER,ship_kills:INTEGER
+                    fi
+          
+                    COUNT="$(bq query --use_legacy_sql=false --format=csv \
+                      --parameter=ts:TIMESTAMP:"$TS_ISO" \
+                      "SELECT COUNT(1) c FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\` WHERE ts=@ts" | tail -n 1 | tr -d '\r')"
+          
+                    python3 -c "import os,json,time; st={'schemaVersion':1,'workflowId':os.environ['WORKFLOW_ID'],'endpoint':os.environ['ESI_URL'],'bq':{'dataset':os.environ['BQ_DATASET'],'table':os.environ['BQ_TABLE']},'lastCommitted':{'etag':os.environ.get('ETAG_NEW',''),'lastModifiedRfc1123':os.environ.get('LM_RFC',''),'expiresRfc1123':os.environ.get('EXP_RFC',''),'committedAtUtc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}}; \
+          import pathlib; pathlib.Path(os.path.dirname(os.environ['STATE_PATH']) or '.').mkdir(parents=True,exist_ok=True); \
+          open('state_new.json','w',encoding='utf-8').write(json.dumps(st,ensure_ascii=False,indent=2)+'\n')"
+          
+                    if [[ "${COUNT:-0}" != "0" ]]; then
+                      mv -f state_new.json "$STATE_PATH"
+                      echo "WILL_COMMIT_STATE=true" >> "$GITHUB_ENV"
+                      exit 0
+                    fi
+          
+                    python3 -c "import os,json,gzip,urllib.request; ts=os.environ['TS_ISO']; mp={}; \
+          f=gzip.open(os.environ['SDE_MAP_PATH'],'rt',encoding='utf-8'); \
+          [mp.__setitem__(int((o:=json.loads(l))['solarSystemId']),o['solarSystem']) for l in f]; f.close(); \
+          data=json.load(open('body.json','r',encoding='utf-8')); \
+          missing=[int(x['system_id']) for x in data if int(x['system_id']) not in mp]; \
+          def chunks(a,n): \
+            i=0; \
+            while i<len(a): \
+              yield a[i:i+n]; i+=n; \
+          \
+          for ch in chunks(missing,500): \
+            req=urllib.request.Request('https://esi.evetech.net/latest/universe/names/?datasource=tranquility',data=json.dumps(ch).encode('utf-8'),headers={'Content-Type':'application/json','Accept':'application/json','User-Agent':'landu-eou/eou (GitHub Actions)'},method='POST'); \
+            try: \
+              arr=json.loads(urllib.request.urlopen(req,timeout=20).read().decode('utf-8')); \
+              [mp.__setitem__(int(it['id']),it['name']) for it in arr if it.get('category')=='solar_system' and 'id' in it and 'name' in it]; \
+            except Exception: \
+              pass; \
+          out=open('out.ndjson','w',encoding='utf-8'); \
+          [out.write(json.dumps({'ts':ts,'solarSystem':mp.get(int(r['system_id']),str(int(r['system_id']))),'npc_kills':int(r.get('npc_kills',0)),'pod_kills':int(r.get('pod_kills',0)),'ship_kills':int(r.get('ship_kills',0))},ensure_ascii=False)+'\\n') for r in data]; \
+          out.close()"
+          
+                    bq load --quiet --source_format=NEWLINE_DELIMITED_JSON \
+                      "${GCP_PROJECT_ID}:${BQ_DATASET}.${BQ_TABLE}" out.ndjson
+          
+                    mv -f state_new.json "$STATE_PATH"
+                    echo "WILL_COMMIT_STATE=true" >> "$GITHUB_ENV"
+          
+                - name: Commit state JSON (pull --rebase + retry)
+                  if: env.WILL_COMMIT_STATE == 'true'
+                  shell: bash
+                  run: |
           set -euo pipefail
-          if git diff --quiet -- "$STATE_PATH"; then
-            echo "No state changes to commit."
-            exit 0
-          fi
-
+          if git diff --quiet -- "$STATE_PATH"; then exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git add "$STATE_PATH"
           git commit -m "state(${WORKFLOW_ID}): commit Last-Modified/ETag" || exit 0
-
           for i in 1 2 3 4 5; do
             git fetch origin main
             git rebase origin/main || (git rebase --abort && true)
-            if git push origin HEAD:main; then
-              echo "Pushed."
-              exit 0
-            fi
-            echo "Push failed, retry $i..."
+            if git push origin HEAD:main; then exit 0; fi
             sleep $((i*2))
           done
-
-          echo "Push failed after retries."
           exit 1
 
       - name: FINISH
@@ -360,7 +210,6 @@ PY
           GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
         run: |
           set -euo pipefail
-
           STATUS="${{ job.status }}"
           case "$STATUS" in
             success) CONCLUSION="success" ;;
@@ -368,22 +217,16 @@ PY
             cancelled) CONCLUSION="cancelled" ;;
             *) CONCLUSION="neutral" ;;
           esac
-
           NOW_S="$(date -u +%s)"
           NEXT_RUN="${NEXT_RUN_EPOCH:-$((NOW_S+600))}"
           EXPIRES_TO_SEND="$(( NEXT_RUN - NOW_S ))"
           if (( EXPIRES_TO_SEND < 0 )); then EXPIRES_TO_SEND=0; fi
-
           NOW_MS="$(date -u +%s%3N)"
           CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|finish|${EXPIRES_TO_SEND}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
           SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
           WF_NAME_ESC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")"
           URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ESC}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES_TO_SEND}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
-
           RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
           echo "$RESP" | jq -e . >/dev/null
           OK="$(echo "$RESP" | jq -r '.ok // false')"
-          if [[ "$OK" != "true" ]]; then
-            echo "Gateway error on FINISH: $RESP"
-            exit 1
-          fi
+          if [[ "$OK" != "true" ]]; then echo "Gateway FINISH error: $RESP"; exit 1; fi
