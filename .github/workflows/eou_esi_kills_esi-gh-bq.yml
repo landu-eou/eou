@@ -112,7 +112,7 @@ jobs:
           HTTP_CODE="$(curl -sS --compressed -D headers.txt -o body.json -w "%{http_code}" "${CURL_HEADERS[@]}" "$ESI_URL" || true)"
           echo "HTTP_CODE=$HTTP_CODE"
 
-          python3 - <<'PY'
+          HTTP_CODE="$HTTP_CODE" python3 - <<'PY'
           import os, json, time, urllib.request
           from email.utils import parsedate_to_datetime
 
