@@ -1,0 +1,177 @@
+name: Example Workflow (direct Sheets + BQ)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read          # para consultar runs
+  id-token: write        # para WIF/OIDC a GCP
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    env:
+      WORKFLOW_FILE: orchestators_test.yml
+      SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
+      SHEETS_WORKFLOW_ROW: "1"     # <-- fila del yml en tab 'workflows'
+      SHEET_TAB: workflows
+
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      BQ_DATASET: eou
+      BQ_TABLE: prueba_aps_tick
+
+    steps:
+      - name: Guard - exit if another run was active when this run was created
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          WF_FILE: ${{ env.WORKFLOW_FILE }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${REPO}/actions/workflows/${WF_FILE}/runs?per_page=50"
+          json="$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${api}")"
+
+          this="$(echo "$json" | jq --arg rid "$RUN_ID" '.workflow_runs[] | select(.id == ($rid|tonumber))' | head -n 1 || true)"
+          if [ -z "$this" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          this_created="$(echo "$this" | jq -r '.created_at')"
+          this_num="$(echo "$this" | jq -r '.run_number')"
+
+          # Si existe un run anterior que siguió vivo después de que este se creara => este run es redundante
+          alive_at_creation="$(echo "$json" | jq --arg rid "$RUN_ID" --arg tc "$this_created" '
+            [.workflow_runs[]
+              | select(.id != ($rid|tonumber))
+              | select(.created_at < $tc)
+              | select(.updated_at > $tc)
+            ] | length')"
+
+          if [ "$alive_at_creation" -gt 0 ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Líder determinista entre activos (queued/in_progress): solo el menor run_number sigue
+          leader="$(echo "$json" | jq '[.workflow_runs[] | select(.status=="queued" or .status=="in_progress") | .run_number] | min // empty')"
+          if [ -n "$leader" ] && [ "$leader" != "$this_num" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Auth to Google (WIF) - get access token for Sheets + GCP
+        id: gcp_auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: |
+            https://www.googleapis.com/auth/spreadsheets
+            https://www.googleapis.com/auth/cloud-platform
+
+      - name: If skipped (busy) - write minimal status+backoff and exit
+        if: steps.guard.outputs.proceed != 'true'
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          now="$(date -u +"%F %T")"
+          next="$(date -u -d "+2 minutes" +"%F %T")"
+          row="${SHEETS_WORKFLOW_ROW}"
+
+          # status=B, next_run=D
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "{
+              \"valueInputOption\":\"RAW\",
+              \"data\":[
+                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"completed\"]]},
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[\"${next}\"]]}
+              ]
+            }"
+          echo "Skipped due to busy. Exiting."
+
+      - name: Mark running in Sheets
+        if: steps.guard.outputs.proceed == 'true'
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          row="${SHEETS_WORKFLOW_ROW}"
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "{
+              \"valueInputOption\":\"RAW\",
+              \"data\":[
+                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"running\"]]}
+              ]
+            }"
+
+      # === TU TRABAJO REAL AQUÍ ===
+      # Ejemplo: setup gcloud + escribir a BigQuery
+      - name: Setup gcloud
+        if: steps.guard.outputs.proceed == 'true'
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: BigQuery write (example)
+        if: steps.guard.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+          now_iso="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false \
+            "INSERT INTO \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\` (ts_utc, source) VALUES (TIMESTAMP('${now_iso}'), '${WORKFLOW_FILE}');"
+
+      - name: Mark completed in Sheets (and set next_run)
+        if: steps.guard.outputs.proceed == 'true' && success()
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          now="$(date -u +"%F %T")"
+          next="$(date -u -d "+10 minutes" +"%F %T")"   # <-- tu política real de next_run
+          row="${SHEETS_WORKFLOW_ROW}"
+
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "{
+              \"valueInputOption\":\"RAW\",
+              \"data\":[
+                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"completed\"]]},
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[\"${next}\"]]}
+              ]
+            }"
+
+      - name: Mark failed in Sheets (and set next_run)
+        if: steps.guard.outputs.proceed == 'true' && failure()
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          next="$(date -u -d "+5 minutes" +"%F %T")"
+          row="${SHEETS_WORKFLOW_ROW}"
+
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "{
+              \"valueInputOption\":\"RAW\",
+              \"data\":[
+                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"failed\"]]},
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[\"${next}\"]]}
+              ]
+            }"
