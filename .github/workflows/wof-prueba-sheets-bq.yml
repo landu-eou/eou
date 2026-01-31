@@ -1,8 +1,11 @@
-name: Prueba GH -> Sheets (lock + cooldown) + BigQuery LOAD
+name: TEMPLATE - GH -> Sheets (guard + lock + cooldown) + OBJECTIVE
 
 on:
   workflow_dispatch:
 
+# Permisos:
+# - actions:read  -> leer runs del workflow (Guard)
+# - id-token:write -> WIF/OIDC hacia Google (sin claves)
 permissions:
   actions: read
   contents: read
@@ -13,31 +16,41 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # ============================================================
-      # CONFIGURACIÓN EDITABLE
-      # ============================================================
+      # =====================================================================
+      # 0) CONFIGURACIÓN (CAMBIAS ESTO POR WORKFLOW)
+      # =====================================================================
 
-      # --- Google Sheets ---
+      # --- Identidad del workflow ---
+      # IMPORTANTE: debe coincidir con el filename real en .github/workflows/
+      WORKFLOW_FILE: wof-prueba-sheets-bq.yml   # <-- CAMBIAR en cada workflow
+
+      # --- Google Sheets (estado compartido) ---
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
-      SHEETS_WORKFLOW_ROW: "2"
+      SHEETS_WORKFLOW_ROW: "2"                 # <-- CAMBIAR (fila en tab workflows)
 
-      # --- Workflow ---
-      WORKFLOW_FILE: wof-prueba-sheets-bq.yml
+      # --- Locking / planificación ---
+      LOCK_TIME: 60        # segundos: al arrancar => next_run = now + LOCK_TIME
+      COOLDOWN: 240        # segundos: al terminar => next_run = now + COOLDOWN
 
-      # --- Locking ---
-      LOCK_TIME: 60        # segundos (lock al arrancar)
-      COOLDOWN: 240        # segundos (cooldown al terminar)
-
-      # --- BigQuery ---
+      # --- BigQuery (si tu objetivo lo usa) ---
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       BQ_DATASET: eou
       BQ_TABLE: prueba_aps_tick
 
     steps:
-      # ============================================================
-      # 1) GUARD — COMPUTE (sin $GITHUB_OUTPUT)
-      # ============================================================
+      # =====================================================================
+      # 1) GUARD (COMÚN) — decide si este run debe trabajar o salir (busy)
+      #
+      # Política:
+      # - Si este run fue creado mientras otro run anterior seguía “vivo”
+      #   (updated_at > this_created), entonces SALIR.
+      # - Si hay varios runs activos (queued/in_progress), solo el "líder"
+      #   (menor run_number) trabaja. Los demás SALEN.
+      #
+      # Resultado: steps.guard.outputs.proceed = true/false
+      # =====================================================================
+
       - name: Guard - compute decision
         id: guard_calc
         env:
@@ -95,17 +108,15 @@ jobs:
 
           echo "$proceed" > /tmp/proceed
 
-      # ============================================================
-      # 2) GUARD — PUBLISH
-      # ============================================================
       - name: Guard - publish decision
         id: guard
         run: |
           echo "proceed=$(cat /tmp/proceed)" >> "$GITHUB_OUTPUT"
 
-      # ============================================================
-      # 3) AUTH GOOGLE (OIDC / WIF)
-      # ============================================================
+      # =====================================================================
+      # 2) AUTH GOOGLE (COMÚN) — WIF/OIDC (sin claves)
+      #    Produce: steps.gcp_auth.outputs.access_token
+      # =====================================================================
       - name: Auth to Google (WIF)
         id: gcp_auth
         uses: google-github-actions/auth@v2
@@ -117,18 +128,19 @@ jobs:
             https://www.googleapis.com/auth/spreadsheets
             https://www.googleapis.com/auth/cloud-platform
 
-      # ============================================================
-      # 4) SI SKIPPED → salir sin tocar nada
-      # ============================================================
+      # =====================================================================
+      # 3) BUSY EXIT (COMÚN) — si no procede, salir sin tocar nada
+      #    (mantengo EXACTAMENTE tu comportamiento actual)
+      # =====================================================================
       - name: Exit if skipped (busy)
         if: steps.guard.outputs.proceed != 'true'
         run: |
           echo "Skipped due to overlapping run"
           exit 0
 
-      # ============================================================
-      # 5) LOCK INICIAL → status=in_progress + next_run=now+LOCK_TIME
-      # ============================================================
+      # =====================================================================
+      # 4) LOCK INICIAL (COMÚN) — status=in_progress + next_run=now+LOCK_TIME
+      # =====================================================================
       - name: Initial lock (in_progress + next_run)
         if: steps.guard.outputs.proceed == 'true'
         env:
@@ -150,14 +162,27 @@ jobs:
               ]
             }"
 
-      # ============================================================
-      # 6) BIGQUERY — LOAD JOB (sin billing)
-      # ============================================================
-      - name: Setup gcloud
+      # =====================================================================
+      # =====================================================================
+      # 5) ✅ SECCIÓN OBJETIVO (ESTO ES LO QUE CAMBIA ENTRE WORKFLOWS)
+      #
+      # Reglas:
+      # - TODO lo “útil” va aquí.
+      # - Si este bloque no existe, el workflow no hace nada.
+      # - Debe respetar que NO hay gateway: escribe a Sheets/BQ directamente.
+      #
+      # Plantilla:
+      #   - Setup de herramientas necesarias
+      #   - Trabajo objetivo real (ETL, consultas, descargas, etc.)
+      # =====================================================================
+      # =====================================================================
+
+      # --- Ejemplo Objetivo: BigQuery LOAD de una fila (tu caso actual) ---
+      - name: Setup gcloud (needed by Objective)
         if: steps.guard.outputs.proceed == 'true'
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: BigQuery - LOAD timestamp row
+      - name: OBJECTIVE - BigQuery LOAD timestamp row
         if: steps.guard.outputs.proceed == 'true'
         run: |
           set -euo pipefail
@@ -173,9 +198,10 @@ jobs:
             "${BQ_DATASET}.${BQ_TABLE}" \
             row.json
 
-      # ============================================================
-      # 7) FINAL — COMPLETED / FAILED + next_run=now+COOLDOWN
-      # ============================================================
+      # =====================================================================
+      # 6) FINALIZE (COMÚN) — completed/failed + next_run=now+COOLDOWN
+      # =====================================================================
+
       - name: Finalize (completed + cooldown)
         if: steps.guard.outputs.proceed == 'true' && success()
         env:
