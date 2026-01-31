@@ -1,4 +1,4 @@
-name: Prueba GH -> Sheets(row2) + BigQuery(timestamp)
+name: Prueba GH -> Sheets(row2) + BigQuery LOAD JOB
 
 on:
   workflow_dispatch:
@@ -86,7 +86,7 @@ jobs:
           echo "$proceed" > /tmp/proceed
 
       # ============================================================
-      # 2) GUARD — PUBLISH (SIN jq)
+      # 2) GUARD — PUBLISH
       # ============================================================
       - name: Guard - publish decision
         id: guard
@@ -96,7 +96,7 @@ jobs:
       # ============================================================
       # 3) AUTH GOOGLE (OIDC / WIF)
       # ============================================================
-      - name: Auth to Google (WIF) - access token
+      - name: Auth to Google (WIF)
         id: gcp_auth
         uses: google-github-actions/auth@v2
         with:
@@ -157,22 +157,28 @@ jobs:
             }"
 
       # ============================================================
-      # 6) BIGQUERY — INSERT TIMESTAMP (PRUEBA)
+      # 6) BIGQUERY — LOAD JOB (SIN BILLING)
       # ============================================================
       - name: Setup gcloud
         if: steps.guard.outputs.proceed == 'true'
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: BigQuery - insert timestamp row
+      - name: BigQuery - LOAD timestamp row (free tier)
         if: steps.guard.outputs.proceed == 'true'
         run: |
           set -euo pipefail
+
           now_iso="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-          bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false \
-            "INSERT INTO \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
-             (ts_utc, source)
-             VALUES (TIMESTAMP('${now_iso}'), '${WORKFLOW_FILE}')"
+          cat > row.json <<EOF
+          {"ts_utc":"${now_iso}","source":"${WORKFLOW_FILE}"}
+          EOF
+
+          bq load \
+            --project_id="${GCP_PROJECT_ID}" \
+            --source_format=NEWLINE_DELIMITED_JSON \
+            "${BQ_DATASET}.${BQ_TABLE}" \
+            row.json
 
       # ============================================================
       # 7) COMPLETED / FAILED + next_run = now + 6m
