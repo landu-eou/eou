@@ -1,13 +1,12 @@
 # ==============================================================================
-# WORKFLOW (FUNCIONAL) - basado en plantilla_no_funcional_v1.txt
-# ------------------------------------------------------------------------------
-# Objetivo:
-#   - Refrescar access tokens (EVE SSO) usando refresh tokens almacenados en Secrets
-#   - Guardar access tokens en GitHub Secret: EOU_ACCESS_TOKENS (fuente de verdad)
-#   - Guardar espejo en Google Sheet (tab: access_tokens)
-#   - Gestionar rotación de refresh tokens (si CCP devuelve refresh_token nuevo):
-#       - actualizar GitHub Secret: EOU_REFRESH_TOKENS
-#       - escribir refresh_time UTC en columna F de access_tokens
+# Refresh Access Tokens (SSO → GHs + GS)
+# - Basado en plantilla_no_funcional_v1.txt (misma estructura de bloques)
+# - Fuente de verdad: GitHub Secret EOU_ACCESS_TOKENS
+# - Espejo: Google Sheet tab access_tokens
+#
+# CAMBIOS EN ESTA VERSIÓN:
+#   1) GH_ADMIN_PAT ahora viene de secrets.GH_SECRETS_ADMIN
+#   2) EOU_ACCESS_TOKENS: JSON compacto { "<character_id>": "<access_token>" }
 # ==============================================================================
 
 name: Refresh Access Tokens (SSO → GHs + GS)
@@ -15,20 +14,11 @@ name: Refresh Access Tokens (SSO → GHs + GS)
 on:
   workflow_dispatch:
 
-# ------------------------------------------------------------------------------
-# Permisos típicos para este patrón
-# ------------------------------------------------------------------------------
 permissions:
-  actions: read          # necesario si usas Guard (listar runs)
-  contents: read         # típico
-  id-token: write        # necesario para WIF/OIDC con Google (sin claves)
+  actions: read
+  contents: read
+  id-token: write
 
-# ------------------------------------------------------------------------------
-# Anti-solape oficial (GitHub)
-# - Nunca corre en paralelo.
-# - Evita colas infinitas: GitHub cancela runs "pending" antiguos en el mismo grupo.
-# - Aun así, un run "pending" puede arrancar después: por eso existe el GUARD+COOLDOWN.
-# ------------------------------------------------------------------------------
 concurrency:
   group: eou_refresh_access_tokens
   cancel-in-progress: false
@@ -38,54 +28,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
-    # ==========================================================================
-    # 0) CONFIGURACIÓN: AQUÍ ESTÁ TODO LO QUE SUELES MODIFICAR
-    # ==========================================================================
     env:
-      # ------------------------------------------------------------------------
-      # Identidad del workflow
-      # ------------------------------------------------------------------------
       WORKFLOW_FILE: "eou_refresh_access_tokens.yml"
 
-      # ------------------------------------------------------------------------
-      # Google Sheets (estado compartido)
-      # ------------------------------------------------------------------------
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: 3
 
-      # ------------------------------------------------------------------------
-      # Control de planificación (solo para sheet/monitor; el disparador externo manda)
-      # ------------------------------------------------------------------------
       LOCK_TIME: 60
       COOLDOWN: 900
 
-      # ------------------------------------------------------------------------
-      # Tabs / rangos
-      # ------------------------------------------------------------------------
       ACCESS_TOKENS_TAB: access_tokens
 
-      # ------------------------------------------------------------------------
-      # EVE SSO
-      # ------------------------------------------------------------------------
       SSO_TOKEN_URL: "https://login.eveonline.com/v2/oauth/token"
 
-      # ------------------------------------------------------------------------
-      # Secrets / límites
-      # ------------------------------------------------------------------------
       ACCESS_TOKENS_SECRET_NAME: "EOU_ACCESS_TOKENS"
       REFRESH_TOKENS_SECRET_NAME: "EOU_REFRESH_TOKENS"
 
       # Plan B preparado (48KB): por defecto NO particiona (mantiene 1 JSON).
-      ENABLE_SECRET_PARTITION: "false"     # si algún día superas 48KB, pon "true"
-      SECRET_MAX_BYTES: "46000"            # margen de seguridad antes del límite real
-
+      ENABLE_SECRET_PARTITION: "false"
+      SECRET_MAX_BYTES: "46000"
 
     steps:
       # ==========================================================================
-      # 1) GUARD (COMÚN) - Evita trabajo duplicado
-      #    - Si otro run ya se ejecutó hace < COOLDOWN segundos, decide SALIR.
-      #    - No depende de Sheets (porque el disparador externo ya “decide el tiempo”).
+      # 1) GUARD (COMÚN) - evita trabajo en cola / duplicado
       # ==========================================================================
       - name: "GUARD (common) - compute proceed=true/false"
         shell: bash
@@ -123,7 +89,6 @@ jobs:
           set -euo pipefail
           echo "proceed=$(sed -n 's/^proceed=//p' /tmp/proceed)" >> "$GITHUB_OUTPUT"
 
-
       # ==========================================================================
       # 2) AUTH GOOGLE (COMÚN) - WIF/OIDC sin claves
       # ==========================================================================
@@ -138,7 +103,6 @@ jobs:
             https://www.googleapis.com/auth/spreadsheets
             https://www.googleapis.com/auth/cloud-platform
 
-
       # ==========================================================================
       # 3) BUSY EXIT (COMÚN)
       # ==========================================================================
@@ -149,12 +113,8 @@ jobs:
           echo "Skipped due to cooldown guard (anti-queue / anti-duplicate)"
           exit 0
 
-
       # ==========================================================================
       # 4) LOCK INICIAL EN SHEETS (COMÚN)
-      #    - status=in_progress
-      #    - next_run=now+LOCK_TIME
-      #    - Detecta columnas por header: 'status' y 'next_run'
       # ==========================================================================
       - name: "LOCK (common) - in_progress + next_run"
         if: steps.guard.outputs.proceed == 'true'
@@ -164,7 +124,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import os, json, datetime, string, sys
+          import os, json, datetime, sys
           import urllib.request
 
           def col_letter(idx0: int) -> str:
@@ -181,12 +141,11 @@ jobs:
           lock_time = int(os.environ["LOCK_TIME"])
           token = os.environ["ACCESS_TOKEN"]
 
-          now = datetime.datetime.utcnow()
+          now = datetime.datetime.now(datetime.timezone.utc)
           next_run = now + datetime.timedelta(seconds=lock_time)
           now_str = now.strftime("%Y-%m-%d %H:%M:%S")
           next_run_str = next_run.strftime("%Y-%m-%d %H:%M:%S")
 
-          # Read header row to find columns
           hdr_url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheets_id}/values/{tab}!1:1"
           req = urllib.request.Request(hdr_url, headers={"Authorization": f"Bearer {token}"})
           with urllib.request.urlopen(req) as resp:
@@ -195,9 +154,7 @@ jobs:
           headers_l = [h.strip().lower() for h in headers]
 
           def find_col(name: str):
-              if name in headers_l:
-                  return headers_l.index(name)
-              return None
+              return headers_l.index(name) if name in headers_l else None
 
           c_status = find_col("status")
           c_next = find_col("next_run")
@@ -230,11 +187,8 @@ jobs:
           print(f"LOCK ok: status=in_progress; next_run={next_run_str} UTC (now={now_str} UTC)")
           PY
 
-
       # ==========================================================================
-      # ==========================================================================
-      # 5) ✅ OBJECTIVE (TU TRABAJO REAL)
-      # ==========================================================================
+      # 5) OBJECTIVE
       # ==========================================================================
       - name: "OBJECTIVE - step 1 (setup tools)"
         if: steps.guard.outputs.proceed == 'true'
@@ -244,15 +198,18 @@ jobs:
           python3 -m pip install --upgrade pip >/dev/null
           python3 -m pip install requests pynacl >/dev/null
 
-      - name: "OBJECTIVE - step 2 (do the work)"
+      - name: "OBJECTIVE - step 2 (refresh tokens + persist)"
         if: steps.guard.outputs.proceed == 'true'
         shell: bash
         env:
           ACCESS_TOKEN: "${{ steps.gcp_auth.outputs.access_token }}"
-          GH_ADMIN_PAT: "${{ secrets.GH_PAT_LANDU_EOU }}"          # PAT con permiso para escribir Actions secrets
+
+          # 👇 CAMBIO: usar el PAT admin renombrado
+          GH_ADMIN_PAT: "${{ secrets.GH_SECRETS_ADMIN }}"
+
           EOU_CLIENTS: "${{ secrets.EOU_CLIENTS }}"
           EOU_REFRESH_TOKENS: "${{ secrets.EOU_REFRESH_TOKENS }}"
-          EOU_ACCESS_TOKENS: "${{ secrets.EOU_ACCESS_TOKENS }}"    # puede estar vacío la primera vez
+          EOU_ACCESS_TOKENS: "${{ secrets.EOU_ACCESS_TOKENS }}"
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -264,7 +221,7 @@ jobs:
           # Helpers
           # ----------------------------
           def utc_now_str():
-              return datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+              return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
           def gh_api_headers(token: str):
               return {
@@ -315,7 +272,10 @@ jobs:
           repo_full = os.environ["GITHUB_REPOSITORY"]  # owner/repo
           owner, repo = repo_full.split("/", 1)
 
-          pat = os.environ["GH_ADMIN_PAT"]
+          pat = os.environ.get("GH_ADMIN_PAT", "")
+          if not pat:
+              raise RuntimeError("GH_ADMIN_PAT is empty. Ensure repo secret GH_SECRETS_ADMIN exists and is readable.")
+
           access_token = os.environ["ACCESS_TOKEN"]
 
           sso_url = os.environ["SSO_TOKEN_URL"]
@@ -330,22 +290,22 @@ jobs:
 
           clients = json.loads(os.environ["EOU_CLIENTS"] or "{}")
           refresh_map = json.loads(os.environ["EOU_REFRESH_TOKENS"] or "{}")
+
+          # EOU_ACCESS_TOKENS ahora es formato compacto {char_id: token}
           old_access = json.loads(os.environ.get("EOU_ACCESS_TOKENS") or "{}")
 
           # ----------------------------
           # Read current sheet to preserve token_time / refresh_time on failures/no-rotation
-          # Columns A-F: account, character, character_id, access_token, token_time, refresh_time
+          # A-F: account, character, character_id, access_token, token_time, refresh_time
           # ----------------------------
           sheet_values = sheets_get_values(sheets_id, f"{tab_tokens}!A1:F", access_token)
           existing = {}  # char_id -> {"token_time":..., "refresh_time":...}
           if sheet_values:
-              start_row = 0
               header = [c.strip().lower() for c in sheet_values[0]] if sheet_values else []
               has_header = ("character_id" in header) or (header[:3] == ["account", "character", "character_id"])
               start_row = 1 if has_header else 0
 
               for row in sheet_values[start_row:]:
-                  # pad
                   row = row + [""] * (6 - len(row))
                   char_id = (row[2] or "").strip()
                   if not char_id:
@@ -356,11 +316,11 @@ jobs:
                   }
 
           # ----------------------------
-          # Refresh loop
+          # Refresh loop (partial success allowed)
           # ----------------------------
           now_str = utc_now_str()
-          new_access = dict(old_access)  # merge base
-          new_refresh = dict(refresh_map)
+          new_access = dict(old_access)    # merge base: preserve old tokens on failure
+          new_refresh = dict(refresh_map)  # will update refresh_token if rotated
 
           successes = set()
           failures = []
@@ -368,7 +328,6 @@ jobs:
 
           session = requests.Session()
 
-          # Stable iteration: by account then character name then char_id
           def sort_key(item):
               char_id, info = item
               return (info.get("account",""), info.get("char_name",""), str(char_id))
@@ -377,9 +336,11 @@ jobs:
               char_id_s = str(char_id)
               app = info.get("app")
               rt = info.get("refresh_token")
+
               if not app or app not in clients:
                   failures.append(char_id_s)
                   continue
+
               cid = clients[app].get("client_id")
               csec = clients[app].get("client_secret")
               if not cid or not csec or not rt:
@@ -409,18 +370,14 @@ jobs:
                   failures.append(char_id_s)
                   continue
 
-              # Mask the newly obtained token ASAP
+              # Mask ASAP
               print(f"::add-mask::{at}")
 
-              new_access[char_id_s] = {
-                  "account": info.get("account",""),
-                  "character": info.get("char_name",""),
-                  "character_id": char_id_s,
-                  "access_token": at,
-              }
+              # ✅ CAMBIO CLAVE: formato compacto {char_id: token}
+              new_access[char_id_s] = at
               successes.add(char_id_s)
 
-              # Refresh token rotation
+              # Refresh token rotation (if returned and changed)
               new_rt = j.get("refresh_token")
               if new_rt and new_rt != rt:
                   print(f"::add-mask::{new_rt}")
@@ -429,22 +386,17 @@ jobs:
                   rotated.add(char_id_s)
 
           # ----------------------------
-          # Build EOU_ACCESS_TOKENS JSON (single JSON, no times)
-          # Keep old entries for failures; update entries for successes.
+          # Persist GitHub Secrets (EOU_ACCESS_TOKENS always; EOU_REFRESH_TOKENS if rotated)
           # ----------------------------
           access_json = json.dumps(new_access, ensure_ascii=False, separators=(",", ":"))
           access_bytes = len(access_json.encode("utf-8"))
 
           if access_bytes > secret_max_bytes and not enable_partition:
-              # Prepared plan B exists but is disabled
               raise RuntimeError(
                   f"{secret_access_name} size {access_bytes} bytes exceeds safety limit {secret_max_bytes}. "
                   f"Enable partition by setting ENABLE_SECRET_PARTITION=true."
               )
 
-          # ----------------------------
-          # Write GitHub secrets (official API requires encryption with repo public key)
-          # ----------------------------
           gh_put_secret(owner, repo, pat, secret_access_name, access_json)
 
           refresh_rotated = len(rotated) > 0
@@ -459,10 +411,10 @@ jobs:
               gh_put_secret(owner, repo, pat, secret_refresh_name, refresh_json)
 
           # ----------------------------
-          # Update Google Sheet (tab: access_tokens) columns A-F
+          # Update Google Sheet tab access_tokens (A-F)
           # Rules:
-          # - If char fails: do NOT overwrite token nor token_time
-          # - If refresh rotated: set refresh_time (col F) = now
+          # - if char fails: do NOT overwrite token nor token_time
+          # - if refresh rotated: set refresh_time (col F) = now
           # ----------------------------
           rows = []
           for char_id, info in sorted(refresh_map.items(), key=sort_key):
@@ -470,19 +422,18 @@ jobs:
               account = info.get("account","")
               character = info.get("char_name","")
 
-              # token comes from new_access (updated) or old_access (preserved)
-              token = ""
-              if char_id_s in new_access:
-                  token = new_access[char_id_s].get("access_token", "")
-              # token_time: update only if success
+              # token: from new_access (updated) or old_access (preserved); empty if missing
+              token = new_access.get(char_id_s, "")
+
               token_time = now_str if char_id_s in successes else existing.get(char_id_s, {}).get("token_time", "")
-              # refresh_time: update only if rotated
               refresh_time = now_str if char_id_s in rotated else existing.get(char_id_s, {}).get("refresh_time", "")
 
               rows.append([account, character, char_id_s, token, token_time, refresh_time])
 
-          # Pad to clear previous extra rows
-          existing_rows = max(0, (len(sheet_values) - (1 if sheet_values and ((sheet_values[0] and str(sheet_values[0][0]).lower()=="account") or ("character_id" in [c.lower() for c in sheet_values[0]])) else 0)))
+          # Clear extra old rows by padding
+          header = [c.strip().lower() for c in sheet_values[0]] if sheet_values else []
+          has_header = ("character_id" in header) or (header[:3] == ["account", "character", "character_id"])
+          existing_rows = max(0, len(sheet_values) - (1 if has_header and sheet_values else 0))
           target_rows = max(existing_rows, len(rows))
           while len(rows) < target_rows:
               rows.append(["", "", "", "", "", ""])
@@ -495,9 +446,7 @@ jobs:
               }]
               sheets_batch_update(sheets_id, data_ranges, access_token)
 
-          # ----------------------------
-          # Summary (safe)
-          # ----------------------------
+          # Safe summary
           print(f"Refreshed access tokens: {len(successes)} ok, {len(failures)} failed.")
           if failures:
               print("Failed character_ids:", ", ".join(failures))
@@ -505,11 +454,8 @@ jobs:
               print(f"Refresh token rotated for {len(rotated)} character_ids.")
           PY
 
-
       # ==========================================================================
       # 6) FINALIZE EN SHEETS (COMÚN)
-      #    - success(): status=completed, next_run=now+COOLDOWN
-      #    - failure(): status=failed, next_run=now+COOLDOWN
       # ==========================================================================
       - name: "FINALIZE (common) - completed + cooldown"
         if: steps.guard.outputs.proceed == 'true' && success()
@@ -536,7 +482,7 @@ jobs:
           cooldown = int(os.environ["COOLDOWN"])
           token = os.environ["ACCESS_TOKEN"]
 
-          now = datetime.datetime.utcnow()
+          now = datetime.datetime.now(datetime.timezone.utc)
           next_run = now + datetime.timedelta(seconds=cooldown)
           now_str = now.strftime("%Y-%m-%d %H:%M:%S")
           next_run_str = next_run.strftime("%Y-%m-%d %H:%M:%S")
@@ -605,7 +551,7 @@ jobs:
           cooldown = int(os.environ["COOLDOWN"])
           token = os.environ["ACCESS_TOKEN"]
 
-          now = datetime.datetime.utcnow()
+          now = datetime.datetime.now(datetime.timezone.utc)
           next_run = now + datetime.timedelta(seconds=cooldown)
           now_str = now.strftime("%Y-%m-%d %H:%M:%S")
           next_run_str = next_run.strftime("%Y-%m-%d %H:%M:%S")
