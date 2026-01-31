@@ -13,19 +13,22 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Sheets
+      # ===== Sheets =====
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
-      SHEETS_WORKFLOW_ROW: "2"         # <- fila 2
+      SHEETS_WORKFLOW_ROW: "2"            # fila 2
       WORKFLOW_FILE: wof-prueba-sheets-bq.yml
 
-      # BigQuery (ajusta si tu tabla/dataset difiere)
+      # ===== BigQuery =====
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       BQ_DATASET: eou
       BQ_TABLE: prueba_aps_tick
 
     steps:
-      - name: Guard - exit if overlapping run existed (no cancel)
+      # ------------------------------------------------------------
+      # GUARD: salir si hubo solape con otro run (sin cancelar)
+      # ------------------------------------------------------------
+      - name: Guard - exit if overlapping run existed
         id: guard
         env:
           GH_TOKEN: ${{ github.token }}
@@ -34,37 +37,53 @@ jobs:
           WF_FILE: ${{ env.WORKFLOW_FILE }}
         run: |
           set -euo pipefail
-          api="https://api.github.com/repos/${REPO}/actions/workflows/${WF_FILE}/runs?per_page=50"
-          json="$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${api}")"
 
-          this="$(echo "$json" | jq --arg rid "$RUN_ID" '
-            .workflow_runs
+          api="https://api.github.com/repos/${REPO}/actions/workflows/${WF_FILE}/runs?per_page=50"
+          json="$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api}")"
+
+          # --- obtener ESTE run (0 o 1 objeto) ---
+          this="$(jq --arg rid "$RUN_ID" -c '
+            (.workflow_runs // [])
             | map(select(.id == ($rid|tonumber)))
             | .[0] // empty
-          ')"
+          ' <<< "$json")"
+
           if [ -z "$this" ]; then
             echo "proceed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          this_created="$(echo "$this" | jq -r '.created_at')"
-          this_num="$(echo "$this" | jq -r '.run_number')"
+          this_created="$(jq -r '.created_at' <<< "$this")"
+          this_num="$(jq -r '.run_number' <<< "$this")"
 
-          # Si un run anterior siguió vivo después de que este se creara => este run es redundante
-          alive_at_creation="$(echo "$json" | jq --arg rid "$RUN_ID" --arg tc "$this_created" '
-            [.workflow_runs[]
-              | select(.id != ($rid|tonumber))
-              | select(.created_at < $tc)
-              | select(.updated_at > $tc)
-            ] | length')"
+          # --- ¿existía otro run vivo cuando este se creó? ---
+          alive_at_creation="$(jq --arg rid "$RUN_ID" --arg tc "$this_created" '
+            (.workflow_runs // [])
+            | map(
+                select(.id != ($rid|tonumber))
+                | select(.created_at < $tc)
+                | select(.updated_at > $tc)
+              )
+            | length
+          ' <<< "$json")"
 
           if [ "$alive_at_creation" -gt 0 ]; then
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Líder determinista entre activos (queued/in_progress): solo el menor run_number sigue
-          leader="$(echo "$json" | jq '[.workflow_runs[] | select(.status=="queued" or .status=="in_progress") | .run_number] | min // empty')"
+          # --- líder determinista entre activos ---
+          leader="$(jq '
+            (.workflow_runs // [])
+            | map(select(.status=="queued" or .status=="in_progress"))
+            | map(.run_number)
+            | min // empty
+          ' <<< "$json")"
+
           if [ -n "$leader" ] && [ "$leader" != "$this_num" ]; then
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -72,7 +91,10 @@ jobs:
 
           echo "proceed=true" >> "$GITHUB_OUTPUT"
 
-      - name: Auth to Google (WIF) - access token for Sheets + cloud-platform
+      # ------------------------------------------------------------
+      # AUTH GOOGLE (WIF / OIDC)
+      # ------------------------------------------------------------
+      - name: Auth to Google (WIF) - access token
         id: gcp_auth
         uses: google-github-actions/auth@v2
         with:
@@ -83,7 +105,10 @@ jobs:
             https://www.googleapis.com/auth/spreadsheets
             https://www.googleapis.com/auth/cloud-platform
 
-      - name: If skipped (busy) - write minimal status and set next_run (+6m) then exit
+      # ------------------------------------------------------------
+      # SI SKIPPED (busy): escribir completed + next_run (+6m) y salir
+      # ------------------------------------------------------------
+      - name: If skipped (busy) - update Sheets and exit
         if: steps.guard.outputs.proceed != 'true'
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
@@ -92,7 +117,7 @@ jobs:
           row="${SHEETS_WORKFLOW_ROW}"
           next="$(date -u -d "+6 minutes" +"%F %T")"
 
-          curl -sS -X POST \
+          curl -fsSL -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
             "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
@@ -104,17 +129,21 @@ jobs:
               ]
             }"
 
-          echo "Skipped due to overlap/busy. Exiting."
+          echo \"Skipped due to overlapping run\"
           exit 0
 
-      - name: Mark running in Sheets (B2=running)
+      # ------------------------------------------------------------
+      # MARCAR RUNNING
+      # ------------------------------------------------------------
+      - name: Mark running in Sheets
         if: steps.guard.outputs.proceed == 'true'
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
-          curl -sS -X POST \
+
+          curl -fsSL -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
             "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
@@ -125,20 +154,28 @@ jobs:
               ]
             }"
 
+      # ------------------------------------------------------------
+      # BIGQUERY: INSERT TIMESTAMP (PRUEBA)
+      # ------------------------------------------------------------
       - name: Setup gcloud
         if: steps.guard.outputs.proceed == 'true'
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: BigQuery - insert timestamp row (test)
+      - name: BigQuery - insert timestamp row
         if: steps.guard.outputs.proceed == 'true'
         run: |
           set -euo pipefail
           now_iso="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-          bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false \
-            "INSERT INTO \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\` (ts_utc, source)
-             VALUES (TIMESTAMP('${now_iso}'), '${WORKFLOW_FILE}');"
 
-      - name: Mark completed and next_run (+6m from finish)
+          bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false \
+            "INSERT INTO \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
+             (ts_utc, source)
+             VALUES (TIMESTAMP('${now_iso}'), '${WORKFLOW_FILE}')"
+
+      # ------------------------------------------------------------
+      # COMPLETED / FAILED + next_run = now + 6m
+      # ------------------------------------------------------------
+      - name: Mark completed and next_run (+6m)
         if: steps.guard.outputs.proceed == 'true' && success()
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
@@ -147,7 +184,7 @@ jobs:
           row="${SHEETS_WORKFLOW_ROW}"
           next="$(date -u -d "+6 minutes" +"%F %T")"
 
-          curl -sS -X POST \
+          curl -fsSL -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
             "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
@@ -159,7 +196,7 @@ jobs:
               ]
             }"
 
-      - name: Mark failed and next_run (+6m from finish)
+      - name: Mark failed and next_run (+6m)
         if: steps.guard.outputs.proceed == 'true' && failure()
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
@@ -168,7 +205,7 @@ jobs:
           row="${SHEETS_WORKFLOW_ROW}"
           next="$(date -u -d "+6 minutes" +"%F %T")"
 
-          curl -sS -X POST \
+          curl -fsSL -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
             "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
