@@ -31,7 +31,7 @@ jobs:
 
       # --- Locking / planificación ---
       LOCK_TIME: 60        # segundos: al arrancar => next_run = now + LOCK_TIME
-      COOLDOWN: 240        # segundos: al terminar => next_run = now + COOLDOWN
+      COOLDOWN: 660        # segundos: al terminar => next_run = now + COOLDOWN
 
       # --- BigQuery (si tu objetivo lo usa) ---
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
