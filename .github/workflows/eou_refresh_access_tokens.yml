@@ -68,26 +68,36 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "${api}" || true)"
 
-          others_count="$(python - <<'PY' <<<"${runs_json}"
-          import json, os, sys
-
-          raw = sys.stdin.read().strip()
-          if not raw:
-              print(0)
-              raise SystemExit(0)
-
-          data = json.loads(raw)
-          me = int(os.environ.get("GITHUB_RUN_ID", "0"))
-          wfruns = data.get("workflow_runs", []) or []
-          other = [r for r in wfruns if int(r.get("id", -1)) != me]
-          print(len(other))
-          PY
+          others_count="$(
+            python - <<'PY' <<<"${runs_json}"
+            import json, os, sys
+            
+            raw = sys.stdin.read().strip()
+            
+            # If curl failed or returned empty, treat as 0 (do not block).
+            if not raw or raw == "null":
+                print(0)
+                raise SystemExit(0)
+            
+            data = json.loads(raw)
+            
+            # If API returned JSON null (parsed as None) or unexpected type, treat as 0.
+            if data is None or not isinstance(data, dict):
+                print(0)
+                raise SystemExit(0)
+            
+            me = int(os.environ.get("GITHUB_RUN_ID", "0"))
+            wfruns = data.get("workflow_runs") or []
+            other = [r for r in wfruns if int(r.get("id", -1)) != me]
+            print(len(other))
+            PY
           )"
 
           if [ "${others_count}" -gt 0 ]; then
             echo "Skipped: another run is in progress (anti-overlap)."
             exit 0
           fi
+
 
       # Refresh tokens and prepare:
       # - access_tokens_1.json, access_tokens_2.json (char_id -> access_token)
