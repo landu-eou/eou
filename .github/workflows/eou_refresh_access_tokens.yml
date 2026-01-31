@@ -17,56 +17,35 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # ------------------------------------------------------------------------
-      # Identidad del workflow
-      # ------------------------------------------------------------------------
       WORKFLOW_FILE: "eou_refresh_access_tokens.yml"
 
-      # ------------------------------------------------------------------------
-      # Google Sheets (estado compartido)
-      # ------------------------------------------------------------------------
       SHEETS_ID: "1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8"
       WORKFLOWS_TAB: "workflows"
       ACCESS_TOKENS_TAB: "access_tokens"
-
       SHEETS_WORKFLOW_ROW: "3"
 
-      # ------------------------------------------------------------------------
-      # Control de planificación (solo para sheet/monitor; el disparador externo manda)
-      # ------------------------------------------------------------------------
       LOCK_TIME: "60"
       COOLDOWN: "900"
 
-      # ------------------------------------------------------------------------
-      # SSO
-      # ------------------------------------------------------------------------
       SSO_TOKEN_URL: "https://login.eveonline.com/v2/oauth/token"
-
-      # ------------------------------------------------------------------------
-      # Secrets
-      # ------------------------------------------------------------------------
       REFRESH_TOKENS_SECRET_NAME: "EOU_REFRESH_TOKENS"
 
-      # GitHub secret hard limit is 48 KB.
+      # GitHub secret hard limit is 48 KB. Keep a small margin.
       SECRET_MAX_BYTES: "49152"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Google auth (WIF) for Google Sheets write
-      - name: Auth to Google (WIF)
+      - name: Auth to Google (WIF) + mint Sheets-scoped access token
+        id: gauth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-          token_format: access_token
-          scopes: https://www.googleapis.com/auth/spreadsheets
-
-      - name: Setup gcloud (for access token)
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          token_format: "access_token"
+          access_token_scopes: |
+            https://www.googleapis.com/auth/spreadsheets
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -85,18 +64,14 @@ jobs:
         run: |
           set -euo pipefail
           owner_repo="${GITHUB_REPOSITORY}"
-          api="https://api.github.com/repos/${owner_repo}/actions/workflows/${WORKFLOW_FILE}/runs?status=in_progress&per_page=20"
+          api="https://api.github.com/repos/${owner_repo}/actions/workflows/${WORKFLOW_FILE}/runs?status=in_progress&per_page=10"
           runs_json="$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "X-GitHub-Api-Version: 2022-11-28" "${api}")"
 
           others_count="$(python - <<'PY'
           import json, os, sys
-          raw = sys.stdin.read().strip()
-          if not raw:
-              print(0)
-              raise SystemExit(0)
-          data = json.loads(raw)
-          me = int(os.environ.get("GITHUB_RUN_ID", "0"))
-          wfruns = data.get("workflow_runs", []) or []
+          runs = json.loads(sys.stdin.read() or "{}")
+          me = int(os.environ["GITHUB_RUN_ID"])
+          wfruns = runs.get("workflow_runs", [])
           other = [r for r in wfruns if int(r.get("id", -1)) != me]
           print(len(other))
           PY
@@ -110,7 +85,8 @@ jobs:
       # Refresh tokens, build:
       # - access_tokens_1.json, access_tokens_2.json (char_id -> access_token)
       # - refresh_tokens_new.json (updated only if rotation happened)
-      # - sheets_batch_payload.json (single request payload)
+      # - sheets_batch_payload_access_tokens.json
+      # - sheets_batch_payload_workflows.json
       - name: Refresh access tokens + prepare updates
         env:
           EOU_CLIENTS: ${{ secrets.EOU_CLIENTS }}
@@ -119,8 +95,8 @@ jobs:
           EOU_ACCESS_TOKENS_2: ${{ secrets.EOU_ACCESS_TOKENS_2 }}
           SECRET_MAX_BYTES: ${{ env.SECRET_MAX_BYTES }}
           SSO_TOKEN_URL: ${{ env.SSO_TOKEN_URL }}
-          ACCESS_TOKENS_TAB: ${{ env.ACCESS_TOKENS_TAB }}
           WORKFLOWS_TAB: ${{ env.WORKFLOWS_TAB }}
+          ACCESS_TOKENS_TAB: ${{ env.ACCESS_TOKENS_TAB }}
           SHEETS_WORKFLOW_ROW: ${{ env.SHEETS_WORKFLOW_ROW }}
           COOLDOWN: ${{ env.COOLDOWN }}
         run: |
@@ -131,20 +107,11 @@ jobs:
           import json
           import os
           import time
-          from datetime import datetime, timezone, timedelta
+          from datetime import datetime, timezone
           import requests
 
-          def utc_now():
-              return datetime.now(timezone.utc)
-
-          def utc_ts_str(dt: datetime) -> str:
-              return dt.strftime("%Y-%m-%d %H:%M:%S")
-
-          # Google Sheets stores dates as serial numbers; we write raw numbers (you format in UI).
-          # Epoch for Sheets is 1899-12-30.
-          def sheets_serial(dt: datetime) -> float:
-              epoch = datetime(1899, 12, 30, tzinfo=timezone.utc)
-              return (dt - epoch).total_seconds() / 86400.0
+          def utc_epoch():
+              return int(time.time())
 
           def b64_basic(user: str, pwd: str) -> str:
               token = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
@@ -154,52 +121,50 @@ jobs:
               raw = os.environ.get(name, "")
               if not raw.strip():
                   return {}
-              try:
-                  return json.loads(raw)
-              except Exception as e:
-                  raise RuntimeError(f"{name} is not valid JSON: {e}")
+              return json.loads(raw)
 
           clients = safe_json_load("EOU_CLIENTS")
           refresh_map = safe_json_load("EOU_REFRESH_TOKENS")
 
-          # Existing access tokens per secret (may be empty {})
           access_1 = safe_json_load("EOU_ACCESS_TOKENS_1")
           access_2 = safe_json_load("EOU_ACCESS_TOKENS_2")
 
-          # Validate required structure
           for app, cfg in clients.items():
               if "client_id" not in cfg or "client_secret" not in cfg or "access_tokens_secret" not in cfg:
-                  raise RuntimeError(
-                      f"EOU_CLIENTS entry '{app}' must include client_id, client_secret, access_tokens_secret"
-                  )
+                  raise RuntimeError(f"EOU_CLIENTS entry '{app}' must include client_id, client_secret, access_tokens_secret")
+
+          # Order rows by integer character_id (DESC)
+          items = []
+          for char_id_str, info in refresh_map.items():
+              items.append((int(char_id_str), info))
+          items.sort(key=lambda x: x[0], reverse=True)
 
           sso_url = os.environ["SSO_TOKEN_URL"]
 
-          rotated_any = False
-          refresh_time_serial_by_char = {}  # character_id(str) -> float serial date
-
           ok = 0
           fail = 0
+          rotated_any = False
 
-          # IMPORTANT CHANGE:
-          # We sort sheet rows by character_id (integer) DESC, so it pastes largest->smallest.
-          items = []
-          for char_id, info in refresh_map.items():
-              items.append((int(char_id), info))
-          items.sort(key=lambda x: x[0], reverse=True)
+          # We will write numeric epoch seconds into:
+          # - workflows!D (next_run)
+          # - access_tokens!F (refresh_time)
+          now_epoch = utc_epoch()
 
-          sheet_updates_access = []
+          # Prepare access_tokens sheet updates
+          access_sheet_updates = []
+
+          # Track refresh token rotation time per char (epoch seconds)
+          rotated_epoch_by_char = {}
 
           for idx, (char_id_int, info) in enumerate(items, start=0):
               char_id_str = str(char_id_int)
-
               account = info.get("account", "")
               char_name = info.get("char_name", "")
-              app = info["app"]
-              rt_old = info["refresh_token"]
+              app = info.get("app")
+              rt_old = info.get("refresh_token")
 
               cfg = clients.get(app)
-              if not cfg:
+              if not cfg or not rt_old:
                   fail += 1
                   continue
 
@@ -213,10 +178,7 @@ jobs:
                   "Accept": "application/json",
                   "User-Agent": "eou-refresh-access-tokens/1.0",
               }
-              data = {
-                  "grant_type": "refresh_token",
-                  "refresh_token": rt_old,
-              }
+              data = {"grant_type": "refresh_token", "refresh_token": rt_old}
 
               try:
                   r = requests.post(sso_url, headers=headers, data=data, timeout=30)
@@ -239,16 +201,12 @@ jobs:
                   fail += 1
                   continue
 
-              now = utc_now()
-
-              # Handle refresh token rotation if present and changed
               rt_new = payload.get("refresh_token")
               if rt_new and rt_new != rt_old:
                   refresh_map[char_id_str]["refresh_token"] = rt_new
                   rotated_any = True
-                  refresh_time_serial_by_char[char_id_str] = sheets_serial(now)
+                  rotated_epoch_by_char[char_id_int] = utc_epoch()
 
-              # Store access token into the correct secret map (keys must remain strings for JSON)
               if target_secret == "EOU_ACCESS_TOKENS_1":
                   access_1[char_id_str] = access_token
               elif target_secret == "EOU_ACCESS_TOKENS_2":
@@ -257,19 +215,17 @@ jobs:
                   fail += 1
                   continue
 
-              token_time_str = utc_ts_str(now)
-              refresh_time_serial = refresh_time_serial_by_char.get(char_id_str, "")
+              token_time_epoch = utc_epoch()
+              refresh_time_epoch = rotated_epoch_by_char.get(char_id_int, "")
 
-              # Sheet row mapping: header in row 1, data starts row 2
-              # idx 0 => row 2, idx 1 => row 3, ...
+              # Sheet row mapping:
+              # header row=1, data starts row=2
               row = 2 + idx
 
-              # IMPORTANT CHANGE:
-              # - character_id goes as INTEGER (char_id_int), not as string.
-              # - refresh_time goes as numeric serial when present.
-              sheet_updates_access.append({
+              # IMPORTANT: character_id as INTEGER (not string)
+              access_sheet_updates.append({
                   "range": f"{os.environ['ACCESS_TOKENS_TAB']}!A{row}:F{row}",
-                  "values": [[account, char_name, char_id_int, access_token, token_time_str, refresh_time_serial]],
+                  "values": [[account, char_name, char_id_int, access_token, token_time_epoch, refresh_time_epoch]],
               })
 
               ok += 1
@@ -282,41 +238,44 @@ jobs:
           dump_json("access_tokens_2.json", access_2)
           dump_json("refresh_tokens_new.json", refresh_map)
 
-          # Build workflows tab update (row fixed)
-          # Rules:
-          # - If status = completed => next_run = now + COOLDOWN
-          # - If status = fail      => next_run unchanged (so we do NOT overwrite D)
-          # We'll set status in B always. For "completed", we also write next_run numeric in D.
+          # Workflows tab update:
+          # status (B) and next_run (D)
+          # rules:
+          # - completed => next_run = now + COOLDOWN
+          # - fail => next_run unchanged (we won't write D in that case)
           cooldown = int(os.environ.get("COOLDOWN", "900"))
-          wf_row = int(os.environ["SHEETS_WORKFLOW_ROW"])
+          next_run_epoch = now_epoch + cooldown
 
-          # Here, if we got this far, we consider the workflow "completed".
-          status = "completed"
-          next_run_serial = sheets_serial(utc_now() + timedelta(seconds=cooldown))
-
-          sheet_updates_workflows = [
-              {"range": f"{os.environ['WORKFLOWS_TAB']}!B{wf_row}", "values": [[status]]},
-              {"range": f"{os.environ['WORKFLOWS_TAB']}!D{wf_row}", "values": [[next_run_serial]]},
+          # Here we always mark completed if the job reached this point and did not crash.
+          # If you want "fail", set it from the outer workflow with if: failure().
+          workflows_updates = [
+              {
+                  "range": f"{os.environ['WORKFLOWS_TAB']}!B{os.environ['SHEETS_WORKFLOW_ROW']}",
+                  "values": [["completed"]],
+              },
+              {
+                  "range": f"{os.environ['WORKFLOWS_TAB']}!D{os.environ['SHEETS_WORKFLOW_ROW']}",
+                  "values": [[next_run_epoch]],
+              },
           ]
 
-          # Single batchUpdate payload
-          all_updates = sheet_updates_workflows + sheet_updates_access
-          with open("sheets_batch_payload.json", "w", encoding="utf-8") as f:
-              json.dump(
-                  {
-                      "valueInputOption": "RAW",
-                      "data": all_updates,
-                      "includeValuesInResponse": False,
-                  },
-                  f,
-                  ensure_ascii=False,
-              )
+          with open("sheets_batch_payload_access_tokens.json", "w", encoding="utf-8") as f:
+              json.dump({
+                  "valueInputOption": "RAW",
+                  "data": access_sheet_updates,
+                  "includeValuesInResponse": False
+              }, f, ensure_ascii=False)
 
-          # Size safety check
+          with open("sheets_batch_payload_workflows.json", "w", encoding="utf-8") as f:
+              json.dump({
+                  "valueInputOption": "RAW",
+                  "data": workflows_updates,
+                  "includeValuesInResponse": False
+              }, f, ensure_ascii=False)
+
           max_bytes = int(os.environ.get("SECRET_MAX_BYTES", "49152"))
 
           def file_size(p):
-              import os
               return os.path.getsize(p)
 
           sz1 = file_size("access_tokens_1.json")
@@ -339,7 +298,7 @@ jobs:
           set -euo pipefail
           cat flags.env >> "$GITHUB_ENV"
 
-      - name: Update access token secrets (split)
+      - name: Auth gh CLI (PAT for secrets)
         env:
           GH_TOKEN: ${{ secrets.GH_SECRETS_ADMIN_TOKEN }}
         run: |
@@ -348,27 +307,43 @@ jobs:
             echo "GH_SECRETS_ADMIN_TOKEN is empty."
             exit 1
           fi
+          echo "${GH_TOKEN}" | gh auth login --with-token >/dev/null 2>&1 || true
+          gh auth status >/dev/null 2>&1
 
+      - name: Update access token secrets (split)
+        run: |
+          set -euo pipefail
           gh secret set EOU_ACCESS_TOKENS_1 --repo "${GITHUB_REPOSITORY}" < access_tokens_1.json
           gh secret set EOU_ACCESS_TOKENS_2 --repo "${GITHUB_REPOSITORY}" < access_tokens_2.json
 
       - name: Update refresh tokens secret (only if rotated)
         if: env.ROTATED_ANY == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GH_SECRETS_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
           gh secret set "${REFRESH_TOKENS_SECRET_NAME}" --repo "${GITHUB_REPOSITORY}" < refresh_tokens_new.json
 
-      - name: Write Google Sheet (single batch update request)
+      - name: Write Google Sheet - workflows (status + next_run)
+        env:
+          ACCESS_TOKEN: ${{ steps.gauth.outputs.access_token }}
         run: |
           set -euo pipefail
-          ACCESS_TOKEN="$(gcloud auth print-access-token)"
           curl -sS -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             -H "Content-Type: application/json; charset=utf-8" \
             "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
-            --data-binary @sheets_batch_payload.json \
+            --data-binary @sheets_batch_payload_workflows.json \
+            >/dev/null
+
+      - name: Write Google Sheet - access_tokens (batch)
+        env:
+          ACCESS_TOKEN: ${{ steps.gauth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            --data-binary @sheets_batch_payload_access_tokens.json \
             >/dev/null
 
       - name: Done
