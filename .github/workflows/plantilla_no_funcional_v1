@@ -1,0 +1,199 @@
+# ==============================================================================
+# PLANTILLA (NO FUNCIONAL A PROPÓSITO)
+# ------------------------------------------------------------------------------
+# Objetivo:
+#   - Este archivo es una GUÍA/ESQUELETO para crear workflows repetibles.
+#   - Está escrito para que el usuario vea CLARAMENTE qué modificar.
+#
+# Cómo usar:
+#   1) Copia este archivo en .github/workflows/ como: wof-<tu-nombre>.yml
+#   2) Rellena TODOS los campos marcados como:  <<< CAMBIAR >>>
+#   3) Reemplaza la sección: "OBJECTIVE (TU TRABAJO REAL)"
+#
+# Importante:
+#   - Este archivo NO es ejecutable tal cual (faltan valores y comandos reales).
+#   - La idea es que el usuario NO se pierda: lo que hay que tocar está marcado.
+# ==============================================================================
+
+name: Plantilla de muestra v1
+
+on:
+  workflow_dispatch:
+
+# ------------------------------------------------------------------------------
+# Permisos típicos para este patrón
+# ------------------------------------------------------------------------------
+permissions:
+  actions: read          # necesario si usas Guard (listar runs)
+  contents: read         # típico (checkout/lectura)
+  id-token: write        # necesario para WIF/OIDC con Google (sin claves)
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    # ==========================================================================
+    # 0) CONFIGURACIÓN: AQUÍ ESTÁ TODO LO QUE SUELES MODIFICAR
+    # ==========================================================================
+    env:
+      # ------------------------------------------------------------------------
+      # Identidad del workflow
+      # ------------------------------------------------------------------------
+      WORKFLOW_FILE: "<<< CAMBIAR: nombre exacto del archivo yml >>>"
+      # Ejemplo: "wof-esi-kills.yml"
+      # Debe coincidir con el filename real en .github/workflows/
+
+      # ------------------------------------------------------------------------
+      # Google Sheets (estado compartido)
+      # ------------------------------------------------------------------------
+      SHEETS_ID: "<<< CAMBIAR: Spreadsheet ID >>>"
+      SHEET_TAB: "<<< CAMBIAR: nombre de tab (normalmente 'workflows') >>>"
+      SHEETS_WORKFLOW_ROW: "<<< CAMBIAR: fila donde vive este workflow en la tab >>>"
+      # Ejemplo: "2"
+
+      # ------------------------------------------------------------------------
+      # Control de planificación
+      # ------------------------------------------------------------------------
+      LOCK_TIME: "<<< CAMBIAR: segundos de lock corto al arrancar >>>"
+      COOLDOWN: "<<< CAMBIAR: segundos de cooldown al finalizar >>>"
+      # Ejemplo:
+      # LOCK_TIME: 60
+      # COOLDOWN: 240
+
+      # ------------------------------------------------------------------------
+      # GCP / BigQuery (solo si tu objetivo lo usa)
+      # ------------------------------------------------------------------------
+      GCP_PROJECT_ID: "${{ secrets.GCP_PROJECT_ID }}"   # (normalmente no cambia)
+      BQ_DATASET: "<<< CAMBIAR: dataset >>>"
+      BQ_TABLE: "<<< CAMBIAR: tabla >>>"
+
+      # ------------------------------------------------------------------------
+      # Opcional: parámetros propios de tu objetivo
+      # ------------------------------------------------------------------------
+      OBJECTIVE_PARAM_1: "<<< CAMBIAR: tu parámetro >>>"
+      OBJECTIVE_PARAM_2: "<<< CAMBIAR: tu parámetro >>>"
+
+    steps:
+      # ==========================================================================
+      # 1) GUARD (COMÚN) - Evita trabajo duplicado
+      #    - Si detecta solapamiento con otro run, decide SALIR.
+      #    - NO cancela a nadie (solo sale).
+      #
+      # LO QUE MODIFICAS NORMALMENTE AQUÍ:
+      #   - Nada, salvo que quieras cambiar la política de solapamiento.
+      # ==========================================================================
+      - name: "GUARD (common) - compute proceed=true/false"
+        run: |
+          echo "<<< AQUÍ IRÍA TU LÓGICA DE GUARD >>>"
+          echo "proceed=true" > /tmp/proceed
+
+      - name: "GUARD (common) - publish proceed"
+        id: guard
+        run: |
+          echo "proceed=$(cat /tmp/proceed)" >> "$GITHUB_OUTPUT"
+
+
+      # ==========================================================================
+      # 2) AUTH GOOGLE (COMÚN) - WIF/OIDC sin claves
+      #
+      # LO QUE MODIFICAS NORMALMENTE AQUÍ:
+      #   - Normalmente nada.
+      #   - Opcionalmente: scopes (si tu objetivo necesita otros).
+      # ==========================================================================
+      - name: "AUTH (common) - Google WIF/OIDC"
+        id: gcp_auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: "${{ secrets.WIF_PROVIDER }}"        # no tocar
+          service_account: "${{ secrets.WIF_SERVICE_ACCOUNT }}"           # no tocar
+          token_format: "access_token"
+          access_token_scopes: |
+            https://www.googleapis.com/auth/spreadsheets
+            https://www.googleapis.com/auth/cloud-platform
+
+
+      # ==========================================================================
+      # 3) BUSY EXIT (COMÚN)
+      #    - Si proceed != true, sale inmediatamente.
+      #
+      # LO QUE MODIFICAS NORMALMENTE AQUÍ:
+      #   - Nada (salvo si quieres que al salir también escriba algo en Sheets).
+      # ==========================================================================
+      - name: "BUSY EXIT (common)"
+        if: steps.guard.outputs.proceed != 'true'
+        run: |
+          echo "Skipped due to overlapping run"
+          exit 0
+
+
+      # ==========================================================================
+      # 4) LOCK INICIAL EN SHEETS (COMÚN)
+      #    - Marca status=in_progress
+      #    - Ajusta next_run=now+LOCK_TIME
+      #
+      # LO QUE MODIFICAS NORMALMENTE AQUÍ:
+      #   - Nada, salvo que cambies columnas/rangos en tu Sheet.
+      # ==========================================================================
+      - name: "LOCK (common) - in_progress + next_run"
+        if: steps.guard.outputs.proceed == 'true'
+        env:
+          ACCESS_TOKEN: "${{ steps.gcp_auth.outputs.access_token }}"
+        run: |
+          echo "<<< AQUÍ IRÍA EL batchUpdate REAL A SHEETS >>>"
+          echo "<<< status=in_progress, next_run=now+LOCK_TIME >>>"
+
+
+      # ==========================================================================
+      # ==========================================================================
+      # 5) ✅ OBJECTIVE (TU TRABAJO REAL)  <<< AQUÍ CAMBIAS SIEMPRE >>>
+      #
+      # ESTA ES LA ÚNICA SECCIÓN QUE DEBE SER DIFERENTE ENTRE WORKFLOWS
+      #
+      # Ejemplos de objetivos:
+      #   - ESI -> descargar JSON -> subir a BigQuery
+      #   - Leer repo SDE -> transformar -> cargar a BigQuery
+      #   - Query BigQuery -> export -> guardar artifact
+      #   - Llamar API externa -> normalizar -> BigQuery
+      #
+      # Recomendación:
+      #   - Divídelo en pasos pequeños:
+      #       a) setup herramientas necesarias
+      #       b) fetch/compute
+      #       c) load/write (BQ, Sheets, etc.)
+      # ==========================================================================
+      # ==========================================================================
+      - name: "OBJECTIVE - step 1 (setup tools)"
+        if: steps.guard.outputs.proceed == 'true'
+        run: |
+          echo "<<< CAMBIAR: instala herramientas, dependencias, etc. >>>"
+
+      - name: "OBJECTIVE - step 2 (do the work)"
+        if: steps.guard.outputs.proceed == 'true'
+        run: |
+          echo "<<< CAMBIAR: aquí va el trabajo útil real >>>"
+          echo "<<< ejemplo: descargar datos / transformar / cargar a BQ >>>"
+
+
+      # ==========================================================================
+      # 6) FINALIZE EN SHEETS (COMÚN)
+      #    - Si success(): status=completed, next_run=now+COOLDOWN
+      #    - Si failure(): status=failed, next_run=now+COOLDOWN
+      #
+      # LO QUE MODIFICAS NORMALMENTE AQUÍ:
+      #   - Nada, salvo si cambias columnas/rangos en tu Sheet.
+      # ==========================================================================
+      - name: "FINALIZE (common) - completed + cooldown"
+        if: steps.guard.outputs.proceed == 'true' && success()
+        env:
+          ACCESS_TOKEN: "${{ steps.gcp_auth.outputs.access_token }}"
+        run: |
+          echo "<<< AQUÍ IRÍA EL batchUpdate REAL A SHEETS >>>"
+          echo "<<< status=completed, next_run=now+COOLDOWN >>>"
+
+      - name: "FINALIZE (common) - failed + cooldown"
+        if: steps.guard.outputs.proceed == 'true' && failure()
+        env:
+          ACCESS_TOKEN: "${{ steps.gcp_auth.outputs.access_token }}"
+        run: |
+          echo "<<< AQUÍ IRÍA EL batchUpdate REAL A SHEETS >>>"
+          echo "<<< status=failed, next_run=now+COOLDOWN >>>"
