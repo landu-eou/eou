@@ -1,11 +1,8 @@
-name: TEMPLATE - GH → Sheets (guard + lock + cooldown) + OBJECTIVE
+name: TEMPLATE - GH -> Sheets (guard + lock + cooldown) + OBJECTIVE
 
 on:
   workflow_dispatch:
 
-# Permisos:
-# - actions:read  -> leer runs del workflow (Guard)
-# - id-token:write -> WIF/OIDC hacia Google (sin claves)
 permissions:
   actions: read
   contents: read
@@ -21,7 +18,6 @@ jobs:
       # =====================================================================
 
       # --- Identidad del workflow ---
-      # IMPORTANTE: debe coincidir con el filename real en .github/workflows/
       WORKFLOW_FILE: wof-prueba-sheets-bq.yml   # <-- CAMBIAR en cada workflow
 
       # --- Google Sheets (estado compartido) ---
@@ -41,14 +37,6 @@ jobs:
     steps:
       # =====================================================================
       # 1) GUARD (COMÚN) — decide si este run debe trabajar o salir (busy)
-      #
-      # Política:
-      # - Si este run fue creado mientras otro run anterior seguía “vivo”
-      #   (updated_at > this_created), entonces SALIR.
-      # - Si hay varios runs activos (queued/in_progress), solo el "líder"
-      #   (menor run_number) trabaja. Los demás SALEN.
-      #
-      # Resultado: steps.guard.outputs.proceed = true/false
       # =====================================================================
 
       - name: Guard - compute decision
@@ -115,7 +103,6 @@ jobs:
 
       # =====================================================================
       # 2) AUTH GOOGLE (COMÚN) — WIF/OIDC (sin claves)
-      #    Produce: steps.gcp_auth.outputs.access_token
       # =====================================================================
       - name: Auth to Google (WIF)
         id: gcp_auth
@@ -130,7 +117,6 @@ jobs:
 
       # =====================================================================
       # 3) BUSY EXIT (COMÚN) — si no procede, salir sin tocar nada
-      #    (mantengo EXACTAMENTE tu comportamiento actual)
       # =====================================================================
       - name: Exit if skipped (busy)
         if: steps.guard.outputs.proceed != 'true'
@@ -139,16 +125,22 @@ jobs:
           exit 0
 
       # =====================================================================
-      # 4) LOCK INICIAL (COMÚN) — status=in_progress + next_run=now+LOCK_TIME
+      # 4) LOCK INICIAL (COMÚN)
+      #    - status=in_progress
+      #    - next_run (col D) como VALOR numérico (serial Sheets), no string
       # =====================================================================
-      - name: Initial lock (in_progress + next_run)
+      - name: Initial lock (in_progress + next_run as value)
         if: steps.guard.outputs.proceed == 'true'
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
-          next="$(date -u -d "+${LOCK_TIME} seconds" +"%F %T")"
+
+          # next_run (UTC) como serial de Sheets:
+          # serial = epoch_seconds/86400 + 25569  (origen 1899-12-30)
+          epoch="$(date -u -d "+${LOCK_TIME} seconds" +%s)"
+          serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
 
           curl -fsSL -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
@@ -158,26 +150,14 @@ jobs:
               \"valueInputOption\":\"RAW\",
               \"data\":[
                 {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"in_progress\"]]},
-                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[\"${next}\"]]}
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${serial}]]}
               ]
             }"
 
       # =====================================================================
-      # =====================================================================
-      # 5) ✅ SECCIÓN OBJETIVO (ESTO ES LO QUE CAMBIA ENTRE WORKFLOWS)
-      #
-      # Reglas:
-      # - TODO lo “útil” va aquí.
-      # - Si este bloque no existe, el workflow no hace nada.
-      # - Debe respetar que NO hay gateway: escribe a Sheets/BQ directamente.
-      #
-      # Plantilla:
-      #   - Setup de herramientas necesarias
-      #   - Trabajo objetivo real (ETL, consultas, descargas, etc.)
-      # =====================================================================
+      # 5) ✅ SECCIÓN OBJETIVO (CAMBIA ENTRE WORKFLOWS)
       # =====================================================================
 
-      # --- Ejemplo Objetivo: BigQuery LOAD de una fila (tu caso actual) ---
       - name: Setup gcloud (needed by Objective)
         if: steps.guard.outputs.proceed == 'true'
         uses: google-github-actions/setup-gcloud@v2
@@ -199,17 +179,19 @@ jobs:
             row.json
 
       # =====================================================================
-      # 6) FINALIZE (COMÚN) — completed/failed + next_run=now+COOLDOWN
+      # 6) FINALIZE (COMÚN) — completed/failed + next_run como VALOR (serial)
       # =====================================================================
 
-      - name: Finalize (completed + cooldown)
+      - name: Finalize (completed + cooldown as value)
         if: steps.guard.outputs.proceed == 'true' && success()
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
-          next="$(date -u -d "+${COOLDOWN} seconds" +"%F %T")"
+
+          epoch="$(date -u -d "+${COOLDOWN} seconds" +%s)"
+          serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
 
           curl -fsSL -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
@@ -219,18 +201,20 @@ jobs:
               \"valueInputOption\":\"RAW\",
               \"data\":[
                 {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"completed\"]]},
-                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[\"${next}\"]]}
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${serial}]]}
               ]
             }"
 
-      - name: Finalize (failed + cooldown)
+      - name: Finalize (failed + cooldown as value)
         if: steps.guard.outputs.proceed == 'true' && failure()
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
-          next="$(date -u -d "+${COOLDOWN} seconds" +"%F %T")"
+
+          epoch="$(date -u -d "+${COOLDOWN} seconds" +%s)"
+          serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
 
           curl -fsSL -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
@@ -240,6 +224,6 @@ jobs:
               \"valueInputOption\":\"RAW\",
               \"data\":[
                 {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"failed\"]]},
-                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[\"${next}\"]]}
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${serial}]]}
               ]
             }"
