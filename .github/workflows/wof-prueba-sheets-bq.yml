@@ -16,7 +16,7 @@ jobs:
       # ===== Sheets =====
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
-      SHEETS_WORKFLOW_ROW: "2"            # fila 2
+      SHEETS_WORKFLOW_ROW: "2"
       WORKFLOW_FILE: wof-prueba-sheets-bq.yml
 
       # ===== BigQuery =====
@@ -25,11 +25,11 @@ jobs:
       BQ_TABLE: prueba_aps_tick
 
     steps:
-      # ------------------------------------------------------------
-      # GUARD: salir si hubo solape con otro run (sin cancelar)
-      # ------------------------------------------------------------
-      - name: Guard - exit if overlapping run existed
-        id: guard
+      # ============================================================
+      # 1) GUARD — COMPUTE (SIN $GITHUB_OUTPUT)
+      # ============================================================
+      - name: Guard - compute decision
+        id: guard_calc
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -45,55 +45,57 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "${api}")"
 
-          # --- obtener ESTE run (0 o 1 objeto) ---
+          proceed="true"
+
           this="$(jq --arg rid "$RUN_ID" -c '
             (.workflow_runs // [])
             | map(select(.id == ($rid|tonumber)))
             | .[0] // empty
           ' <<< "$json")"
 
-          if [ -z "$this" ]; then
-            echo "proceed=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [ -n "$this" ]; then
+            this_created="$(jq -r '.created_at' <<< "$this")"
+            this_num="$(jq -r '.run_number' <<< "$this")"
+
+            alive_at_creation="$(jq --arg rid "$RUN_ID" --arg tc "$this_created" '
+              (.workflow_runs // [])
+              | map(
+                  select(.id != ($rid|tonumber))
+                  | select(.created_at < $tc)
+                  | select(.updated_at > $tc)
+                )
+              | length
+            ' <<< "$json")"
+
+            if [ "$alive_at_creation" -gt 0 ]; then
+              proceed="false"
+            else
+              leader="$(jq '
+                (.workflow_runs // [])
+                | map(select(.status=="queued" or .status=="in_progress"))
+                | map(.run_number)
+                | min // empty
+              ' <<< "$json")"
+
+              if [ -n "$leader" ] && [ "$leader" != "$this_num" ]; then
+                proceed="false"
+              fi
+            fi
           fi
 
-          this_created="$(jq -r '.created_at' <<< "$this")"
-          this_num="$(jq -r '.run_number' <<< "$this")"
+          echo "$proceed" > /tmp/proceed
 
-          # --- ¿existía otro run vivo cuando este se creó? ---
-          alive_at_creation="$(jq --arg rid "$RUN_ID" --arg tc "$this_created" '
-            (.workflow_runs // [])
-            | map(
-                select(.id != ($rid|tonumber))
-                | select(.created_at < $tc)
-                | select(.updated_at > $tc)
-              )
-            | length
-          ' <<< "$json")"
+      # ============================================================
+      # 2) GUARD — PUBLISH (SIN jq)
+      # ============================================================
+      - name: Guard - publish decision
+        id: guard
+        run: |
+          echo "proceed=$(cat /tmp/proceed)" >> "$GITHUB_OUTPUT"
 
-          if [ "$alive_at_creation" -gt 0 ]; then
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # --- líder determinista entre activos ---
-          leader="$(jq '
-            (.workflow_runs // [])
-            | map(select(.status=="queued" or .status=="in_progress"))
-            | map(.run_number)
-            | min // empty
-          ' <<< "$json")"
-
-          if [ -n "$leader" ] && [ "$leader" != "$this_num" ]; then
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "proceed=true" >> "$GITHUB_OUTPUT"
-
-      # ------------------------------------------------------------
-      # AUTH GOOGLE (WIF / OIDC)
-      # ------------------------------------------------------------
+      # ============================================================
+      # 3) AUTH GOOGLE (OIDC / WIF)
+      # ============================================================
       - name: Auth to Google (WIF) - access token
         id: gcp_auth
         uses: google-github-actions/auth@v2
@@ -105,9 +107,9 @@ jobs:
             https://www.googleapis.com/auth/spreadsheets
             https://www.googleapis.com/auth/cloud-platform
 
-      # ------------------------------------------------------------
-      # SI SKIPPED (busy): escribir completed + next_run (+6m) y salir
-      # ------------------------------------------------------------
+      # ============================================================
+      # 4) SI SKIPPED → Sheets (completed + next_run) Y SALIR
+      # ============================================================
       - name: If skipped (busy) - update Sheets and exit
         if: steps.guard.outputs.proceed != 'true'
         env:
@@ -129,12 +131,12 @@ jobs:
               ]
             }"
 
-          echo \"Skipped due to overlapping run\"
+          echo "Skipped due to overlapping run"
           exit 0
 
-      # ------------------------------------------------------------
-      # MARCAR RUNNING
-      # ------------------------------------------------------------
+      # ============================================================
+      # 5) MARCAR RUNNING
+      # ============================================================
       - name: Mark running in Sheets
         if: steps.guard.outputs.proceed == 'true'
         env:
@@ -154,9 +156,9 @@ jobs:
               ]
             }"
 
-      # ------------------------------------------------------------
-      # BIGQUERY: INSERT TIMESTAMP (PRUEBA)
-      # ------------------------------------------------------------
+      # ============================================================
+      # 6) BIGQUERY — INSERT TIMESTAMP (PRUEBA)
+      # ============================================================
       - name: Setup gcloud
         if: steps.guard.outputs.proceed == 'true'
         uses: google-github-actions/setup-gcloud@v2
@@ -172,9 +174,9 @@ jobs:
              (ts_utc, source)
              VALUES (TIMESTAMP('${now_iso}'), '${WORKFLOW_FILE}')"
 
-      # ------------------------------------------------------------
-      # COMPLETED / FAILED + next_run = now + 6m
-      # ------------------------------------------------------------
+      # ============================================================
+      # 7) COMPLETED / FAILED + next_run = now + 6m
+      # ============================================================
       - name: Mark completed and next_run (+6m)
         if: steps.guard.outputs.proceed == 'true' && success()
         env:
