@@ -91,12 +91,13 @@ jobs:
             other = [r for r in wfruns if int(r.get("id", -1)) != me]
             print(len(other))
             PY
-          )"
+                      )"
+            
+                      if [ "${others_count}" -gt 0 ]; then
+                        echo "Skipped: another run is in progress (anti-overlap)."
+                        exit 0
+                      fi
 
-          if [ "${others_count}" -gt 0 ]; then
-            echo "Skipped: another run is in progress (anti-overlap)."
-            exit 0
-          fi
 
 
       # Refresh tokens and prepare:
