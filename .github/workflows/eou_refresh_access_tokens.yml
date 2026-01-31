@@ -28,13 +28,14 @@ jobs:
 
       REFRESH_TOKENS_SECRET_NAME: "EOU_REFRESH_TOKENS"
 
-      # GitHub Actions secrets hard limit is 48 KB.
+      # GitHub secret hard limit is 48 KB. (We keep a small margin.)
       SECRET_MAX_BYTES: "49152"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Google auth (WIF) for Google Sheets write
       - name: Auth to Google (WIF)
         uses: google-github-actions/auth@v2
         with:
@@ -64,28 +65,27 @@ jobs:
           set -euo pipefail
           owner_repo="${GITHUB_REPOSITORY}"
           api="https://api.github.com/repos/${owner_repo}/actions/workflows/${WORKFLOW_FILE}/runs?status=in_progress&per_page=10"
-          runs_json="$(curl -sS \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${api}")"
-
-          export RUNS_JSON="${runs_json}"
+          runs_json="$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "X-GitHub-Api-Version: 2022-11-28" "${api}")"
 
           others_count="$(python - <<'PY'
-          import json, os
-          runs = json.loads(os.environ.get("RUNS_JSON","{}"))
+          import json, os, sys
+          runs = json.loads(sys.stdin.read())
           me = int(os.environ["GITHUB_RUN_ID"])
-          wfruns = runs.get("workflow_runs", []) or []
+          wfruns = runs.get("workflow_runs", [])
           other = [r for r in wfruns if int(r.get("id", -1)) != me]
           print(len(other))
           PY
-          )"
+          <<<"${runs_json}")"
 
           if [ "${others_count}" -gt 0 ]; then
             echo "Skipped: another run is in progress (anti-overlap)."
             exit 0
           fi
 
+      # Refresh tokens, build:
+      # - access_tokens_1.json, access_tokens_2.json (char_id -> access_token)
+      # - refresh_tokens_new.json (updated only if rotation happened)
+      # - sheets_batch_payload.json (single request payload)
       - name: Refresh access tokens + prepare updates
         env:
           EOU_CLIENTS: ${{ secrets.EOU_CLIENTS }}
@@ -139,11 +139,10 @@ jobs:
 
           items = []
           for char_id, info in refresh_map.items():
-              items.append((info.get("account",""), info.get("char_name",""), int(char_id), info))
+              items.append((info.get("account", ""), info.get("char_name", ""), int(char_id), info))
           items.sort(key=lambda x: (x[0], x[1], x[2]))
 
           sso_url = os.environ["SSO_TOKEN_URL"]
-
           ok = 0
           fail = 0
 
@@ -167,10 +166,7 @@ jobs:
                   "Accept": "application/json",
                   "User-Agent": "eou-refresh-access-tokens/1.0",
               }
-              data = {
-                  "grant_type": "refresh_token",
-                  "refresh_token": rt_old,
-              }
+              data = {"grant_type": "refresh_token", "refresh_token": rt_old}
 
               try:
                   r = requests.post(sso_url, headers=headers, data=data, timeout=30)
@@ -209,13 +205,14 @@ jobs:
 
               token_time = utc_ts()
               refresh_time = refresh_time_by_char.get(char_id, "")
-
               row = 2 + idx
 
-              sheet_updates.append({
-                  "range": f"{os.environ['ACCESS_TOKENS_TAB']}!A{row}:F{row}",
-                  "values": [[account, char_name, char_id, access_token, token_time, refresh_time]],
-              })
+              sheet_updates.append(
+                  {
+                      "range": f"{os.environ['ACCESS_TOKENS_TAB']}!A{row}:F{row}",
+                      "values": [[account, char_name, char_id, access_token, token_time, refresh_time]],
+                  }
+              )
 
               ok += 1
 
@@ -232,15 +229,15 @@ jobs:
                   {
                       "valueInputOption": "RAW",
                       "data": sheet_updates,
-                      "includeValuesInResponse": False
+                      "includeValuesInResponse": False,
                   },
                   f,
-                  ensure_ascii=False
+                  ensure_ascii=False,
               )
 
           max_bytes = int(os.environ.get("SECRET_MAX_BYTES", "49152"))
 
-          def file_size(p: str) -> int:
+          def file_size(p):
               return os.path.getsize(p)
 
           sz1 = file_size("access_tokens_1.json")
@@ -267,29 +264,23 @@ jobs:
           set -euo pipefail
           cat flags.env >> "$GITHUB_ENV"
 
-      - name: Auth gh CLI (PAT for secrets)
+      - name: Update access token secrets (split)
         env:
           GH_TOKEN: ${{ secrets.GH_SECRETS_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "${GH_TOKEN}" ]; then
-            echo "GH_SECRETS_ADMIN_TOKEN is empty."
-            exit 1
-          fi
-          echo "${GH_TOKEN}" | gh auth login --with-token >/dev/null 2>&1 || true
-          gh auth status >/dev/null 2>&1
-
-      - name: Update access token secrets (split)
-        run: |
-          set -euo pipefail
-          gh secret set EOU_ACCESS_TOKENS_1 --repo "${GITHUB_REPOSITORY}" < "access_tokens_1.json"
-          gh secret set EOU_ACCESS_TOKENS_2 --repo "${GITHUB_REPOSITORY}" < "access_tokens_2.json"
+          test -n "${GH_TOKEN}"
+          gh secret set EOU_ACCESS_TOKENS_1 --repo "${GITHUB_REPOSITORY}" < access_tokens_1.json
+          gh secret set EOU_ACCESS_TOKENS_2 --repo "${GITHUB_REPOSITORY}" < access_tokens_2.json
 
       - name: Update refresh tokens secret (only if rotated)
         if: env.ROTATED_ANY == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_SECRETS_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
-          gh secret set "${REFRESH_TOKENS_SECRET_NAME}" --repo "${GITHUB_REPOSITORY}" < "refresh_tokens_new.json"
+          test -n "${GH_TOKEN}"
+          gh secret set "${REFRESH_TOKENS_SECRET_NAME}" --repo "${GITHUB_REPOSITORY}" < refresh_tokens_new.json
 
       - name: Write Google Sheet (single batch update request)
         run: |
