@@ -205,7 +205,8 @@ jobs:
           ACCESS_TOKEN: "${{ steps.gcp_auth.outputs.access_token }}"
 
           # 👇 CAMBIO: usar el PAT admin renombrado
-          GH_ADMIN_PAT: "${{ secrets.GH_SECRETS_ADMIN }}"
+          GH_ADMIN_PAT: "${{ secrets.GH_SECRETS_ADMIN_TOKEN }}"
+
 
           EOU_CLIENTS: "${{ secrets.EOU_CLIENTS }}"
           EOU_REFRESH_TOKENS: "${{ secrets.EOU_REFRESH_TOKENS }}"
