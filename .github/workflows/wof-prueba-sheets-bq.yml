@@ -1,4 +1,4 @@
-name: Prueba GH -> Sheets(row2) + BigQuery LOAD JOB
+name: Prueba GH -> Sheets (lock + cooldown) + BigQuery LOAD
 
 on:
   workflow_dispatch:
@@ -13,20 +13,30 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # ===== Sheets =====
+      # ============================================================
+      # CONFIGURACIÓN EDITABLE
+      # ============================================================
+
+      # --- Google Sheets ---
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "2"
+
+      # --- Workflow ---
       WORKFLOW_FILE: wof-prueba-sheets-bq.yml
 
-      # ===== BigQuery =====
+      # --- Locking ---
+      LOCK_TIME: 60        # segundos (lock al arrancar)
+      COOLDOWN: 240        # segundos (cooldown al terminar)
+
+      # --- BigQuery ---
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       BQ_DATASET: eou
       BQ_TABLE: prueba_aps_tick
 
     steps:
       # ============================================================
-      # 1) GUARD — COMPUTE (SIN $GITHUB_OUTPUT)
+      # 1) GUARD — COMPUTE (sin $GITHUB_OUTPUT)
       # ============================================================
       - name: Guard - compute decision
         id: guard_calc
@@ -108,42 +118,25 @@ jobs:
             https://www.googleapis.com/auth/cloud-platform
 
       # ============================================================
-      # 4) SI SKIPPED → Sheets (completed + next_run) Y SALIR
+      # 4) SI SKIPPED → salir sin tocar nada
       # ============================================================
-      - name: If skipped (busy) - update Sheets and exit
+      - name: Exit if skipped (busy)
         if: steps.guard.outputs.proceed != 'true'
-        env:
-          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
-          set -euo pipefail
-          row="${SHEETS_WORKFLOW_ROW}"
-          next="$(date -u -d "+6 minutes" +"%F %T")"
-
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
-            -d "{
-              \"valueInputOption\":\"RAW\",
-              \"data\":[
-                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"completed\"]]},
-                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[\"${next}\"]]}
-              ]
-            }"
-
           echo "Skipped due to overlapping run"
           exit 0
 
       # ============================================================
-      # 5) MARCAR RUNNING
+      # 5) LOCK INICIAL → status=in_progress + next_run=now+LOCK_TIME
       # ============================================================
-      - name: Mark running in Sheets
+      - name: Initial lock (in_progress + next_run)
         if: steps.guard.outputs.proceed == 'true'
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
+          next="$(date -u -d "+${LOCK_TIME} seconds" +"%F %T")"
 
           curl -fsSL -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
@@ -152,22 +145,22 @@ jobs:
             -d "{
               \"valueInputOption\":\"RAW\",
               \"data\":[
-                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"running\"]]}
+                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"in_progress\"]]},
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[\"${next}\"]]}
               ]
             }"
 
       # ============================================================
-      # 6) BIGQUERY — LOAD JOB (SIN BILLING)
+      # 6) BIGQUERY — LOAD JOB (sin billing)
       # ============================================================
       - name: Setup gcloud
         if: steps.guard.outputs.proceed == 'true'
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: BigQuery - LOAD timestamp row (free tier)
+      - name: BigQuery - LOAD timestamp row
         if: steps.guard.outputs.proceed == 'true'
         run: |
           set -euo pipefail
-
           now_iso="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
           cat > row.json <<EOF
@@ -181,16 +174,16 @@ jobs:
             row.json
 
       # ============================================================
-      # 7) COMPLETED / FAILED + next_run = now + 6m
+      # 7) FINAL — COMPLETED / FAILED + next_run=now+COOLDOWN
       # ============================================================
-      - name: Mark completed and next_run (+6m)
+      - name: Finalize (completed + cooldown)
         if: steps.guard.outputs.proceed == 'true' && success()
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
-          next="$(date -u -d "+6 minutes" +"%F %T")"
+          next="$(date -u -d "+${COOLDOWN} seconds" +"%F %T")"
 
           curl -fsSL -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
@@ -204,14 +197,14 @@ jobs:
               ]
             }"
 
-      - name: Mark failed and next_run (+6m)
+      - name: Finalize (failed + cooldown)
         if: steps.guard.outputs.proceed == 'true' && failure()
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
-          next="$(date -u -d "+6 minutes" +"%F %T")"
+          next="$(date -u -d "+${COOLDOWN} seconds" +"%F %T")"
 
           curl -fsSL -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
