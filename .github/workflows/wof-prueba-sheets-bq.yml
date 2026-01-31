@@ -1,4 +1,4 @@
-name: TEMPLATE - GH -> Sheets (guard + lock + cooldown) + OBJECTIVE
+name: TEMPLATE - GH → Sheets (guard + lock + cooldown) + OBJECTIVE
 
 on:
   workflow_dispatch:
