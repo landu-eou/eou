@@ -1,14 +1,36 @@
+# ==============================================================================
+# WORKFLOW (FUNCIONAL) - basado en plantilla_no_funcional_v1.txt
+# ------------------------------------------------------------------------------
+# Objetivo:
+#   - Refrescar access tokens (EVE SSO) usando refresh tokens almacenados en Secrets
+#   - Guardar access tokens en GitHub Secret: EOU_ACCESS_TOKENS (fuente de verdad)
+#   - Guardar espejo en Google Sheet (tab: access_tokens)
+#   - Gestionar rotación de refresh tokens (si CCP devuelve refresh_token nuevo):
+#       - actualizar GitHub Secret: EOU_REFRESH_TOKENS
+#       - escribir refresh_time UTC en columna F de access_tokens
+# ==============================================================================
+
 name: Refresh Access Tokens (SSO → GHs + GS)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
 
+# ------------------------------------------------------------------------------
+# Permisos típicos para este patrón
+# ------------------------------------------------------------------------------
 permissions:
-  contents: read
-  id-token: write
+  actions: read          # necesario si usas Guard (listar runs)
+  contents: read         # típico
+  id-token: write        # necesario para WIF/OIDC con Google (sin claves)
 
+# ------------------------------------------------------------------------------
+# Anti-solape oficial (GitHub)
+# - Nunca corre en paralelo.
+# - Evita colas infinitas: GitHub cancela runs "pending" antiguos en el mismo grupo.
+# - Aun así, un run "pending" puede arrancar después: por eso existe el GUARD+COOLDOWN.
+# ------------------------------------------------------------------------------
 concurrency:
-  group: eou-sso-token-refresh
+  group: eou_refresh_access_tokens
   cancel-in-progress: false
 
 jobs:
@@ -16,264 +38,613 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
+    # ==========================================================================
+    # 0) CONFIGURACIÓN: AQUÍ ESTÁ TODO LO QUE SUELES MODIFICAR
+    # ==========================================================================
     env:
-      WORKFLOW_ID: eou_refresh_access_tokens
-      WORKFLOW_NAME: "Refresh Access Tokens (SSO -> GHs + GS)"
-      SHEET_ROW: "2"
-      EXPIRES: "900"
-      LOCK_SECONDS: "60"
+      # ------------------------------------------------------------------------
+      # Identidad del workflow
+      # ------------------------------------------------------------------------
+      WORKFLOW_FILE: "eou_refresh_access_tokens.yml"
 
-      TOKENS_SPREADSHEET_ID: "1LDi6LFPYO99Rz6OBnwt58dI60aWyw1OFLEcnyt0yHAA"
-      TOKENS_TAB_NAME: "access_tokens"
+      # ------------------------------------------------------------------------
+      # Google Sheets (estado compartido)
+      # ------------------------------------------------------------------------
+      SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
+      SHEET_TAB: workflows
+      SHEETS_WORKFLOW_ROW: 3
+
+      # ------------------------------------------------------------------------
+      # Control de planificación (solo para sheet/monitor; el disparador externo manda)
+      # ------------------------------------------------------------------------
+      LOCK_TIME: 60
+      COOLDOWN: 900
+
+      # ------------------------------------------------------------------------
+      # Tabs / rangos
+      # ------------------------------------------------------------------------
+      ACCESS_TOKENS_TAB: access_tokens
+
+      # ------------------------------------------------------------------------
+      # EVE SSO
+      # ------------------------------------------------------------------------
+      SSO_TOKEN_URL: "https://login.eveonline.com/v2/oauth/token"
+
+      # ------------------------------------------------------------------------
+      # Secrets / límites
+      # ------------------------------------------------------------------------
+      ACCESS_TOKENS_SECRET_NAME: "EOU_ACCESS_TOKENS"
+      REFRESH_TOKENS_SECRET_NAME: "EOU_REFRESH_TOKENS"
+
+      # Plan B preparado (48KB): por defecto NO particiona (mantiene 1 JSON).
+      ENABLE_SECRET_PARTITION: "false"     # si algún día superas 48KB, pon "true"
+      SECRET_MAX_BYTES: "46000"            # margen de seguridad antes del límite real
+
 
     steps:
-      - name: Preflight
+      # ==========================================================================
+      # 1) GUARD (COMÚN) - Evita trabajo duplicado
+      #    - Si otro run ya se ejecutó hace < COOLDOWN segundos, decide SALIR.
+      #    - No depende de Sheets (porque el disparador externo ya “decide el tiempo”).
+      # ==========================================================================
+      - name: "GUARD (common) - compute proceed=true/false"
         shell: bash
         env:
-          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          curl -sS -L "$GATEWAY_URL" | jq -e '.service=="eou_gateway_webapp"' >/dev/null
 
-      - name: START
-        id: start
-        shell: bash
-        env:
-          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
-          GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
-        run: |
-          set -euo pipefail
-          WF_NAME_ENC="$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["WORKFLOW_NAME"]))')"
-          NOW_MS="$(date -u +%s%3N)"
-          CONCLUSION="-"
-          CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|start|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
-          SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ENC}&row=${SHEET_ROW}&phase=start&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
-          RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
-          echo "$RESP" | jq -e . >/dev/null
-          OK="$(echo "$RESP" | jq -r '.ok // false')"
-          if [[ "$OK" != "true" ]]; then
-            echo "Gateway error on START: $RESP"
-            exit 1
+          NOW_EPOCH="$(date -u +%s)"
+          PROCEED="true"
+
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_FILE}/runs?status=completed&per_page=1"
+          JSON="$(curl -sS -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "$API")"
+
+          LAST_UPDATED_AT="$(echo "$JSON" | jq -r '.workflow_runs[0].updated_at // empty')"
+          if [[ -n "${LAST_UPDATED_AT}" ]]; then
+            LAST_EPOCH="$(date -u -d "${LAST_UPDATED_AT}" +%s)"
+            DIFF="$(( NOW_EPOCH - LAST_EPOCH ))"
+            if (( DIFF < COOLDOWN )); then
+              PROCEED="false"
+              echo "Guard: last completed run was ${DIFF}s ago (< COOLDOWN=${COOLDOWN}s). Skipping work."
+            else
+              echo "Guard: last completed run was ${DIFF}s ago (>= COOLDOWN). Proceed."
+            fi
+          else
+            echo "Guard: no previous completed runs found. Proceed."
           fi
-          LOCKED="$(echo "$RESP" | jq -r '.locked // false')"
-          echo "locked=$LOCKED" >> "$GITHUB_OUTPUT"
 
-      - name: Exit if locked
-        if: steps.start.outputs.locked == 'true'
+          echo "proceed=${PROCEED}" > /tmp/proceed
+
+      - name: "GUARD (common) - publish proceed"
+        id: guard
+        shell: bash
         run: |
-          echo "Locked by gateway, exiting early."
-          exit 0
+          set -euo pipefail
+          echo "proceed=$(sed -n 's/^proceed=//p' /tmp/proceed)" >> "$GITHUB_OUTPUT"
 
-      - id: gcp_auth
-        name: Auth to Google (WIF)
-        if: steps.start.outputs.locked != 'true'
+
+      # ==========================================================================
+      # 2) AUTH GOOGLE (COMÚN) - WIF/OIDC sin claves
+      # ==========================================================================
+      - name: "AUTH (common) - Google WIF/OIDC"
+        id: gcp_auth
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-          token_format: access_token
-          access_token_scopes: https://www.googleapis.com/auth/spreadsheets
+          workload_identity_provider: "${{ secrets.WIF_PROVIDER }}"
+          service_account: "${{ secrets.WIF_SERVICE_ACCOUNT }}"
+          token_format: "access_token"
+          access_token_scopes: |
+            https://www.googleapis.com/auth/spreadsheets
+            https://www.googleapis.com/auth/cloud-platform
 
-      - name: Refresh tokens, persist to GH Secrets, and write to Sheets
-        if: steps.start.outputs.locked != 'true'
+
+      # ==========================================================================
+      # 3) BUSY EXIT (COMÚN)
+      # ==========================================================================
+      - name: "BUSY EXIT (common)"
+        if: steps.guard.outputs.proceed != 'true'
+        shell: bash
+        run: |
+          echo "Skipped due to cooldown guard (anti-queue / anti-duplicate)"
+          exit 0
+
+
+      # ==========================================================================
+      # 4) LOCK INICIAL EN SHEETS (COMÚN)
+      #    - status=in_progress
+      #    - next_run=now+LOCK_TIME
+      #    - Detecta columnas por header: 'status' y 'next_run'
+      # ==========================================================================
+      - name: "LOCK (common) - in_progress + next_run"
+        if: steps.guard.outputs.proceed == 'true'
+        shell: bash
         env:
-          EOU_CLIENTS: ${{ secrets.EOU_CLIENTS }}
-          EOU_REFRESH_TOKENS: ${{ secrets.EOU_REFRESH_TOKENS }}
-          EOU_ACCESS_TOKENS: ${{ secrets.EOU_ACCESS_TOKENS }}
-
-          GH_TOKEN: ${{ secrets.GH_SECRETS_ADMIN_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-
-          GOOGLE_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+          ACCESS_TOKEN: "${{ steps.gcp_auth.outputs.access_token }}"
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import base64, json, os, subprocess, urllib.parse, urllib.request, urllib.error
-          from datetime import datetime, timezone
+          import os, json, datetime, string, sys
+          import urllib.request
 
-          TOKEN_URL = "https://login.eveonline.com/v2/oauth/token"
+          def col_letter(idx0: int) -> str:
+              idx = idx0 + 1
+              s = ""
+              while idx:
+                  idx, r = divmod(idx - 1, 26)
+                  s = chr(65 + r) + s
+              return s
 
-          ORDER = [
-            "90734547","91939203","92017833","91412962","92006397","92006494",
-            "92816858","92817160","2118026235","2118561816","2124070822"
-          ]
+          sheets_id = os.environ["SHEETS_ID"]
+          tab = os.environ["SHEET_TAB"]
+          row = int(os.environ["SHEETS_WORKFLOW_ROW"])
+          lock_time = int(os.environ["LOCK_TIME"])
+          token = os.environ["ACCESS_TOKEN"]
 
-          SPREADSHEET_ID = os.environ["TOKENS_SPREADSHEET_ID"]
-          TAB_NAME = os.environ["TOKENS_TAB_NAME"]
-          G_TOKEN = os.environ.get("GOOGLE_ACCESS_TOKEN","").strip()
+          now = datetime.datetime.utcnow()
+          next_run = now + datetime.timedelta(seconds=lock_time)
+          now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+          next_run_str = next_run.strftime("%Y-%m-%d %H:%M:%S")
 
-          GH_REPO = os.environ.get("GH_REPO","").strip()
-          if not GH_REPO:
-            raise RuntimeError("Missing GH_REPO (set to github.repository)")
+          # Read header row to find columns
+          hdr_url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheets_id}/values/{tab}!1:1"
+          req = urllib.request.Request(hdr_url, headers={"Authorization": f"Bearer {token}"})
+          with urllib.request.urlopen(req) as resp:
+              data = json.load(resp)
+          headers = (data.get("values") or [[]])[0]
+          headers_l = [h.strip().lower() for h in headers]
 
-          def iso_z():
-            return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
+          def find_col(name: str):
+              if name in headers_l:
+                  return headers_l.index(name)
+              return None
 
-          def gh_set_secret(name: str, value: str) -> None:
-            p = subprocess.run(
-              ["gh", "secret", "set", name, "-R", GH_REPO, "--app", "actions"],
-              input=value.encode("utf-8"),
-              stdout=subprocess.DEVNULL,
-              stderr=subprocess.PIPE,
-              check=False,
-            )
-            if p.returncode != 0:
-              raise RuntimeError(p.stderr.decode("utf-8", errors="replace").strip())
+          c_status = find_col("status")
+          c_next = find_col("next_run")
 
-          def sheets_update(range_a1: str, values_rows: list) -> None:
-            if not G_TOKEN:
-              raise RuntimeError("Missing GOOGLE_ACCESS_TOKEN")
-            # FIX: quote() está en urllib.parse, no en urllib.request
-            range_enc = urllib.parse.quote(range_a1, safe="")
-            url = (
-              f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}"
-              f"/values/{range_enc}?valueInputOption=RAW"
-            )
-            body = json.dumps({
-              "range": range_a1,
-              "majorDimension": "ROWS",
-              "values": values_rows
-            }).encode("utf-8")
-            req = urllib.request.Request(
+          if c_status is None or c_next is None:
+              print("LOCK error: columns 'status' and/or 'next_run' not found in workflows header row.", file=sys.stderr)
+              print(f"Headers seen: {headers}", file=sys.stderr)
+              sys.exit(1)
+
+          a1_status = f"{tab}!{col_letter(c_status)}{row}"
+          a1_next = f"{tab}!{col_letter(c_next)}{row}"
+
+          body = {
+              "valueInputOption": "RAW",
+              "data": [
+                  {"range": a1_status, "majorDimension": "ROWS", "values": [["in_progress"]]},
+                  {"range": a1_next,   "majorDimension": "ROWS", "values": [[next_run_str]]},
+              ],
+          }
+
+          url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheets_id}/values:batchUpdate"
+          req = urllib.request.Request(
               url,
-              data=body,
-              method="PUT",
-              headers={
-                "Authorization": f"Bearer {G_TOKEN}",
-                "Content-Type": "application/json; charset=utf-8",
-              },
-            )
-            with urllib.request.urlopen(req, timeout=25) as resp:
-              resp.read()
-
-          # Parse secrets defensivamente (sin imprimir nada)
-          clients = json.loads(os.environ.get("EOU_CLIENTS","") or "{}")
-          refresh = json.loads(os.environ.get("EOU_REFRESH_TOKENS","") or "{}")
-          prev = json.loads(os.environ.get("EOU_ACCESS_TOKENS","") or "{}")
-
-          out = dict(prev) if isinstance(prev, dict) else {}
-          rows = []
-          now_ts = iso_z()
-
-          ok = 0
-          fail = 0
-
-          for cid in ORDER:
-            meta = refresh.get(cid, {}) if isinstance(refresh.get(cid, {}), dict) else {}
-            old = out.get(cid, {}) if isinstance(out.get(cid, {}), dict) else {}
-
-            token_keep = old.get("access_token","")
-            ts_keep = old.get("ts_token","")
-
-            account = str(meta.get("account",""))
-            char_name = str(meta.get("char_name",""))
-
-            app = str(meta.get("app","")).strip()
-            rt = str(meta.get("refresh_token","")).strip()
-
-            if not app or not rt:
-              out[cid] = {"access_token": token_keep, "ts_token": ts_keep, "code_int": 0}
-              rows.append([account, char_name, cid, token_keep, ts_keep, 0])
-              fail += 1
-              continue
-
-            c = clients.get(app, {}) if isinstance(clients, dict) else {}
-            client_id = str(c.get("client_id","")).strip()
-            client_secret = str(c.get("client_secret","")).strip()
-            if not client_id or not client_secret:
-              out[cid] = {"access_token": token_keep, "ts_token": ts_keep, "code_int": 0}
-              rows.append([account, char_name, cid, token_keep, ts_keep, 0])
-              fail += 1
-              continue
-
-            basic = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("ascii")
-            data = urllib.parse.urlencode({"grant_type":"refresh_token","refresh_token":rt}).encode("utf-8")
-            req = urllib.request.Request(
-              TOKEN_URL,
-              data=data,
+              data=json.dumps(body).encode("utf-8"),
+              headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
               method="POST",
-              headers={
-                "Authorization": f"Basic {basic}",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-              },
-            )
-
-            try:
-              with urllib.request.urlopen(req, timeout=20) as r:
-                payload = json.loads(r.read().decode("utf-8"))
-              token_new = payload.get("access_token")
-              if not token_new:
-                out[cid] = {"access_token": token_keep, "ts_token": ts_keep, "code_int": 0}
-                rows.append([account, char_name, cid, token_keep, ts_keep, 0])
-                fail += 1
-                continue
-
-              out[cid] = {"access_token": token_new, "ts_token": now_ts, "code_int": 200}
-              rows.append([account, char_name, cid, token_new, now_ts, 200])
-              ok += 1
-
-              new_rt = payload.get("refresh_token")
-              if isinstance(new_rt, str) and new_rt.strip():
-                new_item = dict(meta)
-                new_item["refresh_token"] = new_rt.strip()
-                refresh[cid] = new_item
-
-            except urllib.error.HTTPError as e:
-              code_int = int(e.code)
-              out[cid] = {"access_token": token_keep, "ts_token": ts_keep, "code_int": code_int}
-              rows.append([account, char_name, cid, token_keep, ts_keep, code_int])
-              fail += 1
-            except Exception:
-              out[cid] = {"access_token": token_keep, "ts_token": ts_keep, "code_int": 0}
-              rows.append([account, char_name, cid, token_keep, ts_keep, 0])
-              fail += 1
-
-          gh_set_secret("EOU_ACCESS_TOKENS", json.dumps(out, separators=(",",":"), ensure_ascii=False))
-          gh_set_secret("EOU_REFRESH_TOKENS", json.dumps(refresh, separators=(",",":"), ensure_ascii=False))
-
-          start_row = 2
-          end_row = start_row + len(rows) - 1
-          rng = f"{TAB_NAME}!A{start_row}:F{end_row}"
-          try:
-            sheets_update(rng, rows)
-          except urllib.error.HTTPError as e:
-            print(f"[WARN] Sheets write failed HTTP {e.code}")
-          except Exception as e:
-            print(f"[WARN] Sheets write failed ({type(e).__name__})")
-
-          print(f"[DONE] refreshed_ok={ok} refreshed_fail={fail} total={len(rows)} wrote_sheet_rows={len(rows)}")
+          )
+          with urllib.request.urlopen(req) as resp:
+              _ = resp.read()
+          print(f"LOCK ok: status=in_progress; next_run={next_run_str} UTC (now={now_str} UTC)")
           PY
 
-      - name: FINISH
-        if: always() && steps.start.outputs.locked != 'true'
+
+      # ==========================================================================
+      # ==========================================================================
+      # 5) ✅ OBJECTIVE (TU TRABAJO REAL)
+      # ==========================================================================
+      # ==========================================================================
+      - name: "OBJECTIVE - step 1 (setup tools)"
+        if: steps.guard.outputs.proceed == 'true'
         shell: bash
-        env:
-          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
-          GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
         run: |
           set -euo pipefail
-          WF_NAME_ENC="$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["WORKFLOW_NAME"]))')"
+          python3 -m pip install --upgrade pip >/dev/null
+          python3 -m pip install requests pynacl >/dev/null
 
-          STATUS="${{ job.status }}"
-          case "$STATUS" in
-            success) CONCLUSION="success" ;;
-            failure) CONCLUSION="failure" ;;
-            cancelled) CONCLUSION="cancelled" ;;
-            *) CONCLUSION="neutral" ;;
-          esac
+      - name: "OBJECTIVE - step 2 (do the work)"
+        if: steps.guard.outputs.proceed == 'true'
+        shell: bash
+        env:
+          ACCESS_TOKEN: "${{ steps.gcp_auth.outputs.access_token }}"
+          GH_ADMIN_PAT: "${{ secrets.GH_PAT_LANDU_EOU }}"          # PAT con permiso para escribir Actions secrets
+          EOU_CLIENTS: "${{ secrets.EOU_CLIENTS }}"
+          EOU_REFRESH_TOKENS: "${{ secrets.EOU_REFRESH_TOKENS }}"
+          EOU_ACCESS_TOKENS: "${{ secrets.EOU_ACCESS_TOKENS }}"    # puede estar vacío la primera vez
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, json, base64, datetime, sys
+          import requests
+          from nacl.public import PublicKey, SealedBox
 
-          NOW_MS="$(date -u +%s%3N)"
-          CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|finish|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
-          SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
+          # ----------------------------
+          # Helpers
+          # ----------------------------
+          def utc_now_str():
+              return datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
-          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ENC}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
+          def gh_api_headers(token: str):
+              return {
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              }
 
-          RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
-          echo "$RESP" | jq -e . >/dev/null
-          OK="$(echo "$RESP" | jq -r '.ok // false')"
-          if [[ "$OK" != "true" ]]; then
-            echo "Gateway error on FINISH: $RESP"
-            exit 1
-          fi
+          def gh_get_public_key(owner, repo, token):
+              url = f"https://api.github.com/repos/{owner}/{repo}/actions/secrets/public-key"
+              r = requests.get(url, headers=gh_api_headers(token), timeout=30)
+              r.raise_for_status()
+              j = r.json()
+              return j["key_id"], j["key"]  # key is base64
+
+          def gh_put_secret(owner, repo, token, secret_name, plaintext_value: str):
+              key_id, key_b64 = gh_get_public_key(owner, repo, token)
+              pk = PublicKey(base64.b64decode(key_b64))
+              sealed = SealedBox(pk)
+              encrypted = sealed.encrypt(plaintext_value.encode("utf-8"))
+              encrypted_b64 = base64.b64encode(encrypted).decode("utf-8")
+
+              url = f"https://api.github.com/repos/{owner}/{repo}/actions/secrets/{secret_name}"
+              payload = {"encrypted_value": encrypted_b64, "key_id": key_id}
+              r = requests.put(url, headers=gh_api_headers(token), json=payload, timeout=30)
+              r.raise_for_status()
+
+          def sheets_get_values(sheets_id, a1_range, access_token):
+              url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheets_id}/values/{a1_range}"
+              r = requests.get(url, headers={"Authorization": f"Bearer {access_token}"}, timeout=30)
+              r.raise_for_status()
+              return r.json().get("values", [])
+
+          def sheets_batch_update(sheets_id, data_ranges, access_token):
+              url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheets_id}/values:batchUpdate"
+              body = {"valueInputOption": "RAW", "data": data_ranges}
+              r = requests.post(
+                  url,
+                  headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                  json=body,
+                  timeout=60,
+              )
+              r.raise_for_status()
+
+          # ----------------------------
+          # Load config / secrets
+          # ----------------------------
+          repo_full = os.environ["GITHUB_REPOSITORY"]  # owner/repo
+          owner, repo = repo_full.split("/", 1)
+
+          pat = os.environ["GH_ADMIN_PAT"]
+          access_token = os.environ["ACCESS_TOKEN"]
+
+          sso_url = os.environ["SSO_TOKEN_URL"]
+          sheets_id = os.environ["SHEETS_ID"]
+          tab_tokens = os.environ["ACCESS_TOKENS_TAB"]
+
+          secret_access_name = os.environ["ACCESS_TOKENS_SECRET_NAME"]
+          secret_refresh_name = os.environ["REFRESH_TOKENS_SECRET_NAME"]
+
+          enable_partition = os.environ.get("ENABLE_SECRET_PARTITION", "false").lower() == "true"
+          secret_max_bytes = int(os.environ.get("SECRET_MAX_BYTES", "46000"))
+
+          clients = json.loads(os.environ["EOU_CLIENTS"] or "{}")
+          refresh_map = json.loads(os.environ["EOU_REFRESH_TOKENS"] or "{}")
+          old_access = json.loads(os.environ.get("EOU_ACCESS_TOKENS") or "{}")
+
+          # ----------------------------
+          # Read current sheet to preserve token_time / refresh_time on failures/no-rotation
+          # Columns A-F: account, character, character_id, access_token, token_time, refresh_time
+          # ----------------------------
+          sheet_values = sheets_get_values(sheets_id, f"{tab_tokens}!A1:F", access_token)
+          existing = {}  # char_id -> {"token_time":..., "refresh_time":...}
+          if sheet_values:
+              start_row = 0
+              header = [c.strip().lower() for c in sheet_values[0]] if sheet_values else []
+              has_header = ("character_id" in header) or (header[:3] == ["account", "character", "character_id"])
+              start_row = 1 if has_header else 0
+
+              for row in sheet_values[start_row:]:
+                  # pad
+                  row = row + [""] * (6 - len(row))
+                  char_id = (row[2] or "").strip()
+                  if not char_id:
+                      continue
+                  existing[char_id] = {
+                      "token_time": (row[4] or "").strip(),
+                      "refresh_time": (row[5] or "").strip(),
+                  }
+
+          # ----------------------------
+          # Refresh loop
+          # ----------------------------
+          now_str = utc_now_str()
+          new_access = dict(old_access)  # merge base
+          new_refresh = dict(refresh_map)
+
+          successes = set()
+          failures = []
+          rotated = set()
+
+          session = requests.Session()
+
+          # Stable iteration: by account then character name then char_id
+          def sort_key(item):
+              char_id, info = item
+              return (info.get("account",""), info.get("char_name",""), str(char_id))
+
+          for char_id, info in sorted(refresh_map.items(), key=sort_key):
+              char_id_s = str(char_id)
+              app = info.get("app")
+              rt = info.get("refresh_token")
+              if not app or app not in clients:
+                  failures.append(char_id_s)
+                  continue
+              cid = clients[app].get("client_id")
+              csec = clients[app].get("client_secret")
+              if not cid or not csec or not rt:
+                  failures.append(char_id_s)
+                  continue
+
+              basic = base64.b64encode(f"{cid}:{csec}".encode("utf-8")).decode("ascii")
+              headers = {
+                  "Authorization": f"Basic {basic}",
+                  "Content-Type": "application/x-www-form-urlencoded",
+                  "Accept": "application/json",
+              }
+              data = {"grant_type": "refresh_token", "refresh_token": rt}
+
+              try:
+                  r = session.post(sso_url, headers=headers, data=data, timeout=30)
+                  if r.status_code != 200:
+                      failures.append(char_id_s)
+                      continue
+                  j = r.json()
+              except Exception:
+                  failures.append(char_id_s)
+                  continue
+
+              at = j.get("access_token")
+              if not at:
+                  failures.append(char_id_s)
+                  continue
+
+              # Mask the newly obtained token ASAP
+              print(f"::add-mask::{at}")
+
+              new_access[char_id_s] = {
+                  "account": info.get("account",""),
+                  "character": info.get("char_name",""),
+                  "character_id": char_id_s,
+                  "access_token": at,
+              }
+              successes.add(char_id_s)
+
+              # Refresh token rotation
+              new_rt = j.get("refresh_token")
+              if new_rt and new_rt != rt:
+                  print(f"::add-mask::{new_rt}")
+                  new_refresh[char_id_s] = dict(info)
+                  new_refresh[char_id_s]["refresh_token"] = new_rt
+                  rotated.add(char_id_s)
+
+          # ----------------------------
+          # Build EOU_ACCESS_TOKENS JSON (single JSON, no times)
+          # Keep old entries for failures; update entries for successes.
+          # ----------------------------
+          access_json = json.dumps(new_access, ensure_ascii=False, separators=(",", ":"))
+          access_bytes = len(access_json.encode("utf-8"))
+
+          if access_bytes > secret_max_bytes and not enable_partition:
+              # Prepared plan B exists but is disabled
+              raise RuntimeError(
+                  f"{secret_access_name} size {access_bytes} bytes exceeds safety limit {secret_max_bytes}. "
+                  f"Enable partition by setting ENABLE_SECRET_PARTITION=true."
+              )
+
+          # ----------------------------
+          # Write GitHub secrets (official API requires encryption with repo public key)
+          # ----------------------------
+          gh_put_secret(owner, repo, pat, secret_access_name, access_json)
+
+          refresh_rotated = len(rotated) > 0
+          if refresh_rotated:
+              refresh_json = json.dumps(new_refresh, ensure_ascii=False, separators=(",", ":"))
+              refresh_bytes = len(refresh_json.encode("utf-8"))
+              if refresh_bytes > secret_max_bytes and not enable_partition:
+                  raise RuntimeError(
+                      f"{secret_refresh_name} size {refresh_bytes} bytes exceeds safety limit {secret_max_bytes}. "
+                      f"Enable partition by setting ENABLE_SECRET_PARTITION=true."
+                  )
+              gh_put_secret(owner, repo, pat, secret_refresh_name, refresh_json)
+
+          # ----------------------------
+          # Update Google Sheet (tab: access_tokens) columns A-F
+          # Rules:
+          # - If char fails: do NOT overwrite token nor token_time
+          # - If refresh rotated: set refresh_time (col F) = now
+          # ----------------------------
+          rows = []
+          for char_id, info in sorted(refresh_map.items(), key=sort_key):
+              char_id_s = str(char_id)
+              account = info.get("account","")
+              character = info.get("char_name","")
+
+              # token comes from new_access (updated) or old_access (preserved)
+              token = ""
+              if char_id_s in new_access:
+                  token = new_access[char_id_s].get("access_token", "")
+              # token_time: update only if success
+              token_time = now_str if char_id_s in successes else existing.get(char_id_s, {}).get("token_time", "")
+              # refresh_time: update only if rotated
+              refresh_time = now_str if char_id_s in rotated else existing.get(char_id_s, {}).get("refresh_time", "")
+
+              rows.append([account, character, char_id_s, token, token_time, refresh_time])
+
+          # Pad to clear previous extra rows
+          existing_rows = max(0, (len(sheet_values) - (1 if sheet_values and ((sheet_values[0] and str(sheet_values[0][0]).lower()=="account") or ("character_id" in [c.lower() for c in sheet_values[0]])) else 0)))
+          target_rows = max(existing_rows, len(rows))
+          while len(rows) < target_rows:
+              rows.append(["", "", "", "", "", ""])
+
+          if target_rows > 0:
+              data_ranges = [{
+                  "range": f"{tab_tokens}!A2:F{target_rows+1}",
+                  "majorDimension": "ROWS",
+                  "values": rows
+              }]
+              sheets_batch_update(sheets_id, data_ranges, access_token)
+
+          # ----------------------------
+          # Summary (safe)
+          # ----------------------------
+          print(f"Refreshed access tokens: {len(successes)} ok, {len(failures)} failed.")
+          if failures:
+              print("Failed character_ids:", ", ".join(failures))
+          if refresh_rotated:
+              print(f"Refresh token rotated for {len(rotated)} character_ids.")
+          PY
+
+
+      # ==========================================================================
+      # 6) FINALIZE EN SHEETS (COMÚN)
+      #    - success(): status=completed, next_run=now+COOLDOWN
+      #    - failure(): status=failed, next_run=now+COOLDOWN
+      # ==========================================================================
+      - name: "FINALIZE (common) - completed + cooldown"
+        if: steps.guard.outputs.proceed == 'true' && success()
+        shell: bash
+        env:
+          ACCESS_TOKEN: "${{ steps.gcp_auth.outputs.access_token }}"
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, json, datetime, sys
+          import urllib.request
+
+          def col_letter(idx0: int) -> str:
+              idx = idx0 + 1
+              s = ""
+              while idx:
+                  idx, r = divmod(idx - 1, 26)
+                  s = chr(65 + r) + s
+              return s
+
+          sheets_id = os.environ["SHEETS_ID"]
+          tab = os.environ["SHEET_TAB"]
+          row = int(os.environ["SHEETS_WORKFLOW_ROW"])
+          cooldown = int(os.environ["COOLDOWN"])
+          token = os.environ["ACCESS_TOKEN"]
+
+          now = datetime.datetime.utcnow()
+          next_run = now + datetime.timedelta(seconds=cooldown)
+          now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+          next_run_str = next_run.strftime("%Y-%m-%d %H:%M:%S")
+
+          hdr_url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheets_id}/values/{tab}!1:1"
+          req = urllib.request.Request(hdr_url, headers={"Authorization": f"Bearer {token}"})
+          with urllib.request.urlopen(req) as resp:
+              data = json.load(resp)
+          headers = (data.get("values") or [[]])[0]
+          headers_l = [h.strip().lower() for h in headers]
+
+          if "status" not in headers_l or "next_run" not in headers_l:
+              print("FINALIZE error: columns 'status' and/or 'next_run' not found in workflows header row.", file=sys.stderr)
+              print(f"Headers seen: {headers}", file=sys.stderr)
+              sys.exit(1)
+
+          c_status = headers_l.index("status")
+          c_next = headers_l.index("next_run")
+
+          a1_status = f"{tab}!{col_letter(c_status)}{row}"
+          a1_next = f"{tab}!{col_letter(c_next)}{row}"
+
+          body = {
+              "valueInputOption": "RAW",
+              "data": [
+                  {"range": a1_status, "majorDimension": "ROWS", "values": [["completed"]]},
+                  {"range": a1_next,   "majorDimension": "ROWS", "values": [[next_run_str]]},
+              ],
+          }
+
+          url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheets_id}/values:batchUpdate"
+          req = urllib.request.Request(
+              url,
+              data=json.dumps(body).encode("utf-8"),
+              headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(req) as resp:
+              _ = resp.read()
+
+          print(f"FINALIZE ok: status=completed; next_run={next_run_str} UTC (now={now_str} UTC)")
+          PY
+
+      - name: "FINALIZE (common) - failed + cooldown"
+        if: steps.guard.outputs.proceed == 'true' && failure()
+        shell: bash
+        env:
+          ACCESS_TOKEN: "${{ steps.gcp_auth.outputs.access_token }}"
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, json, datetime, sys
+          import urllib.request
+
+          def col_letter(idx0: int) -> str:
+              idx = idx0 + 1
+              s = ""
+              while idx:
+                  idx, r = divmod(idx - 1, 26)
+                  s = chr(65 + r) + s
+              return s
+
+          sheets_id = os.environ["SHEETS_ID"]
+          tab = os.environ["SHEET_TAB"]
+          row = int(os.environ["SHEETS_WORKFLOW_ROW"])
+          cooldown = int(os.environ["COOLDOWN"])
+          token = os.environ["ACCESS_TOKEN"]
+
+          now = datetime.datetime.utcnow()
+          next_run = now + datetime.timedelta(seconds=cooldown)
+          now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+          next_run_str = next_run.strftime("%Y-%m-%d %H:%M:%S")
+
+          hdr_url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheets_id}/values/{tab}!1:1"
+          req = urllib.request.Request(hdr_url, headers={"Authorization": f"Bearer {token}"})
+          with urllib.request.urlopen(req) as resp:
+              data = json.load(resp)
+          headers = (data.get("values") or [[]])[0]
+          headers_l = [h.strip().lower() for h in headers]
+
+          if "status" not in headers_l or "next_run" not in headers_l:
+              print("FINALIZE error: columns 'status' and/or 'next_run' not found in workflows header row.", file=sys.stderr)
+              print(f"Headers seen: {headers}", file=sys.stderr)
+              sys.exit(1)
+
+          c_status = headers_l.index("status")
+          c_next = headers_l.index("next_run")
+
+          a1_status = f"{tab}!{col_letter(c_status)}{row}"
+          a1_next = f"{tab}!{col_letter(c_next)}{row}"
+
+          body = {
+              "valueInputOption": "RAW",
+              "data": [
+                  {"range": a1_status, "majorDimension": "ROWS", "values": [["failed"]]},
+                  {"range": a1_next,   "majorDimension": "ROWS", "values": [[next_run_str]]},
+              ],
+          }
+
+          url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheets_id}/values:batchUpdate"
+          req = urllib.request.Request(
+              url,
+              data=json.dumps(body).encode("utf-8"),
+              headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(req) as resp:
+              _ = resp.read()
+
+          print(f"FINALIZE ok: status=failed; next_run={next_run_str} UTC (now={now_str} UTC)")
+          PY
