@@ -23,25 +23,25 @@ jobs:
       ACCESS_TOKENS_TAB: "access_tokens"
 
       SSO_TOKEN_URL: "https://login.eveonline.com/v2/oauth/token"
-
       REFRESH_TOKENS_SECRET_NAME: "EOU_REFRESH_TOKENS"
 
-      # 48 KiB hard limit per GitHub Secret; keep margin.
+      # GitHub secret hard limit is 48 KB
       SECRET_MAX_BYTES: "49152"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Auth to Google via WIF and mint an OAuth access token WITH Sheets scope.
-      - name: Auth to Google (WIF) + mint Sheets-scoped access token
-        id: gauth
+      # Google auth (WIF) -> mint an OAuth Access Token WITH Sheets scopes
+      - id: gcp_auth
+        name: Auth to Google (WIF, Sheets scope)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-          token_format: "access_token"
-          access_token_scopes: "https://www.googleapis.com/auth/spreadsheets"
+          token_format: access_token
+          access_token_scopes: |
+            https://www.googleapis.com/auth/spreadsheets
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -53,57 +53,53 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install requests
 
-      # GUARD: skip only if there is ANOTHER run currently in progress.
+      # GUARD: only skip if there is ANOTHER run currently in progress.
+      # Robust: if GitHub API returns non-JSON/empty, do NOT fail and do NOT skip.
       - name: Guard - skip only if another run is in progress
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          owner_repo="${GITHUB_REPOSITORY}"
-          api="https://api.github.com/repos/${owner_repo}/actions/workflows/${WORKFLOW_FILE}/runs?status=in_progress&per_page=10"
-
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_FILE}/runs?status=in_progress&per_page=10"
           runs_json="$(curl -fsS \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "${api}" || true)"
 
-          others_count="$(
-            python - <<'PY' <<<"${runs_json}"
-            import json, os, sys
-            
-            raw = sys.stdin.read().strip()
-            
-            # If curl failed or returned empty, treat as 0 (do not block).
-            if not raw or raw == "null":
-                print(0)
-                raise SystemExit(0)
-            
-            data = json.loads(raw)
-            
-            # If API returned JSON null (parsed as None) or unexpected type, treat as 0.
-            if data is None or not isinstance(data, dict):
-                print(0)
-                raise SystemExit(0)
-            
-            me = int(os.environ.get("GITHUB_RUN_ID", "0"))
-            wfruns = data.get("workflow_runs") or []
-            other = [r for r in wfruns if int(r.get("id", -1)) != me]
-            print(len(other))
-            PY
-                      )"
-            
-                      if [ "${others_count}" -gt 0 ]; then
-                        echo "Skipped: another run is in progress (anti-overlap)."
-                        exit 0
-                      fi
+          if [ -z "${runs_json}" ]; then
+            echo "Guard: could not query workflow runs (empty/failed response). Continuing."
+            exit 0
+          fi
 
+          export RUNS_JSON="${runs_json}"
+          others_count="$(python - <<'PY'
+          import json, os
+          
+          s = os.environ.get("RUNS_JSON", "")
+          me = int(os.environ.get("GITHUB_RUN_ID", "0") or 0)
+          
+          try:
+              runs = json.loads(s) if s.strip() else {}
+          except Exception:
+              print(0)
+              raise SystemExit
+          
+          wfruns = runs.get("workflow_runs", []) if isinstance(runs, dict) else []
+          other = [r for r in wfruns if int(r.get("id", -1)) != me]
+          print(len(other))
+          PY
+          )"
+          
+                    if ! [[ "${others_count}" =~ ^[0-9]+$ ]]; then
+                      others_count=0
+                    fi
+          
+                    if [ "${others_count}" -gt 0 ]; then
+                      echo "Skipped: another run is in progress (anti-overlap)."
+                      exit 0
+                    fi
 
-
-      # Refresh tokens and prepare:
-      # - access_tokens_1.json, access_tokens_2.json (char_id -> access_token)
-      # - refresh_tokens_new.json (updated only if rotation happened)
-      # - sheets_batch_payload.json (single request payload)
       - name: Refresh access tokens + prepare updates
         env:
           EOU_CLIENTS: ${{ secrets.EOU_CLIENTS }}
@@ -130,11 +126,14 @@ jobs:
               token = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
               return f"Basic {token}"
 
-          def safe_json_load(env_name: str) -> dict:
-              raw = os.environ.get(env_name, "")
+          def safe_json_load(name: str) -> dict:
+              raw = os.environ.get(name, "")
               if not raw.strip():
                   return {}
-              return json.loads(raw)
+              try:
+                  return json.loads(raw)
+              except Exception as e:
+                  raise RuntimeError(f"{name} is not valid JSON: {e}")
 
           clients = safe_json_load("EOU_CLIENTS")
           refresh_map = safe_json_load("EOU_REFRESH_TOKENS")
@@ -142,12 +141,19 @@ jobs:
           access_1 = safe_json_load("EOU_ACCESS_TOKENS_1")
           access_2 = safe_json_load("EOU_ACCESS_TOKENS_2")
 
+          # Validate EOU_CLIENTS structure
           for app, cfg in clients.items():
-              if not all(k in cfg for k in ("client_id", "client_secret", "access_tokens_secret")):
+              if "client_id" not in cfg or "client_secret" not in cfg or "access_tokens_secret" not in cfg:
                   raise RuntimeError(
                       f"EOU_CLIENTS entry '{app}' must include client_id, client_secret, access_tokens_secret"
                   )
 
+          sheet_updates = []
+
+          rotated_any = False
+          refresh_time_by_char = {}
+
+          # Stable order -> stable row mapping
           items = []
           for char_id, info in refresh_map.items():
               items.append((info.get("account", ""), info.get("char_name", ""), int(char_id), info))
@@ -155,21 +161,13 @@ jobs:
 
           sso_url = os.environ["SSO_TOKEN_URL"]
 
-          sheet_updates = []
-          rotated_any = False
-          refresh_time_by_char = {}
-
           ok = 0
           fail = 0
 
           for idx, (account, char_name, char_id_int, info) in enumerate(items, start=0):
               char_id = str(char_id_int)
-              app = info.get("app")
-              rt_old = info.get("refresh_token")
-
-              if not app or not rt_old:
-                  fail += 1
-                  continue
+              app = info["app"]
+              rt_old = info["refresh_token"]
 
               cfg = clients.get(app)
               if not cfg:
@@ -186,11 +184,22 @@ jobs:
                   "Accept": "application/json",
                   "User-Agent": "eou-refresh-access-tokens/1.0",
               }
-              data = {"grant_type": "refresh_token", "refresh_token": rt_old}
+              data = {
+                  "grant_type": "refresh_token",
+                  "refresh_token": rt_old,
+              }
 
               try:
                   r = requests.post(sso_url, headers=headers, data=data, timeout=30)
-                  r.raise_for_status()
+              except Exception:
+                  fail += 1
+                  continue
+
+              if r.status_code != 200:
+                  fail += 1
+                  continue
+
+              try:
                   payload = r.json()
               except Exception:
                   fail += 1
@@ -207,6 +216,7 @@ jobs:
                   rotated_any = True
                   refresh_time_by_char[char_id] = utc_ts()
 
+              # Put access token into the right split secret map
               if target_secret == "EOU_ACCESS_TOKENS_1":
                   access_1[char_id] = access_token
               elif target_secret == "EOU_ACCESS_TOKENS_2":
@@ -218,13 +228,11 @@ jobs:
               token_time = utc_ts()
               refresh_time = refresh_time_by_char.get(char_id, "")
 
-              row = 2 + idx  # header row is 1
-              sheet_updates.append(
-                  {
-                      "range": f"{os.environ['ACCESS_TOKENS_TAB']}!A{row}:F{row}",
-                      "values": [[account, char_name, char_id, access_token, token_time, refresh_time]],
-                  }
-              )
+              row = 2 + idx
+              sheet_updates.append({
+                  "range": f"{os.environ['ACCESS_TOKENS_TAB']}!A{row}:F{row}",
+                  "values": [[account, char_name, char_id, access_token, token_time, refresh_time]],
+              })
 
               ok += 1
 
@@ -244,21 +252,21 @@ jobs:
                       "includeValuesInResponse": False,
                   },
                   f,
-                  ensure_ascii=False,
+                  ensure_ascii=False
               )
 
           max_bytes = int(os.environ.get("SECRET_MAX_BYTES", "49152"))
-          def file_size(p):  # bytes
-              import os
+
+          def file_size(p):
               return os.path.getsize(p)
 
           sz1 = file_size("access_tokens_1.json")
           sz2 = file_size("access_tokens_2.json")
 
           if sz1 > max_bytes:
-              raise RuntimeError(f"EOU_ACCESS_TOKENS_1 size {sz1} bytes exceeds limit {max_bytes}.")
+              raise RuntimeError(f"EOU_ACCESS_TOKENS_1 size {sz1} bytes exceeds limit {max_bytes}. Reduce accounts in secret 1.")
           if sz2 > max_bytes:
-              raise RuntimeError(f"EOU_ACCESS_TOKENS_2 size {sz2} bytes exceeds limit {max_bytes}.")
+              raise RuntimeError(f"EOU_ACCESS_TOKENS_2 size {sz2} bytes exceeds limit {max_bytes}. Reduce accounts in secret 2.")
 
           print(f"Refreshed OK: {ok}, Failed: {fail}, Rotated refresh_token: {rotated_any}")
           print(f"EOU_ACCESS_TOKENS_1 bytes: {sz1}, EOU_ACCESS_TOKENS_2 bytes: {sz2}")
@@ -272,15 +280,13 @@ jobs:
           set -euo pipefail
           cat flags.env >> "$GITHUB_ENV"
 
-      # Update GitHub secrets (use GH_TOKEN directly; no gh auth login needed)
       - name: Update access token secrets (split)
         env:
           GH_TOKEN: ${{ secrets.GH_SECRETS_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
-
-          gh secret set EOU_ACCESS_TOKENS_1 --repo "${GITHUB_REPOSITORY}" --body "$(cat access_tokens_1.json)"
-          gh secret set EOU_ACCESS_TOKENS_2 --repo "${GITHUB_REPOSITORY}" --body "$(cat access_tokens_2.json)"
+          gh secret set EOU_ACCESS_TOKENS_1 --repo "${GITHUB_REPOSITORY}" < "access_tokens_1.json"
+          gh secret set EOU_ACCESS_TOKENS_2 --repo "${GITHUB_REPOSITORY}" < "access_tokens_2.json"
 
       - name: Update refresh tokens secret (only if rotated)
         if: env.ROTATED_ANY == 'true'
@@ -288,26 +294,24 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_SECRETS_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
-          gh secret set "${REFRESH_TOKENS_SECRET_NAME}" --repo "${GITHUB_REPOSITORY}" --body "$(cat refresh_tokens_new.json)"
+          gh secret set "${REFRESH_TOKENS_SECRET_NAME}" --repo "${GITHUB_REPOSITORY}" < "refresh_tokens_new.json"
 
-      - name: Write Google Sheet (single batchUpdate request)
+      - name: Write Google Sheet (single batch update request)
         env:
-          SHEETS_ACCESS_TOKEN: ${{ steps.gauth.outputs.access_token }}
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
-
-          http_code="$(curl -sS -o sheets_resp.json -w "%{http_code}" -X POST \
-            -H "Authorization: Bearer ${SHEETS_ACCESS_TOKEN}" \
-            -H "Content-Type: application/json; charset=utf-8" \
-            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
-            --data-binary @sheets_batch_payload.json)"
-
-          if [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 300 ]; then
-            echo "Sheets API call failed with HTTP ${http_code}"
-            echo "Response body:"
-            cat sheets_resp.json
+          if [ -z "${ACCESS_TOKEN}" ]; then
+            echo "Sheets write: Google access token is empty."
             exit 1
           fi
+
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            --data-binary @sheets_batch_payload.json \
+            >/dev/null
 
       - name: Done
         run: echo "Refresh completed."
