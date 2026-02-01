@@ -53,12 +53,14 @@ jobs:
 
       # Google auth (WIF) with Sheets scope
       - name: Auth to Google (WIF) - access token with Sheets scope
+        id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
           token_format: "access_token"
           access_token_scopes: "https://www.googleapis.com/auth/spreadsheets"
+
 
       - name: Setup Python
         uses: actions/setup-python@v5
