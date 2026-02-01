@@ -85,13 +85,13 @@ jobs:
 
           others_count="$(
             python - <<'PY' <<<"${runs_json}"
-import json, os, sys
-runs = json.loads(sys.stdin.read() or "{}")
-me = int(os.environ.get("GITHUB_RUN_ID","-1"))
-wfruns = runs.get("workflow_runs", [])
-other = [r for r in wfruns if int(r.get("id", -1)) != me]
-print(len(other))
-PY
+            import json, os, sys
+            runs = json.loads(sys.stdin.read() or "{}")
+            me = int(os.environ.get("GITHUB_RUN_ID","-1"))
+            wfruns = runs.get("workflow_runs", [])
+            other = [r for r in wfruns if int(r.get("id", -1)) != me]
+            print(len(other))
+            PY
           )"
 
           if [ "${others_count}" -gt 0 ]; then
@@ -118,241 +118,241 @@ PY
           set -euo pipefail
 
           python - <<'PY'
-import base64
-import json
-import os
-import time
-from datetime import datetime, timezone
-import requests
-
-SHEETS_EPOCH_OFFSET = 25569.0  # days between 1899-12-30 and 1970-01-01
-SECONDS_PER_DAY = 86400.0
-
-def unix_to_sheets_serial(unix_seconds: float) -> float:
-    return unix_seconds / SECONDS_PER_DAY + SHEETS_EPOCH_OFFSET
-
-def safe_json_load(name: str) -> dict:
-    raw = os.environ.get(name, "")
-    if not raw.strip():
-        return {}
-    try:
-        return json.loads(raw)
-    except Exception as e:
-        raise RuntimeError(f"{name} is not valid JSON: {e}")
-
-def b64_basic(user: str, pwd: str) -> str:
-    token = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
-    return f"Basic {token}"
-
-def sheets_get(range_a1: str) -> dict:
-    token = os.environ["SHEETS_ACCESS_TOKEN"]
-    if not token:
-        raise RuntimeError("Empty Google SHEETS_ACCESS_TOKEN")
-    sid = os.environ["SHEETS_ID"]
-    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/{range_a1}"
-    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
-    if r.status_code >= 300:
-        raise RuntimeError(f"Sheets GET failed {r.status_code}: {r.text}")
-    return r.json()
-
-def sheets_batch_update(payload: dict) -> None:
-    token = os.environ["SHEETS_ACCESS_TOKEN"]
-    if not token:
-        raise RuntimeError("Empty Google SHEETS_ACCESS_TOKEN")
-    sid = os.environ["SHEETS_ID"]
-    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sid}/values:batchUpdate"
-    r = requests.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json; charset=utf-8",
-        },
-        data=json.dumps(payload),
-        timeout=60,
-    )
-    if r.status_code >= 300:
-        raise RuntimeError(f"Sheets batchUpdate failed {r.status_code}: {r.text}")
-
-clients = safe_json_load("EOU_CLIENTS")
-refresh_map = safe_json_load("EOU_REFRESH_TOKENS")
-access_1 = safe_json_load("EOU_ACCESS_TOKENS_1")
-access_2 = safe_json_load("EOU_ACCESS_TOKENS_2")
-
-for app, cfg in clients.items():
-    if "client_id" not in cfg or "client_secret" not in cfg or "access_tokens_secret" not in cfg:
-        raise RuntimeError(f"EOU_CLIENTS entry '{app}' must include client_id, client_secret, access_tokens_secret")
-
-# 1) Read current next_run from workflows row (column D)
-workflows_tab = os.environ["WORKFLOWS_TAB"]
-workflow_row = int(os.environ["SHEETS_WORKFLOW_ROW"])
-range_next_run = f"{workflows_tab}!D{workflow_row}"
-cur = sheets_get(range_next_run)
-cur_vals = (cur.get("values") or [[]])
-cur_next_run = None
-try:
-    if cur_vals and cur_vals[0] and str(cur_vals[0][0]).strip() != "":
-        cur_next_run = float(cur_vals[0][0])
-except Exception:
-    cur_next_run = None
-
-# 2) Refresh tokens
-sso_url = os.environ["SSO_TOKEN_URL"]
-cooldown = int(os.environ["COOLDOWN"])
-
-rotated_any = False
-refresh_time_by_char = {}  # char_id(str) -> sheets_serial(float)
-
-ok = 0
-fail = 0
-
-# Sort by character_id (int) DESC for access_tokens tab
-items = []
-for char_id, info in refresh_map.items():
-    items.append((int(char_id), info))
-items.sort(key=lambda x: x[0], reverse=True)
-
-sheet_updates_access = []
-
-now_unix = time.time()
-token_time_serial = unix_to_sheets_serial(now_unix)
-
-for idx, (char_id_int, info) in enumerate(items):
-    char_id_str = str(char_id_int)
-    account = info.get("account", "")
-    char_name = info.get("char_name", "")
-    app = info.get("app")
-    rt_old = info.get("refresh_token", "")
-
-    cfg = clients.get(app)
-    if not cfg:
-        fail += 1
-        continue
-
-    client_id = cfg["client_id"]
-    client_secret = cfg["client_secret"]
-    target_secret = cfg["access_tokens_secret"]
-
-    headers = {
-        "Authorization": b64_basic(client_id, client_secret),
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json",
-        "User-Agent": "eou-refresh-access-tokens/1.0",
-    }
-    data = {"grant_type": "refresh_token", "refresh_token": rt_old}
-
-    try:
-        r = requests.post(sso_url, headers=headers, data=data, timeout=30)
-    except Exception:
-        fail += 1
-        continue
-
-    if r.status_code != 200:
-        fail += 1
-        continue
-
-    try:
-        payload = r.json()
-    except Exception:
-        fail += 1
-        continue
-
-    access_token = payload.get("access_token")
-    if not access_token:
-        fail += 1
-        continue
-
-    rt_new = payload.get("refresh_token")
-    refresh_serial = ""
-    if rt_new and rt_new != rt_old:
-        refresh_map[char_id_str]["refresh_token"] = rt_new
-        rotated_any = True
-        refresh_serial = unix_to_sheets_serial(time.time())
-        refresh_time_by_char[char_id_str] = refresh_serial
-
-    # store access token in proper secret map
-    if target_secret == "EOU_ACCESS_TOKENS_1":
-        access_1[char_id_str] = access_token
-    elif target_secret == "EOU_ACCESS_TOKENS_2":
-        access_2[char_id_str] = access_token
-    else:
-        fail += 1
-        continue
-
-    # access_tokens tab rows: header row 1, data starts row 2
-    row = 2 + idx
-
-    # Column types:
-    # A account (string)
-    # B character (string)
-    # C character_id (NUMBER)  <-- int
-    # D access_token (string)
-    # E token_time (NUMBER serial)
-    # F refresh_time (NUMBER serial or blank)
-    sheet_updates_access.append({
-        "range": f"{os.environ['ACCESS_TOKENS_TAB']}!A{row}:F{row}",
-        "values": [[account, char_name, char_id_int, access_token, token_time_serial, refresh_serial]],
-    })
-
-    ok += 1
-
-# 3) Update workflows tab row: status + next_run
-status = "completed" if fail == 0 else "fail"
-new_next_run = cur_next_run
-if status == "completed":
-    new_next_run = unix_to_sheets_serial(time.time() + cooldown)
-
-sheet_updates_workflows = [
-    {
-        "range": f"{workflows_tab}!B{workflow_row}:B{workflow_row}",
-        "values": [[status]],
-    }
-]
-
-# Only write next_run if completed OR it was empty/unreadable
-if status == "completed" or new_next_run is None:
-    if new_next_run is None:
-        new_next_run = unix_to_sheets_serial(time.time() + cooldown)
-    sheet_updates_workflows.append({
-        "range": f"{workflows_tab}!D{workflow_row}:D{workflow_row}",
-        "values": [[new_next_run]],
-    })
-
-# 4) Write JSON artifacts for secrets
-def dump_json(path: str, obj: dict):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-
-dump_json("access_tokens_1.json", access_1)
-dump_json("access_tokens_2.json", access_2)
-dump_json("refresh_tokens_new.json", refresh_map)
-
-# 5) Size guard
-max_bytes = int(os.environ.get("SECRET_MAX_BYTES", "49152"))
-sz1 = os.path.getsize("access_tokens_1.json")
-sz2 = os.path.getsize("access_tokens_2.json")
-if sz1 > max_bytes:
-    raise RuntimeError(f"EOU_ACCESS_TOKENS_1 size {sz1} bytes exceeds limit {max_bytes}. Reduce accounts in secret 1.")
-if sz2 > max_bytes:
-    raise RuntimeError(f"EOU_ACCESS_TOKENS_2 size {sz2} bytes exceeds limit {max_bytes}. Reduce accounts in secret 2.")
-
-# 6) Batch update Sheets (both tabs)
-payload = {
-    "valueInputOption": "RAW",
-    "data": sheet_updates_workflows + sheet_updates_access,
-    "includeValuesInResponse": False,
-}
-sheets_batch_update(payload)
-
-# 7) Flags for later
-with open("flags.env", "w", encoding="utf-8") as f:
-    f.write(f"ROTATED_ANY={'true' if rotated_any else 'false'}\n")
-    f.write(f"STATUS={status}\n")
-    f.write(f"OK={ok}\n")
-    f.write(f"FAIL={fail}\n")
-
-print(f"Refreshed OK: {ok}, Failed: {fail}, Rotated refresh_token: {rotated_any}")
-print(f"EOU_ACCESS_TOKENS_1 bytes: {sz1}, EOU_ACCESS_TOKENS_2 bytes: {sz2}")
-PY
+          import base64
+          import json
+          import os
+          import time
+          from datetime import datetime, timezone
+          import requests
+          
+          SHEETS_EPOCH_OFFSET = 25569.0  # days between 1899-12-30 and 1970-01-01
+          SECONDS_PER_DAY = 86400.0
+          
+          def unix_to_sheets_serial(unix_seconds: float) -> float:
+              return unix_seconds / SECONDS_PER_DAY + SHEETS_EPOCH_OFFSET
+          
+          def safe_json_load(name: str) -> dict:
+              raw = os.environ.get(name, "")
+              if not raw.strip():
+                  return {}
+              try:
+                  return json.loads(raw)
+              except Exception as e:
+                  raise RuntimeError(f"{name} is not valid JSON: {e}")
+          
+          def b64_basic(user: str, pwd: str) -> str:
+              token = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
+              return f"Basic {token}"
+          
+          def sheets_get(range_a1: str) -> dict:
+              token = os.environ["SHEETS_ACCESS_TOKEN"]
+              if not token:
+                  raise RuntimeError("Empty Google SHEETS_ACCESS_TOKEN")
+              sid = os.environ["SHEETS_ID"]
+              url = f"https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/{range_a1}"
+              r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+              if r.status_code >= 300:
+                  raise RuntimeError(f"Sheets GET failed {r.status_code}: {r.text}")
+              return r.json()
+          
+          def sheets_batch_update(payload: dict) -> None:
+              token = os.environ["SHEETS_ACCESS_TOKEN"]
+              if not token:
+                  raise RuntimeError("Empty Google SHEETS_ACCESS_TOKEN")
+              sid = os.environ["SHEETS_ID"]
+              url = f"https://sheets.googleapis.com/v4/spreadsheets/{sid}/values:batchUpdate"
+              r = requests.post(
+                  url,
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Content-Type": "application/json; charset=utf-8",
+                  },
+                  data=json.dumps(payload),
+                  timeout=60,
+              )
+              if r.status_code >= 300:
+                  raise RuntimeError(f"Sheets batchUpdate failed {r.status_code}: {r.text}")
+          
+          clients = safe_json_load("EOU_CLIENTS")
+          refresh_map = safe_json_load("EOU_REFRESH_TOKENS")
+          access_1 = safe_json_load("EOU_ACCESS_TOKENS_1")
+          access_2 = safe_json_load("EOU_ACCESS_TOKENS_2")
+          
+          for app, cfg in clients.items():
+              if "client_id" not in cfg or "client_secret" not in cfg or "access_tokens_secret" not in cfg:
+                  raise RuntimeError(f"EOU_CLIENTS entry '{app}' must include client_id, client_secret, access_tokens_secret")
+          
+          # 1) Read current next_run from workflows row (column D)
+          workflows_tab = os.environ["WORKFLOWS_TAB"]
+          workflow_row = int(os.environ["SHEETS_WORKFLOW_ROW"])
+          range_next_run = f"{workflows_tab}!D{workflow_row}"
+          cur = sheets_get(range_next_run)
+          cur_vals = (cur.get("values") or [[]])
+          cur_next_run = None
+          try:
+              if cur_vals and cur_vals[0] and str(cur_vals[0][0]).strip() != "":
+                  cur_next_run = float(cur_vals[0][0])
+          except Exception:
+              cur_next_run = None
+          
+          # 2) Refresh tokens
+          sso_url = os.environ["SSO_TOKEN_URL"]
+          cooldown = int(os.environ["COOLDOWN"])
+          
+          rotated_any = False
+          refresh_time_by_char = {}  # char_id(str) -> sheets_serial(float)
+          
+          ok = 0
+          fail = 0
+          
+          # Sort by character_id (int) DESC for access_tokens tab
+          items = []
+          for char_id, info in refresh_map.items():
+              items.append((int(char_id), info))
+          items.sort(key=lambda x: x[0], reverse=True)
+          
+          sheet_updates_access = []
+          
+          now_unix = time.time()
+          token_time_serial = unix_to_sheets_serial(now_unix)
+          
+          for idx, (char_id_int, info) in enumerate(items):
+              char_id_str = str(char_id_int)
+              account = info.get("account", "")
+              char_name = info.get("char_name", "")
+              app = info.get("app")
+              rt_old = info.get("refresh_token", "")
+          
+              cfg = clients.get(app)
+              if not cfg:
+                  fail += 1
+                  continue
+          
+              client_id = cfg["client_id"]
+              client_secret = cfg["client_secret"]
+              target_secret = cfg["access_tokens_secret"]
+          
+              headers = {
+                  "Authorization": b64_basic(client_id, client_secret),
+                  "Content-Type": "application/x-www-form-urlencoded",
+                  "Accept": "application/json",
+                  "User-Agent": "eou-refresh-access-tokens/1.0",
+              }
+              data = {"grant_type": "refresh_token", "refresh_token": rt_old}
+          
+              try:
+                  r = requests.post(sso_url, headers=headers, data=data, timeout=30)
+              except Exception:
+                  fail += 1
+                  continue
+          
+              if r.status_code != 200:
+                  fail += 1
+                  continue
+          
+              try:
+                  payload = r.json()
+              except Exception:
+                  fail += 1
+                  continue
+          
+              access_token = payload.get("access_token")
+              if not access_token:
+                  fail += 1
+                  continue
+          
+              rt_new = payload.get("refresh_token")
+              refresh_serial = ""
+              if rt_new and rt_new != rt_old:
+                  refresh_map[char_id_str]["refresh_token"] = rt_new
+                  rotated_any = True
+                  refresh_serial = unix_to_sheets_serial(time.time())
+                  refresh_time_by_char[char_id_str] = refresh_serial
+          
+              # store access token in proper secret map
+              if target_secret == "EOU_ACCESS_TOKENS_1":
+                  access_1[char_id_str] = access_token
+              elif target_secret == "EOU_ACCESS_TOKENS_2":
+                  access_2[char_id_str] = access_token
+              else:
+                  fail += 1
+                  continue
+          
+              # access_tokens tab rows: header row 1, data starts row 2
+              row = 2 + idx
+          
+              # Column types:
+              # A account (string)
+              # B character (string)
+              # C character_id (NUMBER)  <-- int
+              # D access_token (string)
+              # E token_time (NUMBER serial)
+              # F refresh_time (NUMBER serial or blank)
+              sheet_updates_access.append({
+                  "range": f"{os.environ['ACCESS_TOKENS_TAB']}!A{row}:F{row}",
+                  "values": [[account, char_name, char_id_int, access_token, token_time_serial, refresh_serial]],
+              })
+          
+              ok += 1
+          
+          # 3) Update workflows tab row: status + next_run
+          status = "completed" if fail == 0 else "fail"
+          new_next_run = cur_next_run
+          if status == "completed":
+              new_next_run = unix_to_sheets_serial(time.time() + cooldown)
+          
+          sheet_updates_workflows = [
+              {
+                  "range": f"{workflows_tab}!B{workflow_row}:B{workflow_row}",
+                  "values": [[status]],
+              }
+          ]
+          
+          # Only write next_run if completed OR it was empty/unreadable
+          if status == "completed" or new_next_run is None:
+              if new_next_run is None:
+                  new_next_run = unix_to_sheets_serial(time.time() + cooldown)
+              sheet_updates_workflows.append({
+                  "range": f"{workflows_tab}!D{workflow_row}:D{workflow_row}",
+                  "values": [[new_next_run]],
+              })
+          
+          # 4) Write JSON artifacts for secrets
+          def dump_json(path: str, obj: dict):
+              with open(path, "w", encoding="utf-8") as f:
+                  json.dump(obj, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+          
+          dump_json("access_tokens_1.json", access_1)
+          dump_json("access_tokens_2.json", access_2)
+          dump_json("refresh_tokens_new.json", refresh_map)
+          
+          # 5) Size guard
+          max_bytes = int(os.environ.get("SECRET_MAX_BYTES", "49152"))
+          sz1 = os.path.getsize("access_tokens_1.json")
+          sz2 = os.path.getsize("access_tokens_2.json")
+          if sz1 > max_bytes:
+              raise RuntimeError(f"EOU_ACCESS_TOKENS_1 size {sz1} bytes exceeds limit {max_bytes}. Reduce accounts in secret 1.")
+          if sz2 > max_bytes:
+              raise RuntimeError(f"EOU_ACCESS_TOKENS_2 size {sz2} bytes exceeds limit {max_bytes}. Reduce accounts in secret 2.")
+          
+          # 6) Batch update Sheets (both tabs)
+          payload = {
+              "valueInputOption": "RAW",
+              "data": sheet_updates_workflows + sheet_updates_access,
+              "includeValuesInResponse": False,
+          }
+          sheets_batch_update(payload)
+          
+          # 7) Flags for later
+          with open("flags.env", "w", encoding="utf-8") as f:
+              f.write(f"ROTATED_ANY={'true' if rotated_any else 'false'}\n")
+              f.write(f"STATUS={status}\n")
+              f.write(f"OK={ok}\n")
+              f.write(f"FAIL={fail}\n")
+          
+          print(f"Refreshed OK: {ok}, Failed: {fail}, Rotated refresh_token: {rotated_any}")
+          print(f"EOU_ACCESS_TOKENS_1 bytes: {sz1}, EOU_ACCESS_TOKENS_2 bytes: {sz2}")
+          PY
 
       - name: Load flags
         run: |
