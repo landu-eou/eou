@@ -271,7 +271,7 @@ jobs:
           EOU_ACCESS_TOKENS_2: "${{ secrets.EOU_ACCESS_TOKENS_2 }}"
 
           # Admin token para escribir repository secrets
-          GH_TOKEN: "${{ secrets.GH_SECRETS_ADMIN }}"
+          GH_TOKEN: "${{ secrets.GH_SECRETS_ADMIN_TOKEN }}"
 
         run: |
           set -euo pipefail
