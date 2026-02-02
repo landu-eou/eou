@@ -34,6 +34,10 @@ jobs:
       STATE_PATH: states/system_jumps.json
       SDE_SOLARSYSTEMS_GZ: data/sde/solarsystems.jsonl.gz
 
+      # Si el SDE tiene menos de esto, lo consideramos roto y activamos fallback.
+      # Ajusta si tu fichero es pequeño, pero con EVE SDE debería ser miles.
+      SDE_MIN_MAP_SIZE: "1000"
+
     steps:
       # ============================================================
       # 0) GUARD — decidir si este run trabaja o sale
@@ -207,6 +211,7 @@ jobs:
       # ============================================================
       # 7) OBJECTIVE — ESI → BQ (batch) + state/sheets decisions
       #     + Instrumentación: calls a /universe/names y missing ids
+      #     + Fallback: solo se usa /universe/names si el SDE está "roto" O si faltan IDs
       # ============================================================
       - name: OBJECTIVE - ESI System Jumps -> BigQuery
         id: objective
@@ -298,7 +303,7 @@ jobs:
             done
           }
 
-          # ---------- state etag ----------
+          # ---------- leer estado etag ----------
           mkdir -p "$(dirname "${STATE_PATH}")"
           if [ -f "${STATE_PATH}" ]; then
             old_etag="$(jq -r '.etag // empty' "${STATE_PATH}" 2>/dev/null || true)"
@@ -307,7 +312,7 @@ jobs:
           fi
           old_etag="$(normalize_etag "${old_etag}")"
 
-          # ---------- GET ESI (If-None-Match) ----------
+          # ---------- GET con If-None-Match ----------
           hdr="$(mktemp)"
           body="$(mktemp)"
           esi_request "GET" "${ESI_URL}" "$hdr" "$body" "" "${old_etag}"
@@ -326,19 +331,21 @@ jobs:
             lastmod_epoch="$(date -u -d "$last_modified" +%s 2>/dev/null || true)"
           fi
 
+          # next_run final
           if [ -n "$expires_epoch" ]; then
             final_next_epoch=$((expires_epoch + 300))
           else
             final_next_epoch=$((RUN_START_EPOCH + 300))
           fi
 
+          # outputs por defecto
           set_last_modified="false"
           state_should_update="false"
           final_lastmod_epoch=""
-
-          # Instrumentación (por defecto)
           universe_names_calls=0
           universe_names_missing_ids=0
+          sde_map_size=0
+          sde_ok="false"
 
           if [ "$http" = "304" ]; then
             echo "final_next_epoch=${final_next_epoch}" >> "$GITHUB_OUTPUT"
@@ -347,6 +354,8 @@ jobs:
             echo "state_should_update=false" >> "$GITHUB_OUTPUT"
             echo "universe_names_calls=0" >> "$GITHUB_OUTPUT"
             echo "universe_names_missing_ids=0" >> "$GITHUB_OUTPUT"
+            echo "sde_map_size=0" >> "$GITHUB_OUTPUT"
+            echo "sde_ok=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -362,7 +371,7 @@ jobs:
           snapshot_ts_iso="$(date -u -d "@${lastmod_epoch}" +"%Y-%m-%dT%H:%M:%SZ")"
           final_lastmod_epoch="$lastmod_epoch"
 
-          # ---------- BigQuery: create table if not exists ----------
+          # ---------- BigQuery: crear tabla si no existe ----------
           bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false \
             "CREATE TABLE IF NOT EXISTS \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
              (
@@ -373,7 +382,7 @@ jobs:
              PARTITION BY DATE(snapshot_ts)
              CLUSTER BY solarSystem"
 
-          # ---------- BigQuery: snapshot exists? ----------
+          # ---------- BigQuery: existe snapshot? ----------
           snapshot_count="$(bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false --format=csv \
             --parameter="ts:TIMESTAMP:${snapshot_ts_iso}" \
             "SELECT COUNT(1) AS c
@@ -382,6 +391,7 @@ jobs:
 
           existing_csv=""
           if [ "${snapshot_count}" != "0" ]; then
+            # snapshot ya existe => state estaba mal => actualizar state etag y Sheets last_modified
             state_should_update="true"
             set_last_modified="true"
 
@@ -394,7 +404,7 @@ jobs:
               | tail -n +2 > "$existing_csv"
           fi
 
-          # ---------- decidir dump ----------
+          # Si etag old es null/empty o distinto => candidato a volcar (pero solo si snapshot no existe)
           should_dump="false"
           if [ -z "$old_etag" ] || [ "$old_etag" != "$new_etag" ]; then
             if [ "${snapshot_count}" = "0" ]; then
@@ -402,6 +412,7 @@ jobs:
             fi
           fi
 
+          # Si no hay que volcar y snapshot no existe, salir limpio
           if [ "$should_dump" != "true" ] && [ "${snapshot_count}" = "0" ]; then
             echo "final_next_epoch=${final_next_epoch}" >> "$GITHUB_OUTPUT"
             echo "final_lastmod_epoch=" >> "$GITHUB_OUTPUT"
@@ -409,58 +420,92 @@ jobs:
             echo "state_should_update=false" >> "$GITHUB_OUTPUT"
             echo "universe_names_calls=0" >> "$GITHUB_OUTPUT"
             echo "universe_names_missing_ids=0" >> "$GITHUB_OUTPUT"
+            echo "sde_map_size=0" >> "$GITHUB_OUTPUT"
+            echo "sde_ok=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           # ---------- mapping requerido ----------
           if [ ! -f "${SDE_SOLARSYSTEMS_GZ}" ]; then
-            echo "Missing ${SDE_SOLARSYSTEMS_GZ}; cannot map system_id -> solarSystem" >&2
-            exit 1
+            echo "WARN: Missing ${SDE_SOLARSYSTEMS_GZ}; will use /universe/names fallback" >&2
           fi
 
-          # ---------- missing ids (SDE) ----------
+          # ---------- detectar IDs faltantes en SDE + tamaño del mapa ----------
           missing_ids="$(mktemp)"
+          sde_stats="$(mktemp)"
 
-          ESI_BODY="$body" MISSING_OUT="$missing_ids" SDE_SOLARSYSTEMS_GZ="$SDE_SOLARSYSTEMS_GZ" python3 - <<'PY'
-          import gzip, json, os
+          # Si el fichero no existe, dejamos missing_ids con TODOS los ids de ESI (forzando fallback)
+          if [ -f "${SDE_SOLARSYSTEMS_GZ}" ]; then
+            ESI_BODY="$body" MISSING_OUT="$missing_ids" SDE_SOLARSYSTEMS_GZ="$SDE_SOLARSYSTEMS_GZ" SDE_STATS="$sde_stats" python3 - <<'PY'
+import gzip, json, os
 
-          sde = os.environ["SDE_SOLARSYSTEMS_GZ"]
-          body_path = os.environ["ESI_BODY"]
-          out_path = os.environ["MISSING_OUT"]
+sde = os.environ["SDE_SOLARSYSTEMS_GZ"]
+body_path = os.environ["ESI_BODY"]
+out_path = os.environ["MISSING_OUT"]
+stats_path = os.environ["SDE_STATS"]
 
-          mp = {}
-          with gzip.open(sde, "rt", encoding="utf-8") as f:
-            for line in f:
-              line=line.strip()
-              if not line:
-                continue
-              o=json.loads(line)
-              sid = o.get("solarSystemID", o.get("solarSystemId", o.get("id")))
-              name = o.get("solarSystemName", o.get("name"))
-              if sid is None or name is None:
-                continue
-              try:
-                mp[int(sid)] = str(name)
-              except Exception:
-                pass
+def pick(d, keys):
+  for k in keys:
+    v = d.get(k)
+    if v is not None and str(v).strip() != "":
+      return v
+  return None
 
-          data = json.load(open(body_path, "r", encoding="utf-8"))
-          missing = []
-          for rec in data:
-            sid = int(rec["system_id"])
-            if sid not in mp:
-              missing.append(sid)
+# Tu formato real: solarSystemID + solarSystem
+id_keys = ["solarSystemID","solarSystemId","solarSystem_id","system_id","id"]
+name_keys = ["solarSystem","solarSystemName","name","solarSystemName_en","solarSystem_name"]
 
-          missing = sorted(set(missing))
-          with open(out_path, "w", encoding="utf-8") as out:
-            for sid in missing:
-              out.write(str(sid) + "\n")
-          PY
+mp = {}
+with gzip.open(sde, "rt", encoding="utf-8") as f:
+  for line in f:
+    line=line.strip()
+    if not line:
+      continue
+    o=json.loads(line)
+    sid = pick(o, id_keys)
+    name = pick(o, name_keys)
+    if sid is None or name is None:
+      continue
+    try:
+      mp[int(sid)] = str(name)
+    except Exception:
+      pass
 
+data = json.load(open(body_path, "r", encoding="utf-8"))
+missing = []
+for rec in data:
+  sid = int(rec["system_id"])
+  if sid not in mp:
+    missing.append(sid)
+
+missing = sorted(set(missing))
+with open(out_path, "w", encoding="utf-8") as out:
+  for sid in missing:
+    out.write(str(sid) + "\n")
+
+with open(stats_path, "w", encoding="utf-8") as s:
+  s.write(str(len(mp)))
+PY
+          else
+            # Forzar missing=all ids
+            jq -r '.[].system_id' "$body" | sort -n | uniq > "$missing_ids"
+            echo "0" > "$sde_stats"
+          fi
+
+          sde_map_size="$(cat "$sde_stats" | tr -d '[:space:]' || echo 0)"
           universe_names_missing_ids="$(wc -l < "$missing_ids" | tr -d ' ')"
+
+          # SDE "OK" si map size >= umbral
+          if [[ "$sde_map_size" =~ ^[0-9]+$ ]] && [ "$sde_map_size" -ge "${SDE_MIN_MAP_SIZE}" ]; then
+            sde_ok="true"
+          else
+            sde_ok="false"
+          fi
+
+          echo "SDE map size: ${sde_map_size} (ok=${sde_ok}, min=${SDE_MIN_MAP_SIZE})"
           echo "Missing system_id not in SDE: ${universe_names_missing_ids}"
 
-          # ---------- fallback /universe/names ----------
+          # ---------- fallback /universe/names (solo si hay missing) ----------
           names_merged=""
           if [ -s "$missing_ids" ]; then
             split -l 1000 "$missing_ids" /tmp/missing_chunk_
@@ -473,7 +518,6 @@ jobs:
               req="$(mktemp)"
               hdr2="$(mktemp)"
               body2="$(mktemp)"
-
               jq -Rs 'split("\n") | map(select(length>0) | tonumber)' "$chunk" > "$req"
 
               esi_request "POST" "${ESI_NAMES_URL}" "$hdr2" "$body2" "$req" ""
@@ -489,81 +533,99 @@ jobs:
 
           echo "ESI /universe/names calls performed: ${universe_names_calls}"
 
-          # ---------- NDJSON final (diff => solo faltantes) ----------
+          # ---------- construir NDJSON final (diff: solo faltantes si snapshot existe) ----------
           ndjson="$(mktemp)"
 
-          SDE_SOLARSYSTEMS_GZ="$SDE_SOLARSYSTEMS_GZ" \
+          SDE_SOLARSYSTEMS_GZ="${SDE_SOLARSYSTEMS_GZ}" \
+          SDE_EXISTS="$([ -f "${SDE_SOLARSYSTEMS_GZ}" ] && echo 1 || echo 0)" \
           ESI_BODY="$body" \
           NDJSON_OUT="$ndjson" \
           SNAPSHOT_TS_ISO="$snapshot_ts_iso" \
           EXISTING_CSV="${existing_csv:-}" \
           NAMES_JSON="${names_merged:-}" \
           python3 - <<'PY'
-          import gzip, json, os
+import gzip, json, os
 
-          sde = os.environ["SDE_SOLARSYSTEMS_GZ"]
-          body_path = os.environ["ESI_BODY"]
-          out_path = os.environ["NDJSON_OUT"]
-          snapshot_ts = os.environ["SNAPSHOT_TS_ISO"]
-          existing_path = os.environ.get("EXISTING_CSV", "")
-          names_path = os.environ.get("NAMES_JSON", "")
+def pick(d, keys):
+  for k in keys:
+    v = d.get(k)
+    if v is not None and str(v).strip() != "":
+      return v
+  return None
 
-          existing = set()
-          if existing_path and os.path.exists(existing_path) and os.path.getsize(existing_path) > 0:
-            with open(existing_path, "r", encoding="utf-8") as f:
-              for line in f:
-                v = line.strip()
-                if v:
-                  existing.add(v)
+sde = os.environ.get("SDE_SOLARSYSTEMS_GZ","")
+sde_exists = os.environ.get("SDE_EXISTS","0") == "1"
+body_path = os.environ["ESI_BODY"]
+out_path = os.environ["NDJSON_OUT"]
+snapshot_ts = os.environ["SNAPSHOT_TS_ISO"]
+existing_path = os.environ.get("EXISTING_CSV", "")
+names_path = os.environ.get("NAMES_JSON", "")
 
-          mp = {}
-          with gzip.open(sde, "rt", encoding="utf-8") as f:
-            for line in f:
-              line=line.strip()
-              if not line:
-                continue
-              o=json.loads(line)
-              sid = o.get("solarSystemID", o.get("solarSystemId", o.get("id")))
-              name = o.get("solarSystemName", o.get("name"))
-              if sid is None or name is None:
-                continue
-              try:
-                mp[int(sid)] = str(name)
-              except Exception:
-                pass
+id_keys = ["solarSystemID","solarSystemId","solarSystem_id","system_id","id"]
+name_keys = ["solarSystem","solarSystemName","name","solarSystemName_en","solarSystem_name"]
 
-          if names_path and os.path.exists(names_path) and os.path.getsize(names_path) > 2:
-            arr = json.load(open(names_path, "r", encoding="utf-8"))
-            for o in arr:
-              try:
-                if o.get("category") == "solar_system":
-                  mp[int(o["id"])] = str(o["name"])
-              except Exception:
-                pass
+existing = set()
+if existing_path and os.path.exists(existing_path) and os.path.getsize(existing_path) > 0:
+  with open(existing_path, "r", encoding="utf-8") as f:
+    for line in f:
+      v=line.strip()
+      if v:
+        existing.add(v)
 
-          data = json.load(open(body_path, "r", encoding="utf-8"))
+mp = {}
+if sde_exists and sde and os.path.exists(sde):
+  with gzip.open(sde, "rt", encoding="utf-8") as f:
+    for line in f:
+      line=line.strip()
+      if not line:
+        continue
+      o=json.loads(line)
+      sid = pick(o, id_keys)
+      name = pick(o, name_keys)
+      if sid is None or name is None:
+        continue
+      try:
+        mp[int(sid)] = str(name)
+      except Exception:
+        pass
 
-          missing = []
-          with open(out_path, "w", encoding="utf-8") as out:
-            for rec in data:
-              sid = int(rec["system_id"])
-              jumps = int(rec.get("ship_jumps", 0))
-              name = mp.get(sid)
-              if not name:
-                missing.append(sid)
-                continue
-              if existing and name in existing:
-                continue
-              out.write(json.dumps({
-                "snapshot_ts": snapshot_ts,
-                "solarSystem": name,
-                "ship_jumps": jumps
-              }, ensure_ascii=False) + "\n")
+# Fallback names (universe/names)
+if names_path and os.path.exists(names_path) and os.path.getsize(names_path) > 2:
+  arr = json.load(open(names_path, "r", encoding="utf-8"))
+  for o in arr:
+    try:
+      if o.get("category") == "solar_system":
+        mp[int(o["id"])] = str(o["name"])
+    except Exception:
+      pass
 
-          if missing:
-            missing = sorted(set(missing))
-            raise SystemExit(f"Unmapped system_id(s) after fallback: {missing[:25]}")
-          PY
+data = json.load(open(body_path, "r", encoding="utf-8"))
+
+missing = []
+rows = 0
+with open(out_path, "w", encoding="utf-8") as out:
+  for rec in data:
+    sid = int(rec["system_id"])
+    jumps = int(rec.get("ship_jumps", 0))
+    name = mp.get(sid)
+    if not name:
+      missing.append(sid)
+      continue
+    if existing and name in existing:
+      continue
+    out.write(json.dumps({
+      "snapshot_ts": snapshot_ts,
+      "solarSystem": name,
+      "ship_jumps": jumps
+    }, ensure_ascii=False) + "\n")
+    rows += 1
+
+if missing:
+  missing = sorted(set(missing))
+  raise SystemExit(f"Unmapped system_id(s) after SDE+names fallback: {missing[:25]}")
+
+print(rows)
+PY
 
           rowcount="$(wc -l < "$ndjson" | tr -d ' ')"
           echo "Rows to load into BigQuery: ${rowcount}"
@@ -576,23 +638,31 @@ jobs:
               "$ndjson"
           fi
 
-          # update rules
-          if [ "$should_dump" = "true" ]; then
-            set_last_modified="true"
+          # ---------- actualizar state etag ----------
+          # Si volcamos o snapshot ya existía => actualizar etag
+          if [ "$should_dump" = "true" ] || [ "${snapshot_count}" != "0" ]; then
             state_should_update="true"
+          fi
+
+          # last_modified SOLO si:
+          # - volcamos datos correctamente (should_dump=true)
+          # - o snapshot ya existía (state roto)
+          if [ "$should_dump" = "true" ] || [ "${snapshot_count}" != "0" ]; then
+            set_last_modified="true"
           fi
 
           if [ "$state_should_update" = "true" ]; then
             jq -n --arg etag "$new_etag" '{etag:$etag}' > "${STATE_PATH}"
           fi
 
-          # Outputs (para logs/finalize)
           echo "final_next_epoch=${final_next_epoch}" >> "$GITHUB_OUTPUT"
           echo "final_lastmod_epoch=${final_lastmod_epoch}" >> "$GITHUB_OUTPUT"
           echo "set_last_modified=${set_last_modified}" >> "$GITHUB_OUTPUT"
           echo "state_should_update=${state_should_update}" >> "$GITHUB_OUTPUT"
           echo "universe_names_calls=${universe_names_calls}" >> "$GITHUB_OUTPUT"
           echo "universe_names_missing_ids=${universe_names_missing_ids}" >> "$GITHUB_OUTPUT"
+          echo "sde_map_size=${sde_map_size}" >> "$GITHUB_OUTPUT"
+          echo "sde_ok=${sde_ok}" >> "$GITHUB_OUTPUT"
 
       # ============================================================
       # 8) Commit state si cambió
@@ -605,49 +675,18 @@ jobs:
             echo "No state changes to commit."
             exit 0
           fi
+
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git add "${STATE_PATH}"
           git commit -m "chore(state): update system_jumps etag [skip ci]" || exit 0
           git pull --rebase --autostash || true
           git push
 
       # ============================================================
-      # 9) Cleanup anti-cola
-      # ============================================================
-      - name: Cancel queued runs (cleanup)
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          WF_FILE: ${{ env.WORKFLOW_FILE }}
-        run: |
-          set -euo pipefail
-          api="https://api.github.com/repos/${REPO}/actions/workflows/${WF_FILE}/runs?per_page=50"
-          json="$(curl -fsSL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${api}")"
-          jq -r --arg rid "$RUN_ID" '
-            (.workflow_runs // [])
-            | map(select(.status=="queued"))
-            | map(select(.id != ($rid|tonumber)))
-            | .[].id
-          ' <<< "$json" | while read -r other_id; do
-            [ -z "$other_id" ] && continue
-            curl -fsSL -X POST \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${REPO}/actions/runs/${other_id}/cancel" \
-              >/dev/null || true
-          done
-
-      # ============================================================
-      # 10) FINALIZE SUCCESS — status + next_run + (last_modified si procede)
-      #     + LOG explícito de universe/names
+      # 9) FINALIZE SUCCESS — status + next_run + (last_modified si procede)
+      #     + SUMMARY explícito
       # ============================================================
       - name: Finalize (completed)
         if: success()
@@ -658,16 +697,19 @@ jobs:
           SET_LAST_MODIFIED: ${{ steps.objective.outputs.set_last_modified }}
           NAMES_CALLS: ${{ steps.objective.outputs.universe_names_calls }}
           NAMES_MISSING: ${{ steps.objective.outputs.universe_names_missing_ids }}
+          SDE_MAP_SIZE: ${{ steps.objective.outputs.sde_map_size }}
+          SDE_OK: ${{ steps.objective.outputs.sde_ok }}
         run: |
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
 
-          echo "SUMMARY: missing_ids=${NAMES_MISSING}, universe/names_calls=${NAMES_CALLS}"
+          echo "SUMMARY: sde_map_size=${SDE_MAP_SIZE} (ok=${SDE_OK}), missing_ids=${NAMES_MISSING}, universe/names_calls=${NAMES_CALLS}"
 
           serial_next="$(awk "BEGIN { printf \"%.10f\", (${FINAL_NEXT_EPOCH}/86400) + 25569 }")"
 
           if [ "${SET_LAST_MODIFIED}" = "true" ] && [[ "${FINAL_LASTMOD_EPOCH:-}" =~ ^[0-9]+$ ]]; then
             lm_serial="$(awk "BEGIN { printf \"%.10f\", (${FINAL_LASTMOD_EPOCH}/86400) + 25569 }")"
+
             curl -fsSL -X POST \
               -H "Authorization: Bearer ${ACCESS_TOKEN}" \
               -H "Content-Type: application/json" \
@@ -694,9 +736,6 @@ jobs:
               }"
           fi
 
-      # ============================================================
-      # 11) FINALIZE FAILURE — status failed + next_run = start+5m
-      # ============================================================
       - name: Finalize (failed)
         if: failure()
         env:
@@ -704,8 +743,10 @@ jobs:
         run: |
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
+
           epoch=$((RUN_START_EPOCH + 300))
           serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
+
           curl -fsSL -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
