@@ -113,10 +113,16 @@ jobs:
       # =====================================================================
       - name: Auth to Google (WIF)
         id: gcp_auth
+        if: steps.guard.outputs.proceed == 'true'
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          # CLAVE: cred file fuera del workspace del repo
+          create_credentials_file: true
+          credentials_file_path: ${{ runner.temp }}/gha-creds.json
+          export_environment_variables: true
+          # si quieres seguir usando Sheets token:
           token_format: access_token
           access_token_scopes: |
             https://www.googleapis.com/auth/spreadsheets
