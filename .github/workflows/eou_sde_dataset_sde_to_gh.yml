@@ -2,8 +2,14 @@ name: SDE Dataset (SDE → GH)
 
 on:
   workflow_dispatch:
+    inputs:
+      force_refresh:
+        description: "Force refresh (ignore etag comparison) and treat as updated for Sheets"
+        required: false
+        type: boolean
+        default: false
 
-# Anti-solapamiento (candado) a nivel workflow.
+# Anti-solapamiento (candado) a nivel workflow
 concurrency:
   group: eou_sde_dataset_sde_to_gh
   cancel-in-progress: false
@@ -18,27 +24,19 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # =====================================================================
-      # 0) CONFIGURACIÓN (ESPECÍFICA DE ESTE WORKFLOW)
-      # =====================================================================
-
-      # --- Identidad del workflow ---
       WORKFLOW_FILE: eou_sde_dataset_sde_to_gh.yml
 
-      # --- Google Sheets (estado compartido) ---
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "4"
 
-      # --- Locking / planificación ---
       LOCK_TIME: 120  # segundos
 
-      # --- SDE oficial (CCP) ---
       SDE_URL: https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip
 
     steps:
       # =====================================================================
-      # 1) GUARD (COMÚN) — decide si este run debe trabajar o salir (busy)
+      # 1) GUARD — decide si este run debe trabajar o salir (busy)
       # =====================================================================
 
       - name: Guard - compute decision
@@ -106,7 +104,7 @@ jobs:
           echo "proceed=$(cat /tmp/proceed)" >> "$GITHUB_OUTPUT"
 
       # =====================================================================
-      # 2) AUTH GOOGLE (COMÚN) — WIF/OIDC (sin claves)
+      # 2) AUTH GOOGLE — WIF/OIDC (sin claves)
       # =====================================================================
       - name: Auth to Google (WIF)
         id: gcp_auth
@@ -119,7 +117,7 @@ jobs:
             https://www.googleapis.com/auth/spreadsheets
 
       # =====================================================================
-      # 3) BUSY EXIT (COMÚN)
+      # 3) BUSY EXIT
       # =====================================================================
       - name: Exit if skipped (busy)
         if: steps.guard.outputs.proceed != 'true'
@@ -128,7 +126,7 @@ jobs:
           exit 0
 
       # =====================================================================
-      # 4) LOCK INICIAL (COMÚN)
+      # 4) LOCK INICIAL (Sheets) — status=in_progress, next_run=now+LOCK_TIME
       # =====================================================================
       - name: Initial lock (in_progress + next_run as value)
         if: steps.guard.outputs.proceed == 'true'
@@ -138,8 +136,6 @@ jobs:
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
 
-          # next_run (UTC) como serial de Sheets:
-          # serial = epoch_seconds/86400 + 25569  (origen 1899-12-30)
           epoch="$(date -u -d "+${LOCK_TIME} seconds" +%s)"
           serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
 
@@ -156,7 +152,7 @@ jobs:
             }"
 
       # =====================================================================
-      # 5) OBJETIVO — SDE (CCP) → repo (commits)
+      # 5) OBJETIVO — SDE → repo
       # =====================================================================
 
       - name: Checkout
@@ -171,56 +167,100 @@ jobs:
         with:
           python-version: "3.11"
 
+      # --- FIX: robust headers (follow redirects, read LAST header block) ---
       - name: Fetch remote SDE headers (ETag + Last-Modified)
         if: steps.guard.outputs.proceed == 'true'
         id: sde_headers
         run: |
           set -euo pipefail
-          hdrs="$(curl -fsSI --retry 3 --retry-delay 2 --retry-connrefused "${SDE_URL}")"
 
-          etag="$(awk -F': ' 'tolower($1)=="etag"{print $2}' <<< "$hdrs" | tr -d '\r' | tail -n 1)"
-          lm="$(awk -F': ' 'tolower($1)=="last-modified"{print $2}' <<< "$hdrs" | tr -d '\r' | tail -n 1)"
+          # GET headers while following redirects; write headers to a file.
+          # We prefer GET (-D - -o /dev/null) over HEAD (-I) because some CDNs omit headers on HEAD.
+          hdrs="$(
+            curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused \
+              -L -D - -o /dev/null "${SDE_URL}"
+          )"
 
-          if [ -z "$etag" ] || [ -z "$lm" ]; then
-            echo "Missing ETag/Last-Modified headers" >&2
-            exit 1
+          # Parse the LAST HTTP response block (after redirects).
+          python - <<'PY'
+          import re, sys, datetime, email.utils
+          
+          raw = sys.stdin.read()
+          # Split header blocks on blank line; last non-empty block is the final response.
+          blocks = [b.strip("\r\n") for b in re.split(r"\r?\n\r?\n", raw) if b.strip()]
+          if not blocks:
+              raise SystemExit("No headers received")
+          
+          last = blocks[-1]
+          lines = last.splitlines()
+          
+          def get_header(name: str):
+              name_l = name.lower()
+              for ln in lines:
+                  if ":" not in ln:
+                      continue
+                  k, v = ln.split(":", 1)
+                  if k.strip().lower() == name_l:
+                      return v.strip()
+              return ""
+          
+          etag = get_header("etag")
+          lm = get_header("last-modified")
+          
+          if not etag or not lm:
+              # Emit debug context (first status line) then fail clearly
+              status = lines[0] if lines else "<no status line>"
+              raise SystemExit(f"Missing ETag/Last-Modified on final response. status={status}, etag={bool(etag)}, last_modified={bool(lm)}")
+          
+          dt = email.utils.parsedate_to_datetime(lm)
+          # ensure UTC epoch
+          if dt.tzinfo is None:
+              dt = dt.replace(tzinfo=datetime.timezone.utc)
+          epoch = int(dt.timestamp())
+          
+          print(f"etag={etag}")
+          print(f"last_modified={lm}")
+          print(f"last_modified_epoch={epoch}")
+          PY <<< "$hdrs" >> "$GITHUB_OUTPUT"
+          
+                - name: Read local state (states/sde.json)
+                  if: steps.guard.outputs.proceed == 'true'
+                  id: sde_state
+                  run: |
+                    set -euo pipefail
+          
+                    if [ -f "states/sde.json" ]; then
+                      etag_local="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('states/sde.json')
+          try:
+              data = json.loads(p.read_text(encoding='utf-8'))
+              print(data.get('etag') or '')
+          except Exception:
+              print('')
+          PY
+            )"
+          else
+            etag_local=""
           fi
 
-          lm_epoch="$(date -u -d "$lm" +%s)"
-
-          echo "etag=$etag" >> "$GITHUB_OUTPUT"
-          echo "last_modified=$lm" >> "$GITHUB_OUTPUT"
-          echo "last_modified_epoch=$lm_epoch" >> "$GITHUB_OUTPUT"
-
-      - name: Read local state (states/sde.json)
-        if: steps.guard.outputs.proceed == 'true'
-        id: sde_state
-        run: |
-          set -euo pipefail
-
-          if [ -f "states/sde.json" ]; then
-            etag_local="$(python - <<'PY'
-            import json
-            from pathlib import Path
-            p = Path('states/sde.json')
-            try:
-                data = json.loads(p.read_text(encoding='utf-8'))
-                print(data.get('etag') or '')
-            except Exception:
-                print('')
-            PY
-                        )"
-                      else
-                        etag_local=""
-                      fi
-            
-                      echo "etag_local=$etag_local" >> "$GITHUB_OUTPUT"
+          echo "etag_local=$etag_local" >> "$GITHUB_OUTPUT"
 
       - name: Decide whether to refresh SDE outputs
         if: steps.guard.outputs.proceed == 'true'
         id: sde_decide
         run: |
           set -euo pipefail
+
+          force="${{ github.event.inputs.force_refresh }}"
+          # workflow_dispatch inputs come through as strings; treat only "true" as true.
+          if [ "$force" = "true" ]; then
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            echo "forced=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           remote="${{ steps.sde_headers.outputs.etag }}"
           local="${{ steps.sde_state.outputs.etag_local }}"
 
@@ -230,6 +270,7 @@ jobs:
           fi
 
           echo "needs_update=$needs_update" >> "$GITHUB_OUTPUT"
+          echo "forced=false" >> "$GITHUB_OUTPUT"
 
       - name: Build SDE outputs (JSONL.GZ)
         if: steps.guard.outputs.proceed == 'true' && steps.sde_decide.outputs.needs_update == 'true'
@@ -244,7 +285,7 @@ jobs:
 
           echo "Downloading SDE ZIP..."
           curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused \
-            -o .tmp/sde/sde.zip \
+            -L -o .tmp/sde/sde.zip \
             "${SDE_URL}"
 
           echo "Building outputs..."
@@ -252,12 +293,10 @@ jobs:
             --zip .tmp/sde/sde.zip \
             --out .tmp/sde/out
 
-          # Solo si se generó todo correctamente, se actualiza el state.
+          # Solo si se generó todo correctamente, se actualiza el state con el ETag remoto
           python - <<'PY'
-          import json
-          import os
+          import json, os
           from pathlib import Path
-          
           etag = os.environ.get('REMOTE_ETAG', '')
           Path('states').mkdir(parents=True, exist_ok=True)
           Path('states/sde.json').write_text(
@@ -266,7 +305,7 @@ jobs:
           )
           PY
 
-          # Reemplazo "de una sola vez" (sin commits parciales)
+          # Reemplazo "de una sola vez"
           for f in regions constellations solarsystems stations stargates types; do
             mv -f ".tmp/sde/out/${f}.jsonl.gz" "data/sde/${f}.jsonl.gz"
           done
@@ -293,7 +332,7 @@ jobs:
           git push
 
       # =====================================================================
-      # 6) FINALIZE (COMÚN + reglas de next_run + last_modified)
+      # 6) FINALIZE — status + next_run + last_modified (solo si updated/forced)
       # =====================================================================
 
       - name: Finalize (completed)
@@ -301,6 +340,7 @@ jobs:
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
           UPDATED: ${{ steps.sde_build.outputs.updated }}
+          FORCED: ${{ steps.sde_decide.outputs.forced }}
           LM_EPOCH: ${{ steps.sde_headers.outputs.last_modified_epoch }}
         run: |
           set -euo pipefail
@@ -317,7 +357,12 @@ jobs:
             cand_epoch="$(date -u -d "${today}T${t_hms}Z +1 day" +%s)"
           fi
 
-          if [ "${UPDATED:-}" = "true" ]; then
+          did_update="false"
+          if [ "${UPDATED:-}" = "true" ] || [ "${FORCED:-}" = "true" ]; then
+            did_update="true"
+          fi
+
+          if [ "$did_update" = "true" ]; then
             next_epoch="$cand_epoch"
           else
             if [ "$now_hour" -ge 10 ] && [ "$now_hour" -lt 15 ]; then
@@ -330,7 +375,7 @@ jobs:
           next_serial="$(awk "BEGIN { printf \"%.10f\", (${next_epoch}/86400) + 25569 }")"
           lm_serial="$(awk "BEGIN { printf \"%.10f\", (${LM_EPOCH}/86400) + 25569 }")"
 
-          if [ "${UPDATED:-}" = "true" ]; then
+          if [ "$did_update" = "true" ]; then
             payload="{
               \"valueInputOption\":\"RAW\",
               \"data\":[
@@ -367,7 +412,6 @@ jobs:
           now_epoch="$(date -u +%s)"
           now_hour="$(date -u +%H)"
 
-          # hh:mm:ss = Last-Modified + 30m
           t_hms="$(date -u -d "@$((${LM_EPOCH}+1800))" +%H:%M:%S)"
           today="$(date -u +%Y-%m-%d)"
           cand_epoch="$(date -u -d "${today}T${t_hms}Z" +%s)"
@@ -375,7 +419,6 @@ jobs:
             cand_epoch="$(date -u -d "${today}T${t_hms}Z +1 day" +%s)"
           fi
 
-          # Si NO se han volcado datos (por cualquier motivo) y hora 10-15 => now+1h
           if [ "$now_hour" -ge 10 ] && [ "$now_hour" -lt 15 ]; then
             next_epoch="$((now_epoch + 3600))"
           else
