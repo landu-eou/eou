@@ -102,7 +102,7 @@ jobs:
           exit 0
 
       # ============================================================
-      # 1) CHECKOUT (antes de auth)
+      # 1) CHECKOUT
       # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
@@ -206,6 +206,7 @@ jobs:
 
       # ============================================================
       # 7) OBJECTIVE — ESI → BQ (batch) + state/sheets decisions
+      #     + Instrumentación: calls a /universe/names y missing ids
       # ============================================================
       - name: OBJECTIVE - ESI System Jumps -> BigQuery
         id: objective
@@ -228,6 +229,9 @@ jobs:
           normalize_etag() {
             echo "$1" | sed -E 's/^[[:space:]]*W\/"//; s/^"//; s/"[[:space:]]*$//; s/[[:space:]]+$//'
           }
+
+          # Global: HTTP status de la última request
+          ESI_HTTP=""
 
           esi_request() {
             # usage: esi_request METHOD URL HDR_OUT BODY_OUT [DATA_FILE] [IF_NONE_MATCH]
@@ -258,9 +262,9 @@ jobs:
 
               http="$(curl "${args[@]}" -w "%{http_code}" || true)"
               [ -z "$http" ] && http="000"
+              ESI_HTTP="$http"
 
               if [ "$http" = "200" ] || [ "$http" = "304" ]; then
-                echo "$http"
                 return 0
               fi
 
@@ -268,10 +272,8 @@ jobs:
               err_reset="$(header_value "X-ESI-Error-Limit-Reset" "$hdr" || true)"
 
               if [ "$http" = "429" ]; then
-                # ESI rate limiting: 429 + Retry-After
                 sleep_sec="${retry_after:-$delay}"
               elif [ "$http" = "420" ]; then
-                # ESI error limit: 420 + reset header
                 sleep_sec="${err_reset:-$delay}"
               elif [[ "$http" =~ ^(500|502|503|504)$ ]] || [ "$http" = "000" ]; then
                 sleep_sec="$delay"
@@ -296,7 +298,7 @@ jobs:
             done
           }
 
-          # ---------- leer estado etag ----------
+          # ---------- state etag ----------
           mkdir -p "$(dirname "${STATE_PATH}")"
           if [ -f "${STATE_PATH}" ]; then
             old_etag="$(jq -r '.etag // empty' "${STATE_PATH}" 2>/dev/null || true)"
@@ -305,10 +307,11 @@ jobs:
           fi
           old_etag="$(normalize_etag "${old_etag}")"
 
-          # ---------- GET con If-None-Match ----------
+          # ---------- GET ESI (If-None-Match) ----------
           hdr="$(mktemp)"
           body="$(mktemp)"
-          http="$(esi_request "GET" "${ESI_URL}" "$hdr" "$body" "" "${old_etag}")"
+          esi_request "GET" "${ESI_URL}" "$hdr" "$body" "" "${old_etag}"
+          http="$ESI_HTTP"
 
           new_etag="$(normalize_etag "$(header_value "ETag" "$hdr" || true)")"
           last_modified="$(header_value "Last-Modified" "$hdr" || true)"
@@ -329,17 +332,21 @@ jobs:
             final_next_epoch=$((RUN_START_EPOCH + 300))
           fi
 
-          # outputs por defecto
           set_last_modified="false"
           state_should_update="false"
           final_lastmod_epoch=""
 
+          # Instrumentación (por defecto)
+          universe_names_calls=0
+          universe_names_missing_ids=0
+
           if [ "$http" = "304" ]; then
-            # no cambios => no BQ, no state, no last_modified
             echo "final_next_epoch=${final_next_epoch}" >> "$GITHUB_OUTPUT"
             echo "final_lastmod_epoch=" >> "$GITHUB_OUTPUT"
             echo "set_last_modified=false" >> "$GITHUB_OUTPUT"
             echo "state_should_update=false" >> "$GITHUB_OUTPUT"
+            echo "universe_names_calls=0" >> "$GITHUB_OUTPUT"
+            echo "universe_names_missing_ids=0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -355,7 +362,7 @@ jobs:
           snapshot_ts_iso="$(date -u -d "@${lastmod_epoch}" +"%Y-%m-%dT%H:%M:%SZ")"
           final_lastmod_epoch="$lastmod_epoch"
 
-          # ---------- BigQuery: crear tabla si no existe ----------
+          # ---------- BigQuery: create table if not exists ----------
           bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false \
             "CREATE TABLE IF NOT EXISTS \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
              (
@@ -366,7 +373,7 @@ jobs:
              PARTITION BY DATE(snapshot_ts)
              CLUSTER BY solarSystem"
 
-          # ---------- BigQuery: existe snapshot? ----------
+          # ---------- BigQuery: snapshot exists? ----------
           snapshot_count="$(bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false --format=csv \
             --parameter="ts:TIMESTAMP:${snapshot_ts_iso}" \
             "SELECT COUNT(1) AS c
@@ -375,7 +382,6 @@ jobs:
 
           existing_csv=""
           if [ "${snapshot_count}" != "0" ]; then
-            # snapshot ya existe => state estaba mal => actualizar state, y last_modified en Sheets
             state_should_update="true"
             set_last_modified="true"
 
@@ -388,7 +394,7 @@ jobs:
               | tail -n +2 > "$existing_csv"
           fi
 
-          # ---------- decidir si volcar ----------
+          # ---------- decidir dump ----------
           should_dump="false"
           if [ -z "$old_etag" ] || [ "$old_etag" != "$new_etag" ]; then
             if [ "${snapshot_count}" = "0" ]; then
@@ -396,12 +402,13 @@ jobs:
             fi
           fi
 
-          # Caso: no dump y snapshot no existe => salir limpio (sin last_modified)
           if [ "$should_dump" != "true" ] && [ "${snapshot_count}" = "0" ]; then
             echo "final_next_epoch=${final_next_epoch}" >> "$GITHUB_OUTPUT"
             echo "final_lastmod_epoch=" >> "$GITHUB_OUTPUT"
             echo "set_last_modified=false" >> "$GITHUB_OUTPUT"
             echo "state_should_update=false" >> "$GITHUB_OUTPUT"
+            echo "universe_names_calls=0" >> "$GITHUB_OUTPUT"
+            echo "universe_names_missing_ids=0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -411,7 +418,7 @@ jobs:
             exit 1
           fi
 
-          # ---------- detectar IDs faltantes en SDE ----------
+          # ---------- missing ids (SDE) ----------
           missing_ids="$(mktemp)"
 
           ESI_BODY="$body" MISSING_OUT="$missing_ids" SDE_SOLARSYSTEMS_GZ="$SDE_SOLARSYSTEMS_GZ" python3 - <<'PY'
@@ -450,7 +457,10 @@ jobs:
               out.write(str(sid) + "\n")
           PY
 
-          # ---------- fallback /universe/names en bloques <=1000 ----------
+          universe_names_missing_ids="$(wc -l < "$missing_ids" | tr -d ' ')"
+          echo "Missing system_id not in SDE: ${universe_names_missing_ids}"
+
+          # ---------- fallback /universe/names ----------
           names_merged=""
           if [ -s "$missing_ids" ]; then
             split -l 1000 "$missing_ids" /tmp/missing_chunk_
@@ -458,13 +468,16 @@ jobs:
             names_json="$(mktemp)"
             echo "[]" > "$names_json"
 
+            universe_names_calls=0
             for chunk in /tmp/missing_chunk_*; do
               req="$(mktemp)"
               hdr2="$(mktemp)"
               body2="$(mktemp)"
 
               jq -Rs 'split("\n") | map(select(length>0) | tonumber)' "$chunk" > "$req"
+
               esi_request "POST" "${ESI_NAMES_URL}" "$hdr2" "$body2" "$req" ""
+              universe_names_calls=$((universe_names_calls + 1))
 
               tmp="$(mktemp)"
               jq -s '.[0] + .[1]' "$names_json" "$body2" > "$tmp"
@@ -474,7 +487,9 @@ jobs:
             names_merged="$names_json"
           fi
 
-          # ---------- construir NDJSON final (si snapshot existe => solo faltantes) ----------
+          echo "ESI /universe/names calls performed: ${universe_names_calls}"
+
+          # ---------- NDJSON final (diff => solo faltantes) ----------
           ndjson="$(mktemp)"
 
           SDE_SOLARSYSTEMS_GZ="$SDE_SOLARSYSTEMS_GZ" \
@@ -484,7 +499,7 @@ jobs:
           EXISTING_CSV="${existing_csv:-}" \
           NAMES_JSON="${names_merged:-}" \
           python3 - <<'PY'
-          import gzip, json, os, sys
+          import gzip, json, os
 
           sde = os.environ["SDE_SOLARSYSTEMS_GZ"]
           body_path = os.environ["ESI_BODY"]
@@ -529,32 +544,29 @@ jobs:
           data = json.load(open(body_path, "r", encoding="utf-8"))
 
           missing = []
-          rows = []
-          for rec in data:
-            sid = int(rec["system_id"])
-            jumps = int(rec.get("ship_jumps", 0))
-            name = mp.get(sid)
-            if not name:
-              missing.append(sid)
-              continue
-            if existing and name in existing:
-              continue
-            rows.append({
-              "snapshot_ts": snapshot_ts,
-              "solarSystem": name,
-              "ship_jumps": jumps
-            })
+          with open(out_path, "w", encoding="utf-8") as out:
+            for rec in data:
+              sid = int(rec["system_id"])
+              jumps = int(rec.get("ship_jumps", 0))
+              name = mp.get(sid)
+              if not name:
+                missing.append(sid)
+                continue
+              if existing and name in existing:
+                continue
+              out.write(json.dumps({
+                "snapshot_ts": snapshot_ts,
+                "solarSystem": name,
+                "ship_jumps": jumps
+              }, ensure_ascii=False) + "\n")
 
           if missing:
             missing = sorted(set(missing))
             raise SystemExit(f"Unmapped system_id(s) after fallback: {missing[:25]}")
-
-          with open(out_path, "w", encoding="utf-8") as out:
-            for r in rows:
-              out.write(json.dumps(r, ensure_ascii=False) + "\n")
           PY
 
           rowcount="$(wc -l < "$ndjson" | tr -d ' ')"
+          echo "Rows to load into BigQuery: ${rowcount}"
 
           if [ "${rowcount}" -gt 0 ]; then
             bq load \
@@ -564,9 +576,7 @@ jobs:
               "$ndjson"
           fi
 
-          # Reglas de update state/last_modified:
-          # - si volcamos nuevo snapshot con éxito => actualizar etag + last_modified
-          # - si snapshot ya existía => actualizar etag (state wrong) + last_modified
+          # update rules
           if [ "$should_dump" = "true" ]; then
             set_last_modified="true"
             state_should_update="true"
@@ -576,10 +586,13 @@ jobs:
             jq -n --arg etag "$new_etag" '{etag:$etag}' > "${STATE_PATH}"
           fi
 
+          # Outputs (para logs/finalize)
           echo "final_next_epoch=${final_next_epoch}" >> "$GITHUB_OUTPUT"
           echo "final_lastmod_epoch=${final_lastmod_epoch}" >> "$GITHUB_OUTPUT"
           echo "set_last_modified=${set_last_modified}" >> "$GITHUB_OUTPUT"
           echo "state_should_update=${state_should_update}" >> "$GITHUB_OUTPUT"
+          echo "universe_names_calls=${universe_names_calls}" >> "$GITHUB_OUTPUT"
+          echo "universe_names_missing_ids=${universe_names_missing_ids}" >> "$GITHUB_OUTPUT"
 
       # ============================================================
       # 8) Commit state si cambió
@@ -634,6 +647,7 @@ jobs:
 
       # ============================================================
       # 10) FINALIZE SUCCESS — status + next_run + (last_modified si procede)
+      #     + LOG explícito de universe/names
       # ============================================================
       - name: Finalize (completed)
         if: success()
@@ -642,9 +656,13 @@ jobs:
           FINAL_NEXT_EPOCH: ${{ steps.objective.outputs.final_next_epoch }}
           FINAL_LASTMOD_EPOCH: ${{ steps.objective.outputs.final_lastmod_epoch }}
           SET_LAST_MODIFIED: ${{ steps.objective.outputs.set_last_modified }}
+          NAMES_CALLS: ${{ steps.objective.outputs.universe_names_calls }}
+          NAMES_MISSING: ${{ steps.objective.outputs.universe_names_missing_ids }}
         run: |
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
+
+          echo "SUMMARY: missing_ids=${NAMES_MISSING}, universe/names_calls=${NAMES_CALLS}"
 
           serial_next="$(awk "BEGIN { printf \"%.10f\", (${FINAL_NEXT_EPOCH}/86400) + 25569 }")"
 
