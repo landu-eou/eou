@@ -351,8 +351,8 @@ jobs:
           # Para fijar REQUIRED hay que usar un schema JSON file.
           printf '%s' \
             '[{"name":"snapshot_ts","type":"TIMESTAMP","mode":"REQUIRED"},'\
-'{"name":"solarSystem","type":"STRING","mode":"NULLABLE"},'\
-'{"name":"ship_jumps","type":"INT64","mode":"NULLABLE"}]' \
+            '{"name":"solarSystem","type":"STRING","mode":"NULLABLE"},'\
+            '{"name":"ship_jumps","type":"INT64","mode":"NULLABLE"}]' \
             > schema.json
 
           bq --project_id="${GCP_PROJECT_ID}" load --quiet \
