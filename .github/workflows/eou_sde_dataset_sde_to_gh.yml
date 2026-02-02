@@ -2,165 +2,396 @@ name: SDE Dataset (SDE → GH)
 
 on:
   workflow_dispatch:
-    inputs:
-      force_rebuild:
-        description: "Force rebuild even if ETag unchanged (true/false)"
-        required: false
-        default: "false"
-  repository_dispatch:
-    types: [eou_sde_dataset_sde_to_gh]
 
+# Anti-solapamiento (candado) a nivel workflow.
 concurrency:
   group: eou_sde_dataset_sde_to_gh
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: write
+  id-token: write
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     env:
-      WORKFLOW_ID: eou_sde_dataset_sde_to_gh
-      WORKFLOW_NAME: "SDE Dataset (SDE -> GH)"
-      SHEET_ROW: "3"
+      # =====================================================================
+      # 0) CONFIGURACIÓN (ESPECÍFICA DE ESTE WORKFLOW)
+      # =====================================================================
 
-      # Valor por defecto “grande” de expires si faltase algo (fallback)
-      EXPIRES: "86400"
+      # --- Identidad del workflow ---
+      WORKFLOW_FILE: eou_sde_dataset_sde_to_gh.yml
 
-      # Candado anti-solape (segundos). SOLO para lock_until.
-      LOCK_SECONDS: "60"
+      # --- Google Sheets (estado compartido) ---
+      SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
+      SHEET_TAB: workflows
+      SHEETS_WORKFLOW_ROW: "4"
 
-      SDE_URL: "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip"
-      OUT_DIR: "data/gh_sde"
-      META_PATH: "data/gh_sde/eou_sde_dataset_sde_to_gh.json"
+      # --- Locking / planificación ---
+      LOCK_TIME: 120  # segundos
 
-      FORCE_REBUILD: ${{ github.event.inputs.force_rebuild || 'false' }}
+      # --- SDE oficial (CCP) ---
+      SDE_URL: https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip
 
     steps:
+      # =====================================================================
+      # 1) GUARD (COMÚN) — decide si este run debe trabajar o salir (busy)
+      # =====================================================================
+
+      - name: Guard - compute decision
+        id: guard_calc
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          WF_FILE: ${{ env.WORKFLOW_FILE }}
+        run: |
+          set -euo pipefail
+
+          api="https://api.github.com/repos/${REPO}/actions/workflows/${WF_FILE}/runs?per_page=50"
+          json="$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api}")"
+
+          proceed="true"
+
+          this="$(jq --arg rid "$RUN_ID" -c '
+            (.workflow_runs // [])
+            | map(select(.id == ($rid|tonumber)))
+            | .[0] // empty
+          ' <<< "$json")"
+
+          if [ -n "$this" ]; then
+            this_created="$(jq -r '.created_at' <<< "$this")"
+            this_num="$(jq -r '.run_number' <<< "$this")"
+
+            # Si ya había otro run vivo cuando este se creó, este run no trabaja.
+            alive_at_creation="$(jq --arg rid "$RUN_ID" --arg tc "$this_created" '
+              (.workflow_runs // [])
+              | map(
+                  select(.id != ($rid|tonumber))
+                  | select(.created_at < $tc)
+                  | select(.updated_at > $tc)
+                )
+              | length
+            ' <<< "$json")"
+
+            if [ "$alive_at_creation" -gt 0 ]; then
+              proceed="false"
+            else
+              # Si hay varios queued/in_progress, solo trabaja el líder (run_number menor).
+              leader="$(jq '
+                (.workflow_runs // [])
+                | map(select(.status=="queued" or .status=="in_progress"))
+                | map(.run_number)
+                | min // empty
+              ' <<< "$json")"
+
+              if [ -n "$leader" ] && [ "$leader" != "$this_num" ]; then
+                proceed="false"
+              fi
+            fi
+          fi
+
+          echo "$proceed" > /tmp/proceed
+
+      - name: Guard - publish decision
+        id: guard
+        run: |
+          echo "proceed=$(cat /tmp/proceed)" >> "$GITHUB_OUTPUT"
+
+      # =====================================================================
+      # 2) AUTH GOOGLE (COMÚN) — WIF/OIDC (sin claves)
+      # =====================================================================
+      - name: Auth to Google (WIF)
+        id: gcp_auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: |
+            https://www.googleapis.com/auth/spreadsheets
+
+      # =====================================================================
+      # 3) BUSY EXIT (COMÚN)
+      # =====================================================================
+      - name: Exit if skipped (busy)
+        if: steps.guard.outputs.proceed != 'true'
+        run: |
+          echo "Skipped due to overlapping run"
+          exit 0
+
+      # =====================================================================
+      # 4) LOCK INICIAL (COMÚN)
+      # =====================================================================
+      - name: Initial lock (in_progress + next_run as value)
+        if: steps.guard.outputs.proceed == 'true'
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          row="${SHEETS_WORKFLOW_ROW}"
+
+          # next_run (UTC) como serial de Sheets:
+          # serial = epoch_seconds/86400 + 25569  (origen 1899-12-30)
+          epoch="$(date -u -d "+${LOCK_TIME} seconds" +%s)"
+          serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
+
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "{
+              \"valueInputOption\":\"RAW\",
+              \"data\":[
+                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"in_progress\"]]},
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${serial}]]}
+              ]
+            }"
+
+      # =====================================================================
+      # 5) OBJETIVO — SDE (CCP) → repo (commits)
+      # =====================================================================
+
       - name: Checkout
+        if: steps.guard.outputs.proceed == 'true'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Preflight (gateway)
-        shell: bash
-        env:
-          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
+      - name: Setup Python
+        if: steps.guard.outputs.proceed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Fetch remote SDE headers (ETag + Last-Modified)
+        if: steps.guard.outputs.proceed == 'true'
+        id: sde_headers
         run: |
           set -euo pipefail
-          curl -sS -L "$GATEWAY_URL" | jq -e '.service=="eou_gateway_webapp"' >/dev/null
+          hdrs="$(curl -fsSI --retry 3 --retry-delay 2 --retry-connrefused "${SDE_URL}")"
 
-      - name: START (gateway lock)
-        id: start
-        shell: bash
-        env:
-          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
-          GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
-        run: |
-          set -euo pipefail
-          NOW_MS="$(date -u +%s%3N)"
-          CONCLUSION="-"
+          etag="$(awk -F': ' 'tolower($1)=="etag"{print $2}' <<< "$hdrs" | tr -d '\r' | tail -n 1)"
+          lm="$(awk -F': ' 'tolower($1)=="last-modified"{print $2}' <<< "$hdrs" | tr -d '\r' | tail -n 1)"
 
-          CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|start|${EXPIRES}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
-          SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-
-          WF_NAME_ENC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")"
-          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ENC}&row=${SHEET_ROW}&phase=start&expires=${EXPIRES}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
-
-          RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
-          echo "$RESP" | jq -e . >/dev/null
-
-          OK="$(echo "$RESP" | jq -r '.ok // false')"
-          if [[ "$OK" != "true" ]]; then
-            echo "Gateway error on START: $RESP"
+          if [ -z "$etag" ] || [ -z "$lm" ]; then
+            echo "Missing ETag/Last-Modified headers" >&2
             exit 1
           fi
 
-          LOCKED="$(echo "$RESP" | jq -r '.locked // false')"
-          echo "locked=$LOCKED" >> "$GITHUB_OUTPUT"
-          echo "Gateway lock status: locked=$LOCKED"
+          lm_epoch="$(date -u -d "$lm" +%s)"
 
-      - name: Build / Update datasets (SDE -> repo)
-        if: steps.start.outputs.locked != 'true'
-        id: build
-        shell: bash
+          echo "etag=$etag" >> "$GITHUB_OUTPUT"
+          echo "last_modified=$lm" >> "$GITHUB_OUTPUT"
+          echo "last_modified_epoch=$lm_epoch" >> "$GITHUB_OUTPUT"
+
+      - name: Read local state (states/sde.json)
+        if: steps.guard.outputs.proceed == 'true'
+        id: sde_state
         run: |
           set -euo pipefail
-          echo "FORCE_REBUILD=$FORCE_REBUILD"
-          bash ops/gh_sde/eou_sde_dataset_sde_to_gh.sh
 
-      - name: Commit changes (only if updated)
-        if: steps.start.outputs.locked != 'true' && steps.build.outputs.updated == 'true'
-        shell: bash
+          if [ -f "states/sde.json" ]; then
+            etag_local="$(python - <<'PY'
+            import json
+            from pathlib import Path
+            p = Path('states/sde.json')
+            try:
+                data = json.loads(p.read_text(encoding='utf-8'))
+                print(data.get('etag') or '')
+            except Exception:
+                print('')
+            PY
+                        )"
+                      else
+                        etag_local=""
+                      fi
+            
+                      echo "etag_local=$etag_local" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether to refresh SDE outputs
+        if: steps.guard.outputs.proceed == 'true'
+        id: sde_decide
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
+          remote="${{ steps.sde_headers.outputs.etag }}"
+          local="${{ steps.sde_state.outputs.etag_local }}"
+
+          needs_update="false"
+          if [ -z "$local" ] || [ "$local" != "$remote" ]; then
+            needs_update="true"
+          fi
+
+          echo "needs_update=$needs_update" >> "$GITHUB_OUTPUT"
+
+      - name: Build SDE outputs (JSONL.GZ)
+        if: steps.guard.outputs.proceed == 'true' && steps.sde_decide.outputs.needs_update == 'true'
+        id: sde_build
+        env:
+          REMOTE_ETAG: ${{ steps.sde_headers.outputs.etag }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p .tmp/sde
+          mkdir -p data/sde states
+
+          echo "Downloading SDE ZIP..."
+          curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused \
+            -o .tmp/sde/sde.zip \
+            "${SDE_URL}"
+
+          echo "Building outputs..."
+          python scripts/sde/eou_sde_dataset_sde_to_gh_outputs.py \
+            --zip .tmp/sde/sde.zip \
+            --out .tmp/sde/out
+
+          # Solo si se generó todo correctamente, se actualiza el state.
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          
+          etag = os.environ.get('REMOTE_ETAG', '')
+          Path('states').mkdir(parents=True, exist_ok=True)
+          Path('states/sde.json').write_text(
+              json.dumps({'etag': etag}, ensure_ascii=False, indent=1) + "\n",
+              encoding='utf-8'
+          )
+          PY
+
+          # Reemplazo "de una sola vez" (sin commits parciales)
+          for f in regions constellations solarsystems stations stargates types; do
+            mv -f ".tmp/sde/out/${f}.jsonl.gz" "data/sde/${f}.jsonl.gz"
+          done
+
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push (single commit)
+        if: steps.guard.outputs.proceed == 'true' && steps.sde_build.outputs.updated == 'true'
+        run: |
+          set -euo pipefail
+
+          git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add data/gh_sde
+          git add data/sde/*.jsonl.gz states/sde.json
+
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
 
-          git commit -m "chore(gh_sde): update SDE mappings"
+          git commit -m "SDE: refresh datasets"
+          git pull --rebase --autostash
           git push
 
-      - name: FINISH (gateway)
-        if: always() && steps.start.outputs.locked != 'true'
-        shell: bash
+      # =====================================================================
+      # 6) FINALIZE (COMÚN + reglas de next_run + last_modified)
+      # =====================================================================
+
+      - name: Finalize (completed)
+        if: steps.guard.outputs.proceed == 'true' && success()
         env:
-          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
-          GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+          UPDATED: ${{ steps.sde_build.outputs.updated }}
+          LM_EPOCH: ${{ steps.sde_headers.outputs.last_modified_epoch }}
         run: |
           set -euo pipefail
+          row="${SHEETS_WORKFLOW_ROW}"
 
-          STATUS="${{ job.status }}"
-          case "$STATUS" in
-            success)   CONCLUSION="success" ;;
-            failure)   CONCLUSION="failure" ;;
-            cancelled) CONCLUSION="cancelled" ;;
-            *)         CONCLUSION="neutral" ;;
-          esac
+          now_epoch="$(date -u +%s)"
+          now_hour="$(date -u +%H)"
 
-          NOW_MS="$(date -u +%s%3N)"
+          # hh:mm:ss = Last-Modified + 30m
+          t_hms="$(date -u -d "@$((${LM_EPOCH}+1800))" +%H:%M:%S)"
+          today="$(date -u +%Y-%m-%d)"
+          cand_epoch="$(date -u -d "${today}T${t_hms}Z" +%s)"
+          if [ "$cand_epoch" -le "$now_epoch" ]; then
+            cand_epoch="$(date -u -d "${today}T${t_hms}Z +1 day" +%s)"
+          fi
 
-          # --- Scheduling / expires ---
-          # Regla especial: en failure, reintentar pronto (15 minutos).
-          if [[ "$CONCLUSION" == "failure" ]]; then
-            EXPIRES_SEC="900"
+          if [ "${UPDATED:-}" = "true" ]; then
+            next_epoch="$cand_epoch"
           else
-            # Usamos expires_sec calculado en el script (robusto).
-            EXPIRES_SEC="${{ steps.build.outputs.expires_sec }}"
-            if [[ -z "${EXPIRES_SEC:-}" ]]; then
-              EXPIRES_SEC="${EXPIRES}"
+            if [ "$now_hour" -ge 10 ] && [ "$now_hour" -lt 15 ]; then
+              next_epoch="$((now_epoch + 3600))"
+            else
+              next_epoch="$cand_epoch"
             fi
           fi
 
-          # --- Lock release ---
-          # Para “liberar” inmediatamente al terminar, enviamos lock_seconds=0 en FINISH.
-          LOCK_SECONDS_FINISH="0"
+          next_serial="$(awk "BEGIN { printf \"%.10f\", (${next_epoch}/86400) + 25569 }")"
+          lm_serial="$(awk "BEGIN { printf \"%.10f\", (${LM_EPOCH}/86400) + 25569 }")"
 
-          CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|finish|${EXPIRES_SEC}|${LOCK_SECONDS_FINISH}|${CONCLUSION}|${NOW_MS}"
-          SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-
-          WF_NAME_ENC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")"
-          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ENC}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES_SEC}&lock_seconds=${LOCK_SECONDS_FINISH}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
-
-          RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
-          echo "$RESP" | jq -e . >/dev/null
-
-          OK="$(echo "$RESP" | jq -r '.ok // false')"
-          if [[ "$OK" != "true" ]]; then
-            echo "Gateway error on FINISH: $RESP"
-            exit 1
+          if [ "${UPDATED:-}" = "true" ]; then
+            payload="{
+              \"valueInputOption\":\"RAW\",
+              \"data\":[
+                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"completed\"]]},
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${next_serial}]]},
+                {\"range\":\"${SHEET_TAB}!I${row}:I${row}\",\"values\":[[${lm_serial}]]}
+              ]
+            }"
+          else
+            payload="{
+              \"valueInputOption\":\"RAW\",
+              \"data\":[
+                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"completed\"]]},
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${next_serial}]]}
+              ]
+            }"
           fi
 
-      - name: Locked - no-op
-        if: steps.start.outputs.locked == 'true'
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "$payload"
+
+      - name: Finalize (failed)
+        if: steps.guard.outputs.proceed == 'true' && failure()
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+          LM_EPOCH: ${{ steps.sde_headers.outputs.last_modified_epoch }}
         run: |
-          echo "Locked=true => no-op. Not running build/commit/finish."
-          exit 0
+          set -euo pipefail
+          row="${SHEETS_WORKFLOW_ROW}"
+
+          now_epoch="$(date -u +%s)"
+          now_hour="$(date -u +%H)"
+
+          # hh:mm:ss = Last-Modified + 30m
+          t_hms="$(date -u -d "@$((${LM_EPOCH}+1800))" +%H:%M:%S)"
+          today="$(date -u +%Y-%m-%d)"
+          cand_epoch="$(date -u -d "${today}T${t_hms}Z" +%s)"
+          if [ "$cand_epoch" -le "$now_epoch" ]; then
+            cand_epoch="$(date -u -d "${today}T${t_hms}Z +1 day" +%s)"
+          fi
+
+          # Si NO se han volcado datos (por cualquier motivo) y hora 10-15 => now+1h
+          if [ "$now_hour" -ge 10 ] && [ "$now_hour" -lt 15 ]; then
+            next_epoch="$((now_epoch + 3600))"
+          else
+            next_epoch="$cand_epoch"
+          fi
+
+          next_serial="$(awk "BEGIN { printf \"%.10f\", (${next_epoch}/86400) + 25569 }")"
+
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "{
+              \"valueInputOption\":\"RAW\",
+              \"data\":[
+                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"failed\"]]},
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${next_serial}]]}
+              ]
+            }"
