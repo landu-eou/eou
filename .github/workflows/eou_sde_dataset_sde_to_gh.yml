@@ -162,7 +162,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # --- FIX: obtener headers finales siguiendo redirects, sin heredoc Python ---
+      # Headers robustos: follow redirects y tomar el último bloque HTTP
       - name: Fetch remote SDE headers (ETag + Last-Modified)
         if: steps.guard.outputs.proceed == 'true'
         id: sde_headers
@@ -174,8 +174,6 @@ jobs:
             -L -D "$tmp" -o /dev/null \
             "${SDE_URL}"
 
-          # Extrae ETag y Last-Modified DEL ÚLTIMO BLOQUE HTTP (tras redirects).
-          # Reseteamos cuando vemos una línea HTTP/... (inicio de bloque).
           etag="$(
             awk '
               BEGIN { IGNORECASE=1; etag=""; }
@@ -212,17 +210,13 @@ jobs:
         id: sde_state
         run: |
           set -euo pipefail
+
           if [ -f "states/sde.json" ]; then
-            etag_local="$(python -c 'import json; from pathlib import Path; 
-p=Path("states/sde.json"); 
-try: 
-  d=json.loads(p.read_text(encoding="utf-8")); 
-  print(d.get("etag") or "") 
-except Exception: 
-  print("")')"
+            etag_local="$(jq -r '.etag // ""' states/sde.json 2>/dev/null || echo "")"
           else
             etag_local=""
           fi
+
           echo "etag_local=$etag_local" >> "$GITHUB_OUTPUT"
 
       - name: Decide whether to refresh SDE outputs
@@ -231,7 +225,6 @@ except Exception:
         run: |
           set -euo pipefail
 
-          # workflow_dispatch input llega como string ("true"/"false")
           force="${{ github.event.inputs.force_refresh }}"
           if [ "$force" = "true" ]; then
             echo "needs_update=true" >> "$GITHUB_OUTPUT"
@@ -253,12 +246,10 @@ except Exception:
       - name: Build SDE outputs (JSONL.GZ)
         if: steps.guard.outputs.proceed == 'true' && steps.sde_decide.outputs.needs_update == 'true'
         id: sde_build
-        env:
-          REMOTE_ETAG: ${{ steps.sde_headers.outputs.etag }}
         run: |
           set -euo pipefail
 
-          mkdir -p .tmp/sde
+          mkdir -p .tmp/sde .tmp/sde/out
           mkdir -p data/sde states
 
           echo "Downloading SDE ZIP..."
@@ -271,11 +262,10 @@ except Exception:
             --zip .tmp/sde/sde.zip \
             --out .tmp/sde/out
 
-          python -c 'import json, os; from pathlib import Path
-etag=os.environ.get("REMOTE_ETAG","")
-Path("states").mkdir(parents=True, exist_ok=True)
-Path("states/sde.json").write_text(json.dumps({"etag": etag}, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")'
+          # Actualiza states/sde.json con el ETag remoto de forma segura (sin Python)
+          jq -n --arg etag "${{ steps.sde_headers.outputs.etag }}" '{etag:$etag}' > states/sde.json
 
+          # Reemplazo atómico "de una sola vez"
           for f in regions constellations solarsystems stations stargates types; do
             mv -f ".tmp/sde/out/${f}.jsonl.gz" "data/sde/${f}.jsonl.gz"
           done
