@@ -231,21 +231,21 @@ jobs:
           
                     if [ -f "states/sde.json" ]; then
                       etag_local="$(python - <<'PY'
-          import json
-          from pathlib import Path
-          p = Path('states/sde.json')
-          try:
-              data = json.loads(p.read_text(encoding='utf-8'))
-              print(data.get('etag') or '')
-          except Exception:
-              print('')
-          PY
-            )"
-          else
-            etag_local=""
-          fi
-
-          echo "etag_local=$etag_local" >> "$GITHUB_OUTPUT"
+                      import json
+                      from pathlib import Path
+                      p = Path('states/sde.json')
+                      try:
+                          data = json.loads(p.read_text(encoding='utf-8'))
+                          print(data.get('etag') or '')
+                      except Exception:
+                          print('')
+                      PY
+                        )"
+                      else
+                        etag_local=""
+                      fi
+            
+                      echo "etag_local=$etag_local" >> "$GITHUB_OUTPUT"
 
       - name: Decide whether to refresh SDE outputs
         if: steps.guard.outputs.proceed == 'true'
