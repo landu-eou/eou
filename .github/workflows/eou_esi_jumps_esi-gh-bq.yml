@@ -31,7 +31,6 @@ jobs:
       BQ_DATASET: eou
       BQ_TABLE: system_jumps
 
-      # GitHub API base
       GH_API: https://api.github.com
 
     steps:
@@ -49,7 +48,6 @@ jobs:
           auth_hdr="Authorization: Bearer ${GH_TOKEN}"
           acc_hdr="Accept: application/vnd.github+json"
 
-          # Workflow id (permite usar filename como workflow_id según docs)
           wf_json="$(curl -sS -H "${auth_hdr}" -H "${acc_hdr}" "${GH_API}/repos/${repo}/actions/workflows/${WORKFLOW_FILE}")"
           wf_id="$(echo "${wf_json}" | jq -r '.id')"
           if [[ -z "${wf_id}" || "${wf_id}" == "null" ]]; then
@@ -57,7 +55,6 @@ jobs:
             exit 0
           fi
 
-          # Self run metadata
           self_json="$(curl -sS -H "${auth_hdr}" -H "${acc_hdr}" "${GH_API}/repos/${repo}/actions/runs/${run_id}")"
           self_created="$(echo "${self_json}" | jq -r '.created_at')"
           if [[ -z "${self_created}" || "${self_created}" == "null" ]]; then
@@ -68,12 +65,10 @@ jobs:
           runs_json="$(curl -sS -H "${auth_hdr}" -H "${acc_hdr}" \
             "${GH_API}/repos/${repo}/actions/workflows/${wf_id}/runs?per_page=50")"
 
-          # Si por cualquier razón hay otro in_progress distinto => no trabajo
           other_inprog="$(echo "${runs_json}" | jq -r --arg rid "${run_id}" '
             [.workflow_runs[] | select(.status=="in_progress" and (.id|tostring)!=$rid)] | length
           ')"
 
-          # Anti-cola: si existió un run anterior que terminó OK DESPUÉS de que este run fuese creado, este run es redundante.
           stale_by_success="$(echo "${runs_json}" | jq -r --arg created "${self_created}" --arg rid "${run_id}" '
             [
               .workflow_runs[]
@@ -137,7 +132,8 @@ jobs:
 
           local_etag=""
           if [[ "${state_exists}" == "true" ]]; then
-            local_etag="$(jq -r '.etag // empty' "${STATE_PATH}" 2>/dev/null || true)"
+            # (opcional) normalizar posibles comillas en state
+            local_etag="$(jq -r '.etag // empty' "${STATE_PATH}" 2>/dev/null | sed -E 's/^"//; s/"$//' || true)"
           fi
           echo "local_etag=${local_etag}" >> "${GITHUB_OUTPUT}"
 
@@ -151,7 +147,13 @@ jobs:
               "${ESI_URL}")"
           fi
 
-          remote_etag="$(grep -i '^etag:' "${headers_file}" | tail -1 | sed -E 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//' | tr -d '\r' || true)"
+          # Normalizar comillas en ETag del header
+          remote_etag="$(grep -i '^etag:' "${headers_file}" | tail -1 \
+            | sed -E 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//' \
+            | tr -d '\r' \
+            | sed -E 's/^"//; s/"$//' \
+            || true)"
+
           last_mod="$(grep -i '^last-modified:' "${headers_file}" | tail -1 | sed -E 's/^[Ll]ast-[Mm]odified:[[:space:]]*//' | tr -d '\r' || true)"
           expires="$(grep -i '^expires:' "${headers_file}" | tail -1 | sed -E 's/^[Ee]xpires:[[:space:]]*//' | tr -d '\r' || true)"
 
@@ -164,7 +166,6 @@ jobs:
           lm_iso="$(date -u -d "@${lm_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
           lm_serial="$(to_serial "${lm_epoch}")"
 
-          # Expires es clave para respetar caching; si faltase, fallback conservador: Last-Modified + 3600s
           if [[ -n "${expires}" ]]; then
             exp_epoch="$(date -u -d "${expires}" +%s)"
           else
@@ -217,11 +218,11 @@ jobs:
           http_code="${{ steps.esi.outputs.http_code }}"
           state_exists="${{ steps.esi.outputs.state_exists }}"
 
-          count_json="$(bq --project_id="${GCP_PROJECT_ID}" query --quiet --format=json --use_legacy_sql=false \
+          # FIX A: COUNT robusto: CSV headless (sin jq)
+          snap_count="$(bq --project_id="${GCP_PROJECT_ID}" query --quiet --use_legacy_sql=false --format=csv --headless \
             "SELECT COUNT(1) AS c
              FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
              WHERE snapshot_ts = TIMESTAMP('${lm_iso}')")"
-          snap_count="$(echo "${count_json}" | jq -r '.[0].c')"
 
           mode="noop"
           if [[ "${snap_count}" == "0" ]]; then
@@ -244,7 +245,6 @@ jobs:
 
           update_state="false"
           if [[ "${state_exists}" != "true" || -z "${local_etag}" || "${local_etag}" != "${remote_etag}" ]]; then
-            # Solo se aplicará si el job llega a éxito (más abajo)
             update_state="true"
           fi
 
@@ -264,14 +264,10 @@ jobs:
           mode="${{ steps.mode.outputs.mode }}"
           lm_iso="${{ steps.esi.outputs.last_modified_iso }}"
 
-          # 1) Descarga body (siempre 200 en este GET, incluso si antes obtuvimos 304 en condicional)
           curl -sS -L "${ESI_URL}" -o esi_body.json
 
-          # 2) Build mapping solarSystemID -> solarSystem (JSON object)
-          #    (si falta algún mapping para un system_id del body, jq error() aborta aquí y NO se tocará Sheets/estado/BQ)
           gzip -cd "${SDE_SOLARSYSTEMS_GZ}" | jq -s 'map({(.solarSystemID|tostring): .solarSystem}) | add' > sde_map.json
 
-          # 3) En reconcile: construir set de solarSystem ya existentes en ese snapshot_ts
           if [[ "${mode}" == "reconcile" ]]; then
             existing_list="$(bq --project_id="${GCP_PROJECT_ID}" query --quiet --format=json --use_legacy_sql=false \
               "SELECT solarSystem
@@ -282,7 +278,6 @@ jobs:
             echo '{}' > existing_map.json
           fi
 
-          # 4) Generar NDJSON final (y validar mapping). ship_jumps a INT.
           if [[ "${mode}" == "reconcile" ]]; then
             jq -c --arg ts "${lm_iso}" --argfile map sde_map.json --argfile exist existing_map.json '
               .[] |
@@ -349,7 +344,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Append-only (1 load job por run). Tabla ya existe y está particionada/clusterizada.
           bq --project_id="${GCP_PROJECT_ID}" load --quiet \
             --source_format=NEWLINE_DELIMITED_JSON \
             "${BQ_DATASET}.${BQ_TABLE}" \
@@ -372,7 +366,6 @@ jobs:
 
           git add "${STATE_PATH}"
 
-          # Evita commits vacíos
           if git diff --cached --quiet; then
             exit 0
           fi
