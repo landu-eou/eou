@@ -134,6 +134,68 @@ jobs:
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
 
+      # Shared Sheets helpers (single source of truth for:
+      # - send_batch()
+      # - build_body(status,next_run,include_last_modified,last_modified)
+      - name: Sheets - create shared helpers
+        if: ${{ steps.guard.outputs.proceed == 'true' }}
+        id: sheets_helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          lib=".sheets_lib.sh"
+
+          printf '%s\n' \
+            'sheets_send_batch() {' \
+            '  # args: $1 = body json (string)' \
+            '  curl -sS -X POST \' \
+            '    -H "Authorization: Bearer ${ACCESS_TOKEN}" \' \
+            '    -H "Content-Type: application/json" \' \
+            '    "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \' \
+            '    -d "$1" >/dev/null' \
+            '}' \
+            '' \
+            'sheets_build_body() {' \
+            '  # args:' \
+            '  #  $1 = status (string)' \
+            '  #  $2 = next_run (number-as-string; must be valid JSON number)' \
+            '  #  $3 = include_last_modified ("true"/"false")' \
+            '  #  $4 = last_modified (number-as-string; required if include_last_modified=true)' \
+            '  if [[ "$3" == "true" ]]; then' \
+            '    jq -n \' \
+            '      --arg tab "${SHEET_TAB}" \' \
+            '      --arg row "${SHEETS_WORKFLOW_ROW}" \' \
+            '      --arg status "$1" \' \
+            '      --argjson next_run "$2" \' \
+            '      --argjson last_modified "$4" \' \
+            '      '"'"'{'"'"' \
+            '        valueInputOption: "RAW",' \
+            '        data: [' \
+            '          {range: ($tab + "!B" + $row), values: [[ $status ]]},' \
+            '          {range: ($tab + "!D" + $row), values: [[ $next_run ]]},' \
+            '          {range: ($tab + "!I" + $row), values: [[ $last_modified ]]}' \
+            '        ]' \
+            '      '"'"'}'"'"'' \
+            '  else' \
+            '    jq -n \' \
+            '      --arg tab "${SHEET_TAB}" \' \
+            '      --arg row "${SHEETS_WORKFLOW_ROW}" \' \
+            '      --arg status "$1" \' \
+            '      --argjson next_run "$2" \' \
+            '      '"'"'{'"'"' \
+            '        valueInputOption: "RAW",' \
+            '        data: [' \
+            '          {range: ($tab + "!B" + $row), values: [[ $status ]]},' \
+            '          {range: ($tab + "!D" + $row), values: [[ $next_run ]]}' \
+            '        ]' \
+            '      '"'"'}'"'"'' \
+            '  fi' \
+            '}' \
+            > "${lib}"
+
+          echo "lib=${lib}" >> "${GITHUB_OUTPUT}"
+
       - name: Read state + fetch ESI headers (ETag/Expires/Last-Modified)
         if: ${{ steps.guard.outputs.proceed == 'true' }}
         id: esi
@@ -322,10 +384,6 @@ jobs:
           echo "load_lines=${load_lines}" >> "${GITHUB_OUTPUT}"
           echo "prepared=true" >> "${GITHUB_OUTPUT}"
 
-      # ============================================================
-      # Sheets helper: local function send_batch(body_json)
-      # - Compacta curl + headers
-      # ============================================================
       - name: Sheets - initial lock (in_progress + next_run = now + LOCK_TIME)
         if: ${{ steps.guard.outputs.proceed == 'true' && (steps.mode.outputs.mode == 'noop' || steps.prep.outputs.prepared == 'true') }}
         id: sheets_lock
@@ -334,33 +392,11 @@ jobs:
           ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
         run: |
           set -euo pipefail
-
-          send_batch() {
-            curl -sS -X POST \
-              -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-              -H "Content-Type: application/json" \
-              "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
-              -d "$1" >/dev/null
-          }
-
-          make_body_lock() {
-            jq -n \
-              --arg tab "${SHEET_TAB}" \
-              --arg row "${SHEETS_WORKFLOW_ROW}" \
-              --arg status "in_progress" \
-              --argjson next_run "$1" \
-              '{
-                valueInputOption: "RAW",
-                data: [
-                  {range: ($tab + "!B" + $row), values: [[ $status ]]},
-                  {range: ($tab + "!D" + $row), values: [[ $next_run ]]}
-                ]
-              }'
-          }
+          source "${{ steps.sheets_helpers.outputs.lib }}"
 
           next_run="${{ steps.boot.outputs.lock_serial }}"
-          body="$(make_body_lock "${next_run}")"
-          send_batch "${body}"
+          body="$(sheets_build_body "in_progress" "${next_run}" "false" "0")"
+          sheets_send_batch "${body}"
 
           echo "locked=true" >> "${GITHUB_OUTPUT}"
 
@@ -415,51 +451,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           set -euo pipefail
-
-          send_batch() {
-            curl -sS -X POST \
-              -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-              -H "Content-Type: application/json" \
-              "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
-              -d "$1" >/dev/null
-          }
-
-          make_body_finalize() {
-            # args:
-            #  $1 = status (string)
-            #  $2 = next_run (number)
-            #  $3 = include_last_modified ("true"/"false")
-            #  $4 = last_modified (number, only if include_last_modified=true)
-            if [[ "$3" == "true" ]]; then
-              jq -n \
-                --arg tab "${SHEET_TAB}" \
-                --arg row "${SHEETS_WORKFLOW_ROW}" \
-                --arg status "$1" \
-                --argjson next_run "$2" \
-                --argjson last_modified "$4" \
-                '{
-                  valueInputOption: "RAW",
-                  data: [
-                    {range: ($tab + "!B" + $row), values: [[ $status ]]},
-                    {range: ($tab + "!D" + $row), values: [[ $next_run ]]},
-                    {range: ($tab + "!I" + $row), values: [[ $last_modified ]]}
-                  ]
-                }'
-            else
-              jq -n \
-                --arg tab "${SHEET_TAB}" \
-                --arg row "${SHEETS_WORKFLOW_ROW}" \
-                --arg status "$1" \
-                --argjson next_run "$2" \
-                '{
-                  valueInputOption: "RAW",
-                  data: [
-                    {range: ($tab + "!B" + $row), values: [[ $status ]]},
-                    {range: ($tab + "!D" + $row), values: [[ $next_run ]]}
-                  ]
-                }'
-            fi
-          }
+          source "${{ steps.sheets_helpers.outputs.lib }}"
 
           status="failed"
           include_last_modified="false"
@@ -476,9 +468,9 @@ jobs:
           fi
 
           if [[ "${include_last_modified}" == "true" ]]; then
-            body="$(make_body_finalize "${status}" "${next_run}" "true" "${last_modified}")"
+            body="$(sheets_build_body "${status}" "${next_run}" "true" "${last_modified}")"
           else
-            body="$(make_body_finalize "${status}" "${next_run}" "false" "0")"
+            body="$(sheets_build_body "${status}" "${next_run}" "false" "0")"
           fi
 
-          send_batch "${body}"
+          sheets_send_batch "${body}"
