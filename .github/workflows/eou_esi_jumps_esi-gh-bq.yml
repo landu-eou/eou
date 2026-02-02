@@ -279,7 +279,7 @@ jobs:
             echo '{}' > existing_map.json
           fi
 
-          # FIX: --argfile -> --slurpfile (y acceso con [0])
+          # --slurpfile (y acceso con [0]) para leer el JSON completo como un array con 1 elemento
           if [[ "${mode}" == "reconcile" ]]; then
             jq -c --arg ts "${lm_iso}" --slurpfile map sde_map.json --slurpfile exist existing_map.json '
               .[] |
@@ -338,6 +338,7 @@ jobs:
 
           echo "locked=true" >> "${GITHUB_OUTPUT}"
 
+      # ✅ FIX: schema JSON temporal para mantener snapshot_ts REQUIRED (coincide con TIMESTAMP NOT NULL)
       - name: BigQuery load (single batch)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' && steps.prep.outputs.load_lines != '0' }}
         env:
@@ -346,11 +347,19 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Cuando el schema se pasa inline "a:TYPE,b:TYPE", BigQuery asume mode=NULLABLE.
+          # Para fijar REQUIRED hay que usar un schema JSON file.
+          printf '%s' \
+            '[{"name":"snapshot_ts","type":"TIMESTAMP","mode":"REQUIRED"},'\
+'{"name":"solarSystem","type":"STRING","mode":"NULLABLE"},'\
+'{"name":"ship_jumps","type":"INT64","mode":"NULLABLE"}]' \
+            > schema.json
+
           bq --project_id="${GCP_PROJECT_ID}" load --quiet \
             --source_format=NEWLINE_DELIMITED_JSON \
             "${BQ_DATASET}.${BQ_TABLE}" \
             load.ndjson \
-            snapshot_ts:TIMESTAMP,solarSystem:STRING,ship_jumps:INTEGER
+            schema.json
 
       - name: Update state etag (commit to repo)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.sheets_lock.outputs.locked == 'true' && steps.mode.outputs.update_state == 'true' }}
