@@ -3,17 +3,11 @@ name: ESI System Jumps (ESI → GH → BQ)
 on:
   workflow_dispatch:
 
-# Permisos mínimos:
-# - actions:read -> Guard via REST (listar runs del workflow)
-# - contents:write -> commit del state (states/system_jumps.json)
-# - id-token:write -> WIF/OIDC hacia Google
 permissions:
   actions: read
   contents: write
   id-token: write
 
-# Candado oficial GitHub: evita refresh simultáneo.
-# cancel-in-progress:false -> no cancela el run que está trabajando; los duplicados salen por el "guard".
 concurrency:
   group: eou_esi_jumps_esi-gh-bq
   cancel-in-progress: false
@@ -24,32 +18,24 @@ jobs:
     timeout-minutes: 15
 
     env:
-      # Identidad del workflow para el Guard (anti-cola)
       WORKFLOW_FILE: eou_esi_jumps_esi-gh-bq.yml
       GH_API: https://api.github.com
 
-      # Google Sheets (control de estado operativo)
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "5"
-      LOCK_TIME: "60" # segundos
+      LOCK_TIME: "60"
 
-      # ESI + estado local en repo
       ESI_URL: https://esi.evetech.net/universe/system_jumps
       STATE_PATH: states/system_jumps.json
       SDE_SOLARSYSTEMS_GZ: data/sde/solarsystems.jsonl.gz
 
-      # BigQuery
       BQ_DATASET: eou
       BQ_TABLE: system_jumps
 
     steps:
       # ============================================================
       # 0) GUARD (ANTI-COLA)
-      # - Si hay otro run en progreso, este run no hace trabajo.
-      # - Si un run anterior terminó con éxito "después" de que este run fuera creado,
-      #   este run se considera redundante y sale sin hacer trabajo.
-      # Usa exclusivamente endpoints oficiales REST de GitHub Actions.
       # ============================================================
       - name: Guard - decide proceed (anti-cola)
         id: guard
@@ -84,12 +70,10 @@ jobs:
           runs_json="$(curl -sS -H "${auth_hdr}" -H "${acc_hdr}" \
             "${GH_API}/repos/${repo}/actions/workflows/${wf_id}/runs?per_page=50")"
 
-          # Existe otro run in_progress => no trabajo
           other_inprog="$(echo "${runs_json}" | jq -r --arg rid "${run_id}" '
             [.workflow_runs[] | select(.status=="in_progress" and (.id|tostring)!=$rid)] | length
           ')"
 
-          # Un run anterior (created_at < self_created) terminó success "después" de self_created => este run es stale
           stale_by_success="$(echo "${runs_json}" | jq -r --arg created "${self_created}" --arg rid "${run_id}" '
             [
               .workflow_runs[]
@@ -110,11 +94,32 @@ jobs:
         run: echo "Queued/duplicate dispatch detected. Exiting without work."
 
       # ============================================================
-      # 1) BOOTSTRAP
-      # - Checkout: necesario para leer states/ y SDE mapping
-      # - Auth Google por WIF/OIDC (sin keys)
-      # - setup-gcloud: bq CLI disponible
+      # 1) BOOTSTRAP (compactación)
+      # - Calcula RUN_START_EPOCH (para fallback de error)
+      # - Calcula LOCK_SERIAL = now + LOCK_TIME (Sheets lock inicial)
+      # - Precalcula FAIL_PLUS5_SERIAL = run_start + 5min (Sheets finalize en fallo)
+      # Esto elimina duplicación de to_serial.
       # ============================================================
+      - name: Bootstrap - compute epoch and Sheets serials
+        if: ${{ steps.guard.outputs.proceed == 'true' }}
+        id: boot
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          to_serial() {
+            awk -v s="$1" 'BEGIN{printf "%.10f", (s/86400.0)+25569.0}'
+          }
+
+          run_start_epoch="$(date -u +%s)"
+          echo "RUN_START_EPOCH=${run_start_epoch}" >> "${GITHUB_ENV}"
+
+          lock_epoch="$((run_start_epoch + LOCK_TIME))"
+          fail_next_epoch="$((run_start_epoch + 300))"
+
+          echo "lock_serial=$(to_serial "${lock_epoch}")" >> "${GITHUB_OUTPUT}"
+          echo "fail_plus5_serial=$(to_serial "${fail_next_epoch}")" >> "${GITHUB_OUTPUT}"
+
       - name: Checkout
         if: ${{ steps.guard.outputs.proceed == 'true' }}
         uses: actions/checkout@v4
@@ -140,11 +145,11 @@ jobs:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
 
       # ============================================================
-      # 2) ESI HEADERS + RELOJES (LOCK / EXPIRES)
+      # 2) ESI HEADERS
       # - Lee state local (etag)
-      # - Pide ESI con If-None-Match si hay etag
-      # - Extrae headers: ETag / Last-Modified / Expires
-      # - Calcula serials (Sheets) para lock y next_run
+      # - Pide headers con If-None-Match si procede
+      # - Deriva snapshot_ts (ISO) y serial para last_modified
+      # - Deriva next_run por éxito: Expires + 5min (serial)
       # ============================================================
       - name: Read state + fetch ESI headers (ETag/Expires/Last-Modified)
         if: ${{ steps.guard.outputs.proceed == 'true' }}
@@ -156,9 +161,6 @@ jobs:
           to_serial() {
             awk -v s="$1" 'BEGIN{printf "%.10f", (s/86400.0)+25569.0}'
           }
-
-          run_start_epoch="$(date -u +%s)"
-          echo "RUN_START_EPOCH=${run_start_epoch}" >> "${GITHUB_ENV}"
 
           state_exists="false"
           if [[ -f "${STATE_PATH}" ]]; then state_exists="true"; fi
@@ -203,7 +205,6 @@ jobs:
           lm_iso="$(date -u -d "@${lm_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
           lm_serial="$(to_serial "${lm_epoch}")"
 
-          # next_run por éxito se calcula con Expires + 5min. Si Expires falta, fallback conservador.
           if [[ -n "${expires}" ]]; then
             exp_epoch="$(date -u -d "${expires}" +%s)"
           else
@@ -212,21 +213,11 @@ jobs:
           exp_plus5_epoch="$((exp_epoch + 300))"
           exp_plus5_serial="$(to_serial "${exp_plus5_epoch}")"
 
-          # Lock inicial (in_progress) = now + LOCK_TIME
-          lock_seconds="${LOCK_TIME}"
-          lock_epoch="$((run_start_epoch + lock_seconds))"
-          lock_serial="$(to_serial "${lock_epoch}")"
-
           echo "remote_etag=${remote_etag}" >> "${GITHUB_OUTPUT}"
           echo "last_modified_iso=${lm_iso}" >> "${GITHUB_OUTPUT}"
           echo "last_modified_serial=${lm_serial}" >> "${GITHUB_OUTPUT}"
           echo "expires_plus5_serial=${exp_plus5_serial}" >> "${GITHUB_OUTPUT}"
-          echo "lock_serial=${lock_serial}" >> "${GITHUB_OUTPUT}"
 
-      # ============================================================
-      # 3) BIGQUERY: asegurar tabla (idempotente)
-      # - Crea si no existe con partition y clustering
-      # ============================================================
       - name: Ensure BigQuery table exists
         if: ${{ steps.guard.outputs.proceed == 'true' }}
         env:
@@ -244,15 +235,6 @@ jobs:
           CLUSTER BY solarSystem
           "
 
-      # ============================================================
-      # 4) DECISIÓN DE MODO
-      # - full: snapshot no existe y (etag difiere o state nulo)
-      # - reconcile: snapshot existe (comparar y cargar solo faltantes)
-      # - repair: snapshot no existe, etag igual -> state desalineado; se corrige etag sin cargar
-      # - noop: snapshot existe y etag igual -> nada que hacer
-      #
-      # update_state=true significa: en éxito, escribir states/system_jumps.json con remote_etag
-      # ============================================================
       - name: Decide mode (noop/full/reconcile/repair)
         if: ${{ steps.guard.outputs.proceed == 'true' }}
         id: mode
@@ -302,16 +284,6 @@ jobs:
           printf 'mode=%s\n' "$mode" >> "${GITHUB_OUTPUT}"
           printf 'update_state=%s\n' "$update_state" >> "${GITHUB_OUTPUT}"
 
-      # ============================================================
-      # 5) PREPARACIÓN DE CARGA (solo si mode != noop)
-      # - Descarga body ESI
-      # - Construye mapa SDE: solarSystemID -> solarSystem
-      # - reconcile: lista solarSystem existentes en ese snapshot_ts
-      # - Genera NDJSON:
-      #   * full: todas las filas
-      #   * reconcile: solo faltantes
-      # - Si falta mapping para algún system_id => jq error() -> falla el run antes de tocar Sheets/BQ/State
-      # ============================================================
       - name: Prepare load (download ESI + validate mapping + build ndjson)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' }}
         id: prep
@@ -367,11 +339,6 @@ jobs:
           echo "load_lines=${load_lines}" >> "${GITHUB_OUTPUT}"
           echo "prepared=true" >> "${GITHUB_OUTPUT}"
 
-      # ============================================================
-      # 6) SHEETS LOCK (fase inicial)
-      # - Se escribe in_progress y next_run = now + LOCK_TIME (serial numérico RAW)
-      # - Se hace después de validar mapping (prep) para respetar "si falta mapping: no tocar nada"
-      # ============================================================
       - name: Sheets - initial lock (in_progress + next_run = now + LOCK_TIME)
         if: ${{ steps.guard.outputs.proceed == 'true' && (steps.mode.outputs.mode == 'noop' || steps.prep.outputs.prepared == 'true') }}
         id: sheets_lock
@@ -382,7 +349,7 @@ jobs:
           set -euo pipefail
 
           status="in_progress"
-          next_run="${{ steps.esi.outputs.lock_serial }}"
+          next_run="${{ steps.boot.outputs.lock_serial }}"
 
           body="$(jq -n \
             --arg tab "${SHEET_TAB}" \
@@ -405,11 +372,6 @@ jobs:
 
           echo "locked=true" >> "${GITHUB_OUTPUT}"
 
-      # ============================================================
-      # 7) BIGQUERY LOAD (1 batch máximo)
-      # - Solo si hay filas (load_lines != 0)
-      # - Schema JSON temporal: snapshot_ts REQUIRED para casar con TIMESTAMP NOT NULL
-      # ============================================================
       - name: BigQuery load (single batch)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' && steps.prep.outputs.load_lines != '0' }}
         env:
@@ -420,8 +382,8 @@ jobs:
 
           printf '%s' \
             '[{"name":"snapshot_ts","type":"TIMESTAMP","mode":"REQUIRED"},'\
-            '{"name":"solarSystem","type":"STRING","mode":"NULLABLE"},'\
-            '{"name":"ship_jumps","type":"INT64","mode":"NULLABLE"}]' \
+'{"name":"solarSystem","type":"STRING","mode":"NULLABLE"},'\
+'{"name":"ship_jumps","type":"INT64","mode":"NULLABLE"}]' \
             > schema.json
 
           bq --project_id="${GCP_PROJECT_ID}" load --quiet \
@@ -430,11 +392,6 @@ jobs:
             load.ndjson \
             schema.json
 
-      # ============================================================
-      # 8) STATE UPDATE (repo)
-      # - Se ejecuta solo si se pudo escribir el lock (Sheets) y update_state==true
-      # - En caso de noop sin update_state no se toca repo
-      # ============================================================
       - name: Update state etag (commit to repo)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.sheets_lock.outputs.locked == 'true' && steps.mode.outputs.update_state == 'true' }}
         shell: bash
@@ -458,15 +415,6 @@ jobs:
           git pull --rebase
           git push
 
-      # ============================================================
-      # 9) SHEETS FINALIZE (fase final)
-      # - Siempre que se haya podido hacer lock inicial:
-      #   * status = completed/failed
-      #   * next_run:
-      #       - success: Expires + 5min
-      #       - fail: run_start + 5min
-      #   * last_modified (col I) solo si update_state==true en éxito
-      # ============================================================
       - name: Sheets - finalize (status + next_run + optional last_modified)
         if: ${{ always() && steps.sheets_lock.outputs.locked == 'true' }}
         shell: bash
@@ -475,10 +423,6 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           set -euo pipefail
-
-          to_serial() {
-            awk -v s="$1" 'BEGIN{printf "%.10f", (s/86400.0)+25569.0}'
-          }
 
           status="failed"
           include_last_modified="false"
@@ -491,9 +435,7 @@ jobs:
               last_modified="${{ steps.esi.outputs.last_modified_serial }}"
             fi
           else
-            run_start_epoch="${RUN_START_EPOCH}"
-            fail_next_epoch="$((run_start_epoch + 300))"
-            next_run="$(to_serial "${fail_next_epoch}")"
+            next_run="${{ steps.boot.outputs.fail_plus5_serial }}"
           fi
 
           if [[ "${include_last_modified}" == "true" ]]; then
