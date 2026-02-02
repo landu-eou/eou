@@ -3,11 +3,17 @@ name: ESI System Jumps (ESI → GH → BQ)
 on:
   workflow_dispatch:
 
+# Permisos mínimos:
+# - actions:read -> Guard via REST (listar runs del workflow)
+# - contents:write -> commit del state (states/system_jumps.json)
+# - id-token:write -> WIF/OIDC hacia Google
 permissions:
   actions: read
   contents: write
   id-token: write
 
+# Candado oficial GitHub: evita refresh simultáneo.
+# cancel-in-progress:false -> no cancela el run que está trabajando; los duplicados salen por el "guard".
 concurrency:
   group: eou_esi_jumps_esi-gh-bq
   cancel-in-progress: false
@@ -18,22 +24,33 @@ jobs:
     timeout-minutes: 15
 
     env:
+      # Identidad del workflow para el Guard (anti-cola)
       WORKFLOW_FILE: eou_esi_jumps_esi-gh-bq.yml
+      GH_API: https://api.github.com
+
+      # Google Sheets (control de estado operativo)
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "5"
-      LOCK_TIME: "60"
+      LOCK_TIME: "60" # segundos
 
+      # ESI + estado local en repo
       ESI_URL: https://esi.evetech.net/universe/system_jumps
       STATE_PATH: states/system_jumps.json
       SDE_SOLARSYSTEMS_GZ: data/sde/solarsystems.jsonl.gz
 
+      # BigQuery
       BQ_DATASET: eou
       BQ_TABLE: system_jumps
 
-      GH_API: https://api.github.com
-
     steps:
+      # ============================================================
+      # 0) GUARD (ANTI-COLA)
+      # - Si hay otro run en progreso, este run no hace trabajo.
+      # - Si un run anterior terminó con éxito "después" de que este run fuera creado,
+      #   este run se considera redundante y sale sin hacer trabajo.
+      # Usa exclusivamente endpoints oficiales REST de GitHub Actions.
+      # ============================================================
       - name: Guard - decide proceed (anti-cola)
         id: guard
         shell: bash
@@ -48,14 +65,16 @@ jobs:
           auth_hdr="Authorization: Bearer ${GH_TOKEN}"
           acc_hdr="Accept: application/vnd.github+json"
 
-          wf_json="$(curl -sS -H "${auth_hdr}" -H "${acc_hdr}" "${GH_API}/repos/${repo}/actions/workflows/${WORKFLOW_FILE}")"
+          wf_json="$(curl -sS -H "${auth_hdr}" -H "${acc_hdr}" \
+            "${GH_API}/repos/${repo}/actions/workflows/${WORKFLOW_FILE}")"
           wf_id="$(echo "${wf_json}" | jq -r '.id')"
           if [[ -z "${wf_id}" || "${wf_id}" == "null" ]]; then
             echo "proceed=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
-          self_json="$(curl -sS -H "${auth_hdr}" -H "${acc_hdr}" "${GH_API}/repos/${repo}/actions/runs/${run_id}")"
+          self_json="$(curl -sS -H "${auth_hdr}" -H "${acc_hdr}" \
+            "${GH_API}/repos/${repo}/actions/runs/${run_id}")"
           self_created="$(echo "${self_json}" | jq -r '.created_at')"
           if [[ -z "${self_created}" || "${self_created}" == "null" ]]; then
             echo "proceed=false" >> "${GITHUB_OUTPUT}"
@@ -65,10 +84,12 @@ jobs:
           runs_json="$(curl -sS -H "${auth_hdr}" -H "${acc_hdr}" \
             "${GH_API}/repos/${repo}/actions/workflows/${wf_id}/runs?per_page=50")"
 
+          # Existe otro run in_progress => no trabajo
           other_inprog="$(echo "${runs_json}" | jq -r --arg rid "${run_id}" '
             [.workflow_runs[] | select(.status=="in_progress" and (.id|tostring)!=$rid)] | length
           ')"
 
+          # Un run anterior (created_at < self_created) terminó success "después" de self_created => este run es stale
           stale_by_success="$(echo "${runs_json}" | jq -r --arg created "${self_created}" --arg rid "${run_id}" '
             [
               .workflow_runs[]
@@ -88,6 +109,12 @@ jobs:
         if: ${{ steps.guard.outputs.proceed != 'true' }}
         run: echo "Queued/duplicate dispatch detected. Exiting without work."
 
+      # ============================================================
+      # 1) BOOTSTRAP
+      # - Checkout: necesario para leer states/ y SDE mapping
+      # - Auth Google por WIF/OIDC (sin keys)
+      # - setup-gcloud: bq CLI disponible
+      # ============================================================
       - name: Checkout
         if: ${{ steps.guard.outputs.proceed == 'true' }}
         uses: actions/checkout@v4
@@ -112,6 +139,13 @@ jobs:
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
 
+      # ============================================================
+      # 2) ESI HEADERS + RELOJES (LOCK / EXPIRES)
+      # - Lee state local (etag)
+      # - Pide ESI con If-None-Match si hay etag
+      # - Extrae headers: ETag / Last-Modified / Expires
+      # - Calcula serials (Sheets) para lock y next_run
+      # ============================================================
       - name: Read state + fetch ESI headers (ETag/Expires/Last-Modified)
         if: ${{ steps.guard.outputs.proceed == 'true' }}
         id: esi
@@ -138,12 +172,12 @@ jobs:
 
           headers_file="$(mktemp)"
           if [[ -n "${local_etag}" ]]; then
-            http_code="$(curl -sS -L -o /dev/null -D "${headers_file}" -w "%{http_code}" \
+            curl -sS -L -o /dev/null -D "${headers_file}" \
               -H "If-None-Match: ${local_etag}" \
-              "${ESI_URL}")"
+              "${ESI_URL}" >/dev/null
           else
-            http_code="$(curl -sS -L -o /dev/null -D "${headers_file}" -w "%{http_code}" \
-              "${ESI_URL}")"
+            curl -sS -L -o /dev/null -D "${headers_file}" \
+              "${ESI_URL}" >/dev/null
           fi
 
           remote_etag="$(grep -i '^etag:' "${headers_file}" | tail -1 \
@@ -152,8 +186,13 @@ jobs:
             | sed -E 's/^"//; s/"$//' \
             || true)"
 
-          last_mod="$(grep -i '^last-modified:' "${headers_file}" | tail -1 | sed -E 's/^[Ll]ast-[Mm]odified:[[:space:]]*//' | tr -d '\r' || true)"
-          expires="$(grep -i '^expires:' "${headers_file}" | tail -1 | sed -E 's/^[Ee]xpires:[[:space:]]*//' | tr -d '\r' || true)"
+          last_mod="$(grep -i '^last-modified:' "${headers_file}" | tail -1 \
+            | sed -E 's/^[Ll]ast-[Mm]odified:[[:space:]]*//' \
+            | tr -d '\r' || true)"
+
+          expires="$(grep -i '^expires:' "${headers_file}" | tail -1 \
+            | sed -E 's/^[Ee]xpires:[[:space:]]*//' \
+            | tr -d '\r' || true)"
 
           if [[ -z "${last_mod}" ]]; then
             echo "Missing Last-Modified header from ESI."
@@ -164,6 +203,7 @@ jobs:
           lm_iso="$(date -u -d "@${lm_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
           lm_serial="$(to_serial "${lm_epoch}")"
 
+          # next_run por éxito se calcula con Expires + 5min. Si Expires falta, fallback conservador.
           if [[ -n "${expires}" ]]; then
             exp_epoch="$(date -u -d "${expires}" +%s)"
           else
@@ -172,18 +212,21 @@ jobs:
           exp_plus5_epoch="$((exp_epoch + 300))"
           exp_plus5_serial="$(to_serial "${exp_plus5_epoch}")"
 
+          # Lock inicial (in_progress) = now + LOCK_TIME
           lock_seconds="${LOCK_TIME}"
           lock_epoch="$((run_start_epoch + lock_seconds))"
           lock_serial="$(to_serial "${lock_epoch}")"
 
-          echo "http_code=${http_code}" >> "${GITHUB_OUTPUT}"
           echo "remote_etag=${remote_etag}" >> "${GITHUB_OUTPUT}"
-          echo "last_modified_rfc=${last_mod}" >> "${GITHUB_OUTPUT}"
           echo "last_modified_iso=${lm_iso}" >> "${GITHUB_OUTPUT}"
           echo "last_modified_serial=${lm_serial}" >> "${GITHUB_OUTPUT}"
           echo "expires_plus5_serial=${exp_plus5_serial}" >> "${GITHUB_OUTPUT}"
           echo "lock_serial=${lock_serial}" >> "${GITHUB_OUTPUT}"
 
+      # ============================================================
+      # 3) BIGQUERY: asegurar tabla (idempotente)
+      # - Crea si no existe con partition y clustering
+      # ============================================================
       - name: Ensure BigQuery table exists
         if: ${{ steps.guard.outputs.proceed == 'true' }}
         env:
@@ -201,6 +244,15 @@ jobs:
           CLUSTER BY solarSystem
           "
 
+      # ============================================================
+      # 4) DECISIÓN DE MODO
+      # - full: snapshot no existe y (etag difiere o state nulo)
+      # - reconcile: snapshot existe (comparar y cargar solo faltantes)
+      # - repair: snapshot no existe, etag igual -> state desalineado; se corrige etag sin cargar
+      # - noop: snapshot existe y etag igual -> nada que hacer
+      #
+      # update_state=true significa: en éxito, escribir states/system_jumps.json con remote_etag
+      # ============================================================
       - name: Decide mode (noop/full/reconcile/repair)
         if: ${{ steps.guard.outputs.proceed == 'true' }}
         id: mode
@@ -213,16 +265,13 @@ jobs:
           lm_iso="${{ steps.esi.outputs.last_modified_iso }}"
           local_etag="${{ steps.esi.outputs.local_etag }}"
           remote_etag="${{ steps.esi.outputs.remote_etag }}"
-          http_code="${{ steps.esi.outputs.http_code }}"
           state_exists="${{ steps.esi.outputs.state_exists }}"
 
           snap_count="$(bq --project_id="${GCP_PROJECT_ID}" query --quiet --use_legacy_sql=false --format=csv --headless \
             "SELECT COUNT(1) AS c
              FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
              WHERE snapshot_ts = TIMESTAMP('${lm_iso}')" \
-            | tr -d '\r' \
-            | tail -n 1 \
-            | tr -cd '0-9')"
+            | tr -d '\r' | tail -n 1 | tr -cd '0-9')"
           snap_count="${snap_count:-0}"
 
           mode="noop"
@@ -253,6 +302,16 @@ jobs:
           printf 'mode=%s\n' "$mode" >> "${GITHUB_OUTPUT}"
           printf 'update_state=%s\n' "$update_state" >> "${GITHUB_OUTPUT}"
 
+      # ============================================================
+      # 5) PREPARACIÓN DE CARGA (solo si mode != noop)
+      # - Descarga body ESI
+      # - Construye mapa SDE: solarSystemID -> solarSystem
+      # - reconcile: lista solarSystem existentes en ese snapshot_ts
+      # - Genera NDJSON:
+      #   * full: todas las filas
+      #   * reconcile: solo faltantes
+      # - Si falta mapping para algún system_id => jq error() -> falla el run antes de tocar Sheets/BQ/State
+      # ============================================================
       - name: Prepare load (download ESI + validate mapping + build ndjson)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' }}
         id: prep
@@ -267,19 +326,22 @@ jobs:
 
           curl -sS -L "${ESI_URL}" -o esi_body.json
 
-          gzip -cd "${SDE_SOLARSYSTEMS_GZ}" | jq -s 'map({(.solarSystemID|tostring): .solarSystem}) | add' > sde_map.json
+          gzip -cd "${SDE_SOLARSYSTEMS_GZ}" \
+            | jq -s 'map({(.solarSystemID|tostring): .solarSystem}) | add' \
+            > sde_map.json
 
           if [[ "${mode}" == "reconcile" ]]; then
             existing_list="$(bq --project_id="${GCP_PROJECT_ID}" query --quiet --format=json --use_legacy_sql=false \
               "SELECT solarSystem
                FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
                WHERE snapshot_ts = TIMESTAMP('${lm_iso}')")"
-            echo "${existing_list}" | jq 'map(.solarSystem) | map({(.): true}) | add // {}' > existing_map.json
+            echo "${existing_list}" \
+              | jq 'map(.solarSystem) | map({(.): true}) | add // {}' \
+              > existing_map.json
           else
             echo '{}' > existing_map.json
           fi
 
-          # --slurpfile (y acceso con [0]) para leer el JSON completo como un array con 1 elemento
           if [[ "${mode}" == "reconcile" ]]; then
             jq -c --arg ts "${lm_iso}" --slurpfile map sde_map.json --slurpfile exist existing_map.json '
               .[] |
@@ -305,6 +367,11 @@ jobs:
           echo "load_lines=${load_lines}" >> "${GITHUB_OUTPUT}"
           echo "prepared=true" >> "${GITHUB_OUTPUT}"
 
+      # ============================================================
+      # 6) SHEETS LOCK (fase inicial)
+      # - Se escribe in_progress y next_run = now + LOCK_TIME (serial numérico RAW)
+      # - Se hace después de validar mapping (prep) para respetar "si falta mapping: no tocar nada"
+      # ============================================================
       - name: Sheets - initial lock (in_progress + next_run = now + LOCK_TIME)
         if: ${{ steps.guard.outputs.proceed == 'true' && (steps.mode.outputs.mode == 'noop' || steps.prep.outputs.prepared == 'true') }}
         id: sheets_lock
@@ -338,7 +405,11 @@ jobs:
 
           echo "locked=true" >> "${GITHUB_OUTPUT}"
 
-      # ✅ FIX: schema JSON temporal para mantener snapshot_ts REQUIRED (coincide con TIMESTAMP NOT NULL)
+      # ============================================================
+      # 7) BIGQUERY LOAD (1 batch máximo)
+      # - Solo si hay filas (load_lines != 0)
+      # - Schema JSON temporal: snapshot_ts REQUIRED para casar con TIMESTAMP NOT NULL
+      # ============================================================
       - name: BigQuery load (single batch)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' && steps.prep.outputs.load_lines != '0' }}
         env:
@@ -347,8 +418,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Cuando el schema se pasa inline "a:TYPE,b:TYPE", BigQuery asume mode=NULLABLE.
-          # Para fijar REQUIRED hay que usar un schema JSON file.
           printf '%s' \
             '[{"name":"snapshot_ts","type":"TIMESTAMP","mode":"REQUIRED"},'\
             '{"name":"solarSystem","type":"STRING","mode":"NULLABLE"},'\
@@ -361,6 +430,11 @@ jobs:
             load.ndjson \
             schema.json
 
+      # ============================================================
+      # 8) STATE UPDATE (repo)
+      # - Se ejecuta solo si se pudo escribir el lock (Sheets) y update_state==true
+      # - En caso de noop sin update_state no se toca repo
+      # ============================================================
       - name: Update state etag (commit to repo)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.sheets_lock.outputs.locked == 'true' && steps.mode.outputs.update_state == 'true' }}
         shell: bash
@@ -376,7 +450,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add "${STATE_PATH}"
-
           if git diff --cached --quiet; then
             exit 0
           fi
@@ -385,6 +458,15 @@ jobs:
           git pull --rebase
           git push
 
+      # ============================================================
+      # 9) SHEETS FINALIZE (fase final)
+      # - Siempre que se haya podido hacer lock inicial:
+      #   * status = completed/failed
+      #   * next_run:
+      #       - success: Expires + 5min
+      #       - fail: run_start + 5min
+      #   * last_modified (col I) solo si update_state==true en éxito
+      # ============================================================
       - name: Sheets - finalize (status + next_run + optional last_modified)
         if: ${{ always() && steps.sheets_lock.outputs.locked == 'true' }}
         shell: bash
@@ -399,7 +481,6 @@ jobs:
           }
 
           status="failed"
-          next_run=""
           include_last_modified="false"
 
           if [[ "${JOB_STATUS}" == "success" ]]; then
