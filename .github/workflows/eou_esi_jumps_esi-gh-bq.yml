@@ -55,10 +55,8 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "${api}")"
 
-          # Por defecto: proceed=true
           proceed="true"
 
-          # Datos de este run
           this="$(jq --arg rid "$RUN_ID" -c '
             (.workflow_runs // [])
             | map(select(.id == ($rid|tonumber)))
@@ -69,7 +67,6 @@ jobs:
             this_created="$(jq -r '.created_at' <<< "$this")"
             this_num="$(jq -r '.run_number' <<< "$this")"
 
-            # Si había un run vivo cuando este se creó, salir sin trabajar
             alive_at_creation="$(jq --arg rid "$RUN_ID" --arg tc "$this_created" '
               (.workflow_runs // [])
               | map(
@@ -83,7 +80,6 @@ jobs:
             if [ "$alive_at_creation" -gt 0 ]; then
               proceed="false"
             else
-              # Elegir líder por run_number mínimo entre queued/in_progress
               leader="$(jq '
                 (.workflow_runs // [])
                 | map(select(.status=="queued" or .status=="in_progress"))
@@ -106,7 +102,7 @@ jobs:
           exit 0
 
       # ============================================================
-      # 1) CHECKOUT (antes de auth, para no borrar cred-file)
+      # 1) CHECKOUT (antes de auth)
       # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
@@ -144,7 +140,7 @@ jobs:
           ls -la "$GOOGLE_GHA_CREDS_PATH"
 
       # ============================================================
-      # 4) ANTI-COLA — cancelar runs queued del mismo workflow
+      # 4) ANTI-COLA — cancelar runs queued
       # ============================================================
       - name: Cancel queued runs (anti-queue)
         env:
@@ -178,7 +174,7 @@ jobs:
           done
 
       # ============================================================
-      # 5) LOCK INICIAL EN SHEETS (status + next_run = now + LOCK_TIME)
+      # 5) LOCK INICIAL EN SHEETS
       # ============================================================
       - name: Initial lock (Sheets)
         env:
@@ -203,13 +199,13 @@ jobs:
             }"
 
       # ============================================================
-      # 6) setup-gcloud (bq)
+      # 6) setup-gcloud
       # ============================================================
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
 
       # ============================================================
-      # 7) OBJECTIVE — ESI → BQ (batch) + state handling
+      # 7) OBJECTIVE — ESI → BQ (batch) + state/sheets decisions
       # ============================================================
       - name: OBJECTIVE - ESI System Jumps -> BigQuery
         id: objective
@@ -272,8 +268,10 @@ jobs:
               err_reset="$(header_value "X-ESI-Error-Limit-Reset" "$hdr" || true)"
 
               if [ "$http" = "429" ]; then
+                # ESI rate limiting: 429 + Retry-After
                 sleep_sec="${retry_after:-$delay}"
               elif [ "$http" = "420" ]; then
+                # ESI error limit: 420 + reset header
                 sleep_sec="${err_reset:-$delay}"
               elif [[ "$http" =~ ^(500|502|503|504)$ ]] || [ "$http" = "000" ]; then
                 sleep_sec="$delay"
@@ -325,28 +323,26 @@ jobs:
             lastmod_epoch="$(date -u -d "$last_modified" +%s 2>/dev/null || true)"
           fi
 
-          # next_run final: Expires+5m si posible; si no, RUN_START+5m
           if [ -n "$expires_epoch" ]; then
             final_next_epoch=$((expires_epoch + 300))
           else
             final_next_epoch=$((RUN_START_EPOCH + 300))
           fi
 
-          # Default outputs
+          # outputs por defecto
           set_last_modified="false"
           state_should_update="false"
+          final_lastmod_epoch=""
 
           if [ "$http" = "304" ]; then
-            # no cambios => no tocar BQ ni state ni last_modified
+            # no cambios => no BQ, no state, no last_modified
             echo "final_next_epoch=${final_next_epoch}" >> "$GITHUB_OUTPUT"
             echo "final_lastmod_epoch=" >> "$GITHUB_OUTPUT"
             echo "set_last_modified=false" >> "$GITHUB_OUTPUT"
             echo "state_should_update=false" >> "$GITHUB_OUTPUT"
-            echo "new_etag=${old_etag}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # http 200 => necesitamos headers válidos
           if [ -z "$new_etag" ]; then
             echo "Missing ETag header from ESI" >&2
             exit 1
@@ -357,6 +353,7 @@ jobs:
           fi
 
           snapshot_ts_iso="$(date -u -d "@${lastmod_epoch}" +"%Y-%m-%dT%H:%M:%SZ")"
+          final_lastmod_epoch="$lastmod_epoch"
 
           # ---------- BigQuery: crear tabla si no existe ----------
           bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false \
@@ -376,10 +373,12 @@ jobs:
              FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
              WHERE snapshot_ts = @ts" | tail -n1 | tr -d '\r')"
 
-          mode="new"
           existing_csv=""
           if [ "${snapshot_count}" != "0" ]; then
-            mode="diff"
+            # snapshot ya existe => state estaba mal => actualizar state, y last_modified en Sheets
+            state_should_update="true"
+            set_last_modified="true"
+
             existing_csv="$(mktemp)"
             bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false --format=csv \
               --parameter="ts:TIMESTAMP:${snapshot_ts_iso}" \
@@ -389,13 +388,7 @@ jobs:
               | tail -n +2 > "$existing_csv"
           fi
 
-          # Regla: si snapshot ya existe => state estaba mal => actualizar state etag y Sheets last_modified
-          if [ "${snapshot_count}" != "0" ]; then
-            state_should_update="true"
-            set_last_modified="true"
-          fi
-
-          # Si etag old es null/empty o distinto => candidato a volcar (pero solo si snapshot no existe)
+          # ---------- decidir si volcar ----------
           should_dump="false"
           if [ -z "$old_etag" ] || [ "$old_etag" != "$new_etag" ]; then
             if [ "${snapshot_count}" = "0" ]; then
@@ -403,13 +396,12 @@ jobs:
             fi
           fi
 
-          # Si no hay que volcar y snapshot no existe, aun así: no tocamos state ni last_modified
+          # Caso: no dump y snapshot no existe => salir limpio (sin last_modified)
           if [ "$should_dump" != "true" ] && [ "${snapshot_count}" = "0" ]; then
             echo "final_next_epoch=${final_next_epoch}" >> "$GITHUB_OUTPUT"
             echo "final_lastmod_epoch=" >> "$GITHUB_OUTPUT"
             echo "set_last_modified=false" >> "$GITHUB_OUTPUT"
             echo "state_should_update=false" >> "$GITHUB_OUTPUT"
-            echo "new_etag=${old_etag}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -419,10 +411,11 @@ jobs:
             exit 1
           fi
 
-          # ---------- si faltan IDs en SDE => /universe/names en bloques <=1000 ----------
+          # ---------- detectar IDs faltantes en SDE ----------
           missing_ids="$(mktemp)"
-          python3 - <<PY
-          import gzip, json, os, sys
+
+          ESI_BODY="$body" MISSING_OUT="$missing_ids" SDE_SOLARSYSTEMS_GZ="$SDE_SOLARSYSTEMS_GZ" python3 - <<'PY'
+          import gzip, json, os
 
           sde = os.environ["SDE_SOLARSYSTEMS_GZ"]
           body_path = os.environ["ESI_BODY"]
@@ -456,11 +449,10 @@ jobs:
             for sid in missing:
               out.write(str(sid) + "\n")
           PY
-          ESI_BODY="$body" MISSING_OUT="$missing_ids" SDE_SOLARSYSTEMS_GZ="$SDE_SOLARSYSTEMS_GZ" python3 -c "print('')"
 
+          # ---------- fallback /universe/names en bloques <=1000 ----------
           names_merged=""
           if [ -s "$missing_ids" ]; then
-            # split blocks of <=1000 ids
             split -l 1000 "$missing_ids" /tmp/missing_chunk_
 
             names_json="$(mktemp)"
@@ -470,10 +462,10 @@ jobs:
               req="$(mktemp)"
               hdr2="$(mktemp)"
               body2="$(mktemp)"
+
               jq -Rs 'split("\n") | map(select(length>0) | tonumber)' "$chunk" > "$req"
               esi_request "POST" "${ESI_NAMES_URL}" "$hdr2" "$body2" "$req" ""
 
-              # merge arrays
               tmp="$(mktemp)"
               jq -s '.[0] + .[1]' "$names_json" "$body2" > "$tmp"
               mv "$tmp" "$names_json"
@@ -482,25 +474,32 @@ jobs:
             names_merged="$names_json"
           fi
 
-          # ---------- construir NDJSON final (diff: solo faltantes) ----------
+          # ---------- construir NDJSON final (si snapshot existe => solo faltantes) ----------
           ndjson="$(mktemp)"
-          python3 - <<PY
+
+          SDE_SOLARSYSTEMS_GZ="$SDE_SOLARSYSTEMS_GZ" \
+          ESI_BODY="$body" \
+          NDJSON_OUT="$ndjson" \
+          SNAPSHOT_TS_ISO="$snapshot_ts_iso" \
+          EXISTING_CSV="${existing_csv:-}" \
+          NAMES_JSON="${names_merged:-}" \
+          python3 - <<'PY'
           import gzip, json, os, sys
 
           sde = os.environ["SDE_SOLARSYSTEMS_GZ"]
           body_path = os.environ["ESI_BODY"]
           out_path = os.environ["NDJSON_OUT"]
           snapshot_ts = os.environ["SNAPSHOT_TS_ISO"]
-          existing_path = os.environ.get("EXISTING_CSV","")
-          names_path = os.environ.get("NAMES_JSON","")
+          existing_path = os.environ.get("EXISTING_CSV", "")
+          names_path = os.environ.get("NAMES_JSON", "")
 
           existing = set()
           if existing_path and os.path.exists(existing_path) and os.path.getsize(existing_path) > 0:
             with open(existing_path, "r", encoding="utf-8") as f:
               for line in f:
-                name=line.strip()
-                if name:
-                  existing.add(name)
+                v = line.strip()
+                if v:
+                  existing.add(v)
 
           mp = {}
           with gzip.open(sde, "rt", encoding="utf-8") as f:
@@ -553,20 +552,10 @@ jobs:
           with open(out_path, "w", encoding="utf-8") as out:
             for r in rows:
               out.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-          print(len(rows))
           PY
-          SDE_SOLARSYSTEMS_GZ="$SDE_SOLARSYSTEMS_GZ" \
-          ESI_BODY="$body" \
-          NDJSON_OUT="$ndjson" \
-          SNAPSHOT_TS_ISO="$snapshot_ts_iso" \
-          EXISTING_CSV="${existing_csv:-}" \
-          NAMES_JSON="${names_merged:-}" \
-          python3 -c "print('')"
 
           rowcount="$(wc -l < "$ndjson" | tr -d ' ')"
 
-          # ---------- cargar batch si hay filas ----------
           if [ "${rowcount}" -gt 0 ]; then
             bq load \
               --project_id="${GCP_PROJECT_ID}" \
@@ -575,16 +564,12 @@ jobs:
               "$ndjson"
           fi
 
-          # ---------- actualizar state etag si:
-          #  - volcamos (should_dump=true) y éxito
-          #  - o snapshot ya existía (state wrong)
-          if [ "$should_dump" = "true" ] || [ "${snapshot_count}" != "0" ]; then
-            state_should_update="true"
-          fi
-
+          # Reglas de update state/last_modified:
+          # - si volcamos nuevo snapshot con éxito => actualizar etag + last_modified
+          # - si snapshot ya existía => actualizar etag (state wrong) + last_modified
           if [ "$should_dump" = "true" ]; then
-            # Solo entonces (dump nuevo) se pide actualizar last_modified
             set_last_modified="true"
+            state_should_update="true"
           fi
 
           if [ "$state_should_update" = "true" ]; then
@@ -592,13 +577,12 @@ jobs:
           fi
 
           echo "final_next_epoch=${final_next_epoch}" >> "$GITHUB_OUTPUT"
-          echo "final_lastmod_epoch=${lastmod_epoch}" >> "$GITHUB_OUTPUT"
+          echo "final_lastmod_epoch=${final_lastmod_epoch}" >> "$GITHUB_OUTPUT"
           echo "set_last_modified=${set_last_modified}" >> "$GITHUB_OUTPUT"
           echo "state_should_update=${state_should_update}" >> "$GITHUB_OUTPUT"
-          echo "new_etag=${new_etag}" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 8) Commit states/system_jumps.json si cambió
+      # 8) Commit state si cambió
       # ============================================================
       - name: Commit state (if changed)
         if: success()
@@ -608,17 +592,15 @@ jobs:
             echo "No state changes to commit."
             exit 0
           fi
-
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git add "${STATE_PATH}"
           git commit -m "chore(state): update system_jumps etag [skip ci]" || exit 0
           git pull --rebase --autostash || true
           git push
 
       # ============================================================
-      # 9) Cleanup anti-cola (por si llegaron durante el run)
+      # 9) Cleanup anti-cola
       # ============================================================
       - name: Cancel queued runs (cleanup)
         if: always()
@@ -635,7 +617,6 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "${api}")"
-
           jq -r --arg rid "$RUN_ID" '
             (.workflow_runs // [])
             | map(select(.status=="queued"))
@@ -665,12 +646,10 @@ jobs:
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
 
-          epoch="${FINAL_NEXT_EPOCH}"
-          serial_next="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
+          serial_next="$(awk "BEGIN { printf \"%.10f\", (${FINAL_NEXT_EPOCH}/86400) + 25569 }")"
 
           if [ "${SET_LAST_MODIFIED}" = "true" ] && [[ "${FINAL_LASTMOD_EPOCH:-}" =~ ^[0-9]+$ ]]; then
             lm_serial="$(awk "BEGIN { printf \"%.10f\", (${FINAL_LASTMOD_EPOCH}/86400) + 25569 }")"
-
             curl -fsSL -X POST \
               -H "Authorization: Bearer ${ACCESS_TOKEN}" \
               -H "Content-Type: application/json" \
@@ -707,10 +686,8 @@ jobs:
         run: |
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
-
           epoch=$((RUN_START_EPOCH + 300))
           serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
-
           curl -fsSL -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
