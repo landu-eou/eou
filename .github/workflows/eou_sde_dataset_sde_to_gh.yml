@@ -9,7 +9,6 @@ on:
         type: boolean
         default: false
 
-# Anti-solapamiento (candado) a nivel workflow
 concurrency:
   group: eou_sde_dataset_sde_to_gh
   cancel-in-progress: false
@@ -30,15 +29,14 @@ jobs:
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "4"
 
-      LOCK_TIME: 120  # segundos
+      LOCK_TIME: 120
 
       SDE_URL: https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip
 
     steps:
       # =====================================================================
-      # 1) GUARD — decide si este run debe trabajar o salir (busy)
+      # 1) GUARD — salir si hay solapamiento / runs duplicados
       # =====================================================================
-
       - name: Guard - compute decision
         id: guard_calc
         env:
@@ -68,7 +66,6 @@ jobs:
             this_created="$(jq -r '.created_at' <<< "$this")"
             this_num="$(jq -r '.run_number' <<< "$this")"
 
-            # Si ya había otro run vivo cuando este se creó, este run no trabaja.
             alive_at_creation="$(jq --arg rid "$RUN_ID" --arg tc "$this_created" '
               (.workflow_runs // [])
               | map(
@@ -82,7 +79,6 @@ jobs:
             if [ "$alive_at_creation" -gt 0 ]; then
               proceed="false"
             else
-              # Si hay varios queued/in_progress, solo trabaja el líder (run_number menor).
               leader="$(jq '
                 (.workflow_runs // [])
                 | map(select(.status=="queued" or .status=="in_progress"))
@@ -104,7 +100,7 @@ jobs:
           echo "proceed=$(cat /tmp/proceed)" >> "$GITHUB_OUTPUT"
 
       # =====================================================================
-      # 2) AUTH GOOGLE — WIF/OIDC (sin claves)
+      # 2) AUTH GOOGLE — WIF/OIDC
       # =====================================================================
       - name: Auth to Google (WIF)
         id: gcp_auth
@@ -126,7 +122,7 @@ jobs:
           exit 0
 
       # =====================================================================
-      # 4) LOCK INICIAL (Sheets) — status=in_progress, next_run=now+LOCK_TIME
+      # 4) LOCK INICIAL (Sheets)
       # =====================================================================
       - name: Initial lock (in_progress + next_run as value)
         if: steps.guard.outputs.proceed == 'true'
@@ -154,7 +150,6 @@ jobs:
       # =====================================================================
       # 5) OBJETIVO — SDE → repo
       # =====================================================================
-
       - name: Checkout
         if: steps.guard.outputs.proceed == 'true'
         uses: actions/checkout@v4
@@ -167,85 +162,68 @@ jobs:
         with:
           python-version: "3.11"
 
-      # --- FIX: robust headers (follow redirects, read LAST header block) ---
+      # --- FIX: obtener headers finales siguiendo redirects, sin heredoc Python ---
       - name: Fetch remote SDE headers (ETag + Last-Modified)
         if: steps.guard.outputs.proceed == 'true'
         id: sde_headers
         run: |
           set -euo pipefail
 
-          # GET headers while following redirects; write headers to a file.
-          # We prefer GET (-D - -o /dev/null) over HEAD (-I) because some CDNs omit headers on HEAD.
-          hdrs="$(
-            curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused \
-              -L -D - -o /dev/null "${SDE_URL}"
+          tmp="$(mktemp)"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused \
+            -L -D "$tmp" -o /dev/null \
+            "${SDE_URL}"
+
+          # Extrae ETag y Last-Modified DEL ÚLTIMO BLOQUE HTTP (tras redirects).
+          # Reseteamos cuando vemos una línea HTTP/... (inicio de bloque).
+          etag="$(
+            awk '
+              BEGIN { IGNORECASE=1; etag=""; }
+              /^HTTP\// { etag=""; }
+              /^ETag:/  { sub(/^[^:]*:[[:space:]]*/, "", $0); gsub(/\r/, "", $0); etag=$0; }
+              END { print etag; }
+            ' "$tmp"
           )"
 
-          # Parse the LAST HTTP response block (after redirects).
-          python - <<'PY'
-          import re, sys, datetime, email.utils
-          
-          raw = sys.stdin.read()
-          # Split header blocks on blank line; last non-empty block is the final response.
-          blocks = [b.strip("\r\n") for b in re.split(r"\r?\n\r?\n", raw) if b.strip()]
-          if not blocks:
-              raise SystemExit("No headers received")
-          
-          last = blocks[-1]
-          lines = last.splitlines()
-          
-          def get_header(name: str):
-              name_l = name.lower()
-              for ln in lines:
-                  if ":" not in ln:
-                      continue
-                  k, v = ln.split(":", 1)
-                  if k.strip().lower() == name_l:
-                      return v.strip()
-              return ""
-          
-          etag = get_header("etag")
-          lm = get_header("last-modified")
-          
-          if not etag or not lm:
-              # Emit debug context (first status line) then fail clearly
-              status = lines[0] if lines else "<no status line>"
-              raise SystemExit(f"Missing ETag/Last-Modified on final response. status={status}, etag={bool(etag)}, last_modified={bool(lm)}")
-          
-          dt = email.utils.parsedate_to_datetime(lm)
-          # ensure UTC epoch
-          if dt.tzinfo is None:
-              dt = dt.replace(tzinfo=datetime.timezone.utc)
-          epoch = int(dt.timestamp())
-          
-          print(f"etag={etag}")
-          print(f"last_modified={lm}")
-          print(f"last_modified_epoch={epoch}")
-          PY <<< "$hdrs" >> "$GITHUB_OUTPUT"
-          
-                - name: Read local state (states/sde.json)
-                  if: steps.guard.outputs.proceed == 'true'
-                  id: sde_state
-                  run: |
-                    set -euo pipefail
-          
-                    if [ -f "states/sde.json" ]; then
-                      etag_local="$(python - <<'PY'
-                      import json
-                      from pathlib import Path
-                      p = Path('states/sde.json')
-                      try:
-                          data = json.loads(p.read_text(encoding='utf-8'))
-                          print(data.get('etag') or '')
-                      except Exception:
-                          print('')
-                      PY
-                        )"
-                      else
-                        etag_local=""
-                      fi
-            
-                      echo "etag_local=$etag_local" >> "$GITHUB_OUTPUT"
+          lm="$(
+            awk '
+              BEGIN { IGNORECASE=1; lm=""; }
+              /^HTTP\// { lm=""; }
+              /^Last-Modified:/ { sub(/^[^:]*:[[:space:]]*/, "", $0); gsub(/\r/, "", $0); lm=$0; }
+              END { print lm; }
+            ' "$tmp"
+          )"
+
+          if [ -z "$etag" ] || [ -z "$lm" ]; then
+            echo "Missing ETag/Last-Modified headers after redirects" >&2
+            echo "---- headers (tail) ----" >&2
+            tail -n 60 "$tmp" >&2 || true
+            exit 1
+          fi
+
+          lm_epoch="$(date -u -d "$lm" +%s)"
+
+          echo "etag=$etag" >> "$GITHUB_OUTPUT"
+          echo "last_modified=$lm" >> "$GITHUB_OUTPUT"
+          echo "last_modified_epoch=$lm_epoch" >> "$GITHUB_OUTPUT"
+
+      - name: Read local state (states/sde.json)
+        if: steps.guard.outputs.proceed == 'true'
+        id: sde_state
+        run: |
+          set -euo pipefail
+          if [ -f "states/sde.json" ]; then
+            etag_local="$(python -c 'import json; from pathlib import Path; 
+p=Path("states/sde.json"); 
+try: 
+  d=json.loads(p.read_text(encoding="utf-8")); 
+  print(d.get("etag") or "") 
+except Exception: 
+  print("")')"
+          else
+            etag_local=""
+          fi
+          echo "etag_local=$etag_local" >> "$GITHUB_OUTPUT"
 
       - name: Decide whether to refresh SDE outputs
         if: steps.guard.outputs.proceed == 'true'
@@ -253,8 +231,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          # workflow_dispatch input llega como string ("true"/"false")
           force="${{ github.event.inputs.force_refresh }}"
-          # workflow_dispatch inputs come through as strings; treat only "true" as true.
           if [ "$force" = "true" ]; then
             echo "needs_update=true" >> "$GITHUB_OUTPUT"
             echo "forced=true" >> "$GITHUB_OUTPUT"
@@ -293,19 +271,11 @@ jobs:
             --zip .tmp/sde/sde.zip \
             --out .tmp/sde/out
 
-          # Solo si se generó todo correctamente, se actualiza el state con el ETag remoto
-          python - <<'PY'
-          import json, os
-          from pathlib import Path
-          etag = os.environ.get('REMOTE_ETAG', '')
-          Path('states').mkdir(parents=True, exist_ok=True)
-          Path('states/sde.json').write_text(
-              json.dumps({'etag': etag}, ensure_ascii=False, indent=1) + "\n",
-              encoding='utf-8'
-          )
-          PY
+          python -c 'import json, os; from pathlib import Path
+etag=os.environ.get("REMOTE_ETAG","")
+Path("states").mkdir(parents=True, exist_ok=True)
+Path("states/sde.json").write_text(json.dumps({"etag": etag}, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")'
 
-          # Reemplazo "de una sola vez"
           for f in regions constellations solarsystems stations stargates types; do
             mv -f ".tmp/sde/out/${f}.jsonl.gz" "data/sde/${f}.jsonl.gz"
           done
@@ -334,7 +304,6 @@ jobs:
       # =====================================================================
       # 6) FINALIZE — status + next_run + last_modified (solo si updated/forced)
       # =====================================================================
-
       - name: Finalize (completed)
         if: steps.guard.outputs.proceed == 'true' && success()
         env:
@@ -349,7 +318,6 @@ jobs:
           now_epoch="$(date -u +%s)"
           now_hour="$(date -u +%H)"
 
-          # hh:mm:ss = Last-Modified + 30m
           t_hms="$(date -u -d "@$((${LM_EPOCH}+1800))" +%H:%M:%S)"
           today="$(date -u +%Y-%m-%d)"
           cand_epoch="$(date -u -d "${today}T${t_hms}Z" +%s)"
