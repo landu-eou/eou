@@ -32,7 +32,7 @@ jobs:
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "5"
-      LOCK_TIME: "60" # segundos
+      LOCK_TIME: "120" # segundos
 
       # ESI + estado local
       ESI_URL: https://esi.evetech.net/universe/system_jumps
