@@ -34,14 +34,10 @@ jobs:
       STATE_PATH: states/system_jumps.json
       SDE_SOLARSYSTEMS_GZ: data/sde/solarsystems.jsonl.gz
 
-      # Heurística para detectar SDE roto: si el mapa tiene menos de este número, se considera "sospechoso"
-      # (con tu SDE real el mapa debería ser MUY grande, >> 5k)
+      # Si el mapa SDE sale por debajo de esto, consideramos el SDE “sospechoso”
       SDE_MIN_MAP_SIZE: "5000"
 
     steps:
-      # ============================================================
-      # 0) GUARD — decidir si este run trabaja o sale
-      # ============================================================
       - name: Guard - decide proceed
         id: guard
         env:
@@ -51,7 +47,6 @@ jobs:
           WF_FILE: ${{ env.WORKFLOW_FILE }}
         run: |
           set -euo pipefail
-
           api="https://api.github.com/repos/${REPO}/actions/workflows/${WF_FILE}/runs?per_page=50"
           json="$(curl -fsSL \
             -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -105,23 +100,14 @@ jobs:
           echo "Skipped due to overlapping run"
           exit 0
 
-      # ============================================================
-      # 1) CHECKOUT
-      # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ============================================================
-      # 2) RUN START
-      # ============================================================
       - name: Record run start epoch (UTC)
         run: |
           set -euo pipefail
           echo "RUN_START_EPOCH=$(date -u +%s)" >> "$GITHUB_ENV"
 
-      # ============================================================
-      # 3) AUTH GOOGLE (WIF)
-      # ============================================================
       - name: Auth to Google (WIF)
         id: gcp_auth
         uses: google-github-actions/auth@v2
@@ -142,9 +128,6 @@ jobs:
           test -f "$GOOGLE_GHA_CREDS_PATH"
           ls -la "$GOOGLE_GHA_CREDS_PATH"
 
-      # ============================================================
-      # 4) ANTI-COLA — cancelar runs queued
-      # ============================================================
       - name: Cancel queued runs (anti-queue)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -175,16 +158,12 @@ jobs:
               >/dev/null || true
           done
 
-      # ============================================================
-      # 5) LOCK INICIAL EN SHEETS
-      # ============================================================
       - name: Initial lock (Sheets)
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
-
           epoch="$(date -u -d "+${LOCK_TIME} seconds" +%s)"
           serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
 
@@ -200,31 +179,195 @@ jobs:
               ]
             }"
 
-      # ============================================================
-      # 6) setup-gcloud
-      # ============================================================
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
 
-      # ============================================================
-      # 7) Crear scripts Python (sin heredocs, sin python -c)
-      # ============================================================
       - name: Prepare python scripts
         env:
-          B64_SDE_MISSING_IDS: |
-            IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwppbXBvcnQgZ3ppcCwganNvbiwgb3MKCmRlZiBwaWNrKGQsIGtleXMpOgogICAgZm9yIGsgaW4ga2V5czoKICAgICAgICB2ID0gZC5nZXQoaykKICAgICAgICBpZiB2IGlzIG5vdCBOb25lIGFuZCBzdHIodikuc3RyaXAoKSAhPSAiIjoKICAgICAgICAgICAgcmV0dXJuIHYKICAgIHJldHVybiBOb25lCgpJRF9LRVlTID0gWyJzb2xhclN5c3RlbUlEIiwic29sYXJTeXN0ZW1JZCIsInNvbGFyU3lzdGVtX2lkIiwic3lzdGVtX2lkIiwiaWQiXQpOQU1FX0tFWVMgPSBbInNvbGFyU3lzdGVtIiwic29sYXJTeXN0ZW1OYW1lIiwic29sYXJTeXN0ZW1fbmFtZSIsInNvbGFyU3lzdGVtTmFtZV9lbiIsIm5hbWUiLCJzb2xhclN5c3RlbU5hbWVFbmdsaXNoIl0KCmRlZiBsb2FkX3NkZV9tYXAocGF0aCk6CiAgICBtcCA9IHt9CiAgICB3aXRoIGd6aXAu b3BlbihwYXRoLCAicnQiLCBlbmNvZGluZz0idXRmLTgiKSBhcyBmOgogICAgICAgIGZvciBsaW5lIGluIGY6CiAgICAgICAgICAgIGxpbmUgPSBsaW5lLnN0cmlwKCkKICAgICAgICAgICAgaWYgbm90IGxpbmU6CiAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICBvID0ganNvbi5sb2FkcyhsaW5lKQogICAgICAgICAgICBzaWQgPSBwaWNrKG8sIElEX0tFWVMpCiAgICAgICAgICAgIG5hbWUgPSBwaWNrKG8sIE5BTUVfS0VZUykKICAgICAgICAgICAgaWYgc2lkIGlzIE5vbmUgb3IgbmFtZSBpcyBOb25lOgogICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAgbXBbaW50KHNpZCldID0gc3RyKG5hbWUpCiAgICAgICAgICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgICAgICAgICBjb250aW51ZQogICAgcmV0dXJuIG1wCgpkZWYgbWFpbigpOgogICAgc2RlID0gb3MuZW52aXJvblsiU0RFX1NPTEFSU1lTVEVNU19HW iJdCiAgICBlc2lfYm9keSA9IG9zLmVudmlyb25bIkVTSV9CT0RZIl0KICAgIG1pc3Npbmdfb3V0ID0gb3MuZW52aXJvblsiTUlTU0lOR19PVVQiXQogICAgc3RhdHNfb3V0ID0gb3MuZW52aXJvbi5nZXQoIlNUQVRTX09VVCIsIiIpCgogICAgbXAgPSBsb2FkX3NkZV9tYXAoc2RlKQogICAgd2l0aCBvcGVuKGVzaV9ib2R5LCAiciIsIGVuY29kaW5nPSJ1dGYtOCIpIGFzIGY6CiAgICAgICAgZGF0YSA9IGpzb24ubG9hZChmKQoKICAgIG1pc3NpbmcgPSBbXQogICAgZm9yIHJlYyBpbiBkYXRhOgogICAgICAgIHNpZCA9IGludChyZWNbInN5c3RlbV9pZCJdKQogICAgICAgIGlmIHNpZCBub3QgaW4gbXA6CiAgICAgICAgICAgIG1pc3NpbmcuYXBwZW5kKHNpZCkKCiAgICBtaXNzaW5nID0gc29ydGVkKHNldChtaXNzaW5nKSkKICAgIHdpdGggb3BlbihtaXNzaW5nX291dCwgInciLCBlbmNvZGluZz0idXRmLTgiKSBhcyBvdXQ6CiAgICAgICAgZm9yIHNpZCBpbiBtaXNzaW5nOgogICAgICAgICAgICBvdXQud3JpdGUoc3RyKHNpZCkgKyAiXG4iKQoKICAgIHN0YXRzID0gewogICAgICAgICJzZGVfbWFwX3NpemUiOiBsZW4obXApLAogICAgICAgICJlc2lfcmVjb3JkcyI6IGxlbihkYXRhKSwKICAgICAgICAibWlzc2luZ19pZHMiOiBsZW4obWlzc2luZyksCiAgICB9CgogICAgcHJpbnQoZiJTREUgbWFwIHNpemU6IHtzdGF0c1snc2RlX21hcF9zaXplJ119IikKICAgIHByaW50KGYiRVNJIHJlY29yZHM6IHtzdGF0c1snZXNpX3JlY29yZHMnXX0iKQogICAgcHJpbnQoZiJNaXNzaW5nIElEczog e3N0YXRzWydtaXNzaW5nX2lkcyddfSIpCgogICAgaWYgc3RhdHNfb3V0OgogICAgICAgIHdpdGggb3BlbihzdGF0c19vdXQsICJ3IiwgZW5jb2Rpbmc9InV0Zi04IikgYXMgZjoKICAgICAgICAgICAganNvbi5kdW1wKHN0YXRzLCBmKQoKaWYgX19uYW1lX18gPT0gIl9fbWFpbl9fIjoKICAgIG1haW4oKQo=
-          B64_BUILD_NDJSON: |
-            IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwppbXBvcnQgZ3ppcCwganNvbiwgb3MKCmRlZiBwaWNrKGQsIGtleXMpOgogICAgZm9yIGsgaW4ga2V5czoKICAgICAgICB2ID0gZC5nZXQoaykKICAgICAgICBpZiB2IGlzIG5vdCBOb25lIGFuZCBzdHIodikuc3RyaXAoKSAhPSAiIjoKICAgICAgICAgICAgcmV0dXJuIHYKICAgIHJldHVybiBOb25lCgpJRF9LRVlTID0gWyJzb2xhclN5c3RlbUlEIiwic29sYXJTeXN0ZW1JZCIsInNvbGFyU3lzdGVtX2lkIiwic3lzdGVtX2lkIiwiaWQiXQpOQU1FX0tFWVMgPSBbInNvbGFyU3lzdGVtIiwic29sYXJTeXN0ZW1OYW1lIiwic29sYXJTeXN0ZW1fbmFtZSIsInNvbGFyU3lzdGVtTmFtZV9lbiIsIm5hbWUiLCJzb2xhclN5c3RlbU5hbWVFbmdsaXNoIl0KCmRlZiBsb2FkX3NkZV9tYXAocGF0aCk6CiAgICBtcCA9IHt9CiAgICB3aXRoIGd6aXAu b3BlbihwYXRoLCAicnQiLCBlbmNvZGluZz0idXRmLTgiKSBhcyBmOgogICAgICAgIGZvciBsaW5lIGluIGY6CiAgICAgICAgICAgIGxpbmUgPSBsaW5lLnN0cmlwKCkKICAgICAgICAgICAgaWYgbm90IGxpbmU6CiAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICBvID0ganNvbi5sb2FkcyhsaW5lKQogICAgICAgICAgICBzaWQgPSBwaWNrKG8sIElEX0tFWVMpCiAgICAgICAgICAgIG5hbWUgPSBwaWNrKG8sIE5BTUVfS0VZUykKICAgICAgICAgICAgaWYgc2lkIGlzIE5vbmUgb3IgbmFtZSBpcyBOb25lOgogICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAgbXBbaW50KHNpZCldID0gc3RyKG5hbWUpCiAgICAgICAgICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgICAgICAgICBjb250aW51ZQogICAgcmV0dXJuIG1wCgpkZWYgbG9hZF9leGlzdGluZ19uYW1lcyhjc3ZfcGF0aCk6CiAgICBleGlzdGluZyA9IHNldCgpCiAgICBpZiBub3QgY3N2X3BhdGg6CiAgICAgICAgcmV0dXJuIGV4aXN0aW5nCiAgICB0cnk6CiAgICAgICAgd2l0aCBvcGVuKGNzdl9wYXRoLCAiciIsIGVuY29kaW5nPSJ1dGYtOCIpIGFzIGY6CiAgICAgICAgICAgIGZvciBsaW5lIGluIGY6CiAgICAgICAgICAgICAgICB2ID0gbGluZS5zdHJpcCgpCiAgICAgICAgICAgICAgICBpZiB2OgogICAgICAgICAgICAgICAgICAgIGV4aXN0aW5nLmFkZCh2KQogICAgZXhjZXB0IEZpbGVOb3RGb3VuZEVycm9yOgogICAgICAgIHBhc3MKICAgIHJldHVybiBleGlzdGluZwoKZGVmIG1lcmdlX25hbWVzX2ZhbGxiYWNrKG1wLCBuYW1lc19qc29uX3BhdGgpOgogICAgaWYgbm90IG5hbWVzX2pzb25fcGF0aDoKICAgICAgICByZXR1cm4KICAgIHRyeToKICAgICAgICB3aXRoIG9wZW4obmFtZXNfanNvbl9wYXRoLCAiciIsIGVuY29kaW5nPSJ1dGYtOCIpIGFzIGY6CiAgICAgICAgICAgIGFyciA9IGpzb24ubG9hZChmKQogICAgICAgIGZvciBvIGluIGFycjoKICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAgaWYgby5nZXQoImNhdGVnb3J5IikgPT0gInNvbGFyX3N5c3RlbSI6CiAgICAgICAgICAgICAgICAgICAgbXBbaW50KG9bImlkIl0pXSA9IHN0cihvWyJuYW1lIl0pCiAgICAgICAgICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgICAgICAgICBwYXNzCiAgICBleGNlcHQgRmlsZU5vdEZvdW5kRXJyb3I6CiAgICAgICAgcmV0dXJuCgpkZWYgbWFpbigpOgogICAgc2RlID0gb3MuZW52aXJvblsiU0RFX1NPTEFSU1lTVEVNU19HW iJdCiAgICBlc2lfYm9keSA9IG9zLmVudmlyb25bIkVTSV9CT0RZIl0KICAgIG5kanNvbl9vdXQgPSBvcy5lbnZpcm9uWyJOREpTT05fT1VUIl0KICAgIHNuYXBzaG90X3RzID0gb3MuZW52aXJvblsiU05BUFNIT1RfVFNfSVNPIl0KICAgIGV4aXN0aW5nX2NzdiA9IG9zLmVudmlyb24uZ2V0KCJFWElTVElOR19DU1YiLCAiIikKICAgIG5hbWVzX2pzb24gPSBvcy5lbnZpcm9uLmdldCgiTkFNRVNfSlNPTiIsICIiKQoKICAgIG1wID0gbG9hZF9zZGVfbWFwKHNkZSkKICAgIG1lcmdlX25hbWVzX2ZhbGxiYWNrKG1wLCBuYW1lc19qc29uKQoKICAgIGV4aXN0aW5nID0gbG9hZF9leGlzdGluZ19uYW1lcyhleGlzdGluZ19jc3YpCgogICAgd2l0aCBvcGVuKGVzaV9ib2R5LCAiciIsIGVuY29kaW5nPSJ1dGYtOCIpIGFzIGY6CiAgICAgICAgZGF0YSA9IGpzb24ubG9hZChmKQoKICAgIG1pc3NpbmcgPSBbXQogICAgcm93cyA9IDAKICAgIHdpdGggb3BlbihuZGpzb25fb3V0LCAidyIsIGVuY29kaW5nPSJ1dGYtOCIpIGFzIG91dDoKICAgICAgICBmb3IgcmVjIGluIGRhdGE6CiAgICAgICAgICAgIHNpZCA9IGludChyZWNbInN5c3RlbV9pZCJdKQogICAgICAgICAgICBqdW1wcyA9IGludChyZWMuZ2V0KCJzaGlwX2p1bXBzIiwgMCkpCiAgICAgICAgICAgIG5hbWUgPSBtcC5nZXQoc2lkKQogICAgICAgICAgICBpZiBub3QgbmFtZToKICAgICAgICAgICAgICAgIG1pc3NpbmcuYXBwZW5kKHNpZCkKICAgICAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgICAgIGlmIGV4aXN0aW5nIGFuZCBuYW1lIGluIGV4aXN0aW5nOgogICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgb3V0LndyaXRlKGpzb24uZHVtcHMoewogICAgICAgICAgICAgICAgInNuYXBzaG90X3RzIjogc25hcHNob3RfdHMsCiAgICAgICAgICAgICAgICAic29sYXJTeXN0ZW0iOiBuYW1lLAogICAgICAgICAgICAgICAgInNoaXBfanVtcHMiOiBqdW1wcwogICAgICAgICAgICB9LCBlbnN1cmVfYXNjaWk9RmFsc2UpICsgIlxuIikKICAgICAgICAgICAgcm93cyArPSAxCgogICAgaWYgbWlzc2luZzoKICAgICAgICBtaXNzaW5nID0gc29ydGVkKHNldChtaXNzaW5nKSkKICAgICAgICByYWlzZSBTeXN0RXhpdChmIlVubWFwcGVkIHN5c3RlbV9pZChzKSBhZnRlciBmYWxsYmFjazog e21pc3NpbmdbOjI1XX0iKQoKICAgIHByaW50KHJvd3MpCgppZiBfX25hbWVfXyA9PSAiX19tYWluX18iOgogICAgbWFpbigpCg==
+          PY_SDE_MISSING_IDS: |
+            #!/usr/bin/env python3
+            import gzip, json, os
+
+            def pick(d, keys):
+              for k in keys:
+                v = d.get(k)
+                if v is not None and str(v).strip() != "":
+                  return v
+              return None
+
+            ID_KEYS = ["solarSystemID","solarSystemId","solarSystem_id","system_id","id"]
+            NAME_KEYS = ["solarSystem","solarSystemName","solarSystem_name","solarSystemName_en","name","solarSystemNameEnglish"]
+
+            def load_sde_map(path):
+              mp = {}
+              with gzip.open(path, "rt", encoding="utf-8") as f:
+                for line in f:
+                  line = line.strip()
+                  if not line:
+                    continue
+                  o = json.loads(line)
+                  sid = pick(o, ID_KEYS)
+                  name = pick(o, NAME_KEYS)
+                  if sid is None or name is None:
+                    continue
+                  try:
+                    mp[int(sid)] = str(name)
+                  except Exception:
+                    continue
+              return mp
+
+            def main():
+              sde = os.environ["SDE_SOLARSYSTEMS_GZ"]
+              esi_body = os.environ["ESI_BODY"]
+              missing_out = os.environ["MISSING_OUT"]
+              stats_out = os.environ.get("STATS_OUT", "")
+
+              mp = load_sde_map(sde)
+
+              with open(esi_body, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+              missing = []
+              for rec in data:
+                sid = int(rec["system_id"])
+                if sid not in mp:
+                  missing.append(sid)
+
+              missing = sorted(set(missing))
+              with open(missing_out, "w", encoding="utf-8") as out:
+                for sid in missing:
+                  out.write(str(sid) + "\n")
+
+              stats = {
+                "sde_map_size": len(mp),
+                "esi_records": len(data),
+                "missing_ids": len(missing),
+              }
+
+              print(f"SDE map size: {stats['sde_map_size']}")
+              print(f"ESI records: {stats['esi_records']}")
+              print(f"Missing IDs: {stats['missing_ids']}")
+
+              if stats_out:
+                with open(stats_out, "w", encoding="utf-8") as f:
+                  json.dump(stats, f)
+
+            if __name__ == "__main__":
+              main()
+
+          PY_BUILD_NDJSON: |
+            #!/usr/bin/env python3
+            import gzip, json, os
+
+            def pick(d, keys):
+              for k in keys:
+                v = d.get(k)
+                if v is not None and str(v).strip() != "":
+                  return v
+              return None
+
+            ID_KEYS = ["solarSystemID","solarSystemId","solarSystem_id","system_id","id"]
+            NAME_KEYS = ["solarSystem","solarSystemName","solarSystem_name","solarSystemName_en","name","solarSystemNameEnglish"]
+
+            def load_sde_map(path):
+              mp = {}
+              with gzip.open(path, "rt", encoding="utf-8") as f:
+                for line in f:
+                  line = line.strip()
+                  if not line:
+                    continue
+                  o = json.loads(line)
+                  sid = pick(o, ID_KEYS)
+                  name = pick(o, NAME_KEYS)
+                  if sid is None or name is None:
+                    continue
+                  try:
+                    mp[int(sid)] = str(name)
+                  except Exception:
+                    continue
+              return mp
+
+            def load_existing_names(csv_path):
+              existing = set()
+              if not csv_path:
+                return existing
+              try:
+                with open(csv_path, "r", encoding="utf-8") as f:
+                  for line in f:
+                    v = line.strip()
+                    if v:
+                      existing.add(v)
+              except FileNotFoundError:
+                pass
+              return existing
+
+            def merge_names_fallback(mp, names_json_path):
+              if not names_json_path:
+                return
+              try:
+                with open(names_json_path, "r", encoding="utf-8") as f:
+                  arr = json.load(f)
+              except FileNotFoundError:
+                return
+
+              for o in arr:
+                try:
+                  if o.get("category") == "solar_system":
+                    mp[int(o["id"])] = str(o["name"])
+                except Exception:
+                  pass
+
+            def main():
+              sde = os.environ["SDE_SOLARSYSTEMS_GZ"]
+              esi_body = os.environ["ESI_BODY"]
+              ndjson_out = os.environ["NDJSON_OUT"]
+              snapshot_ts = os.environ["SNAPSHOT_TS_ISO"]
+              existing_csv = os.environ.get("EXISTING_CSV", "")
+              names_json = os.environ.get("NAMES_JSON", "")
+
+              mp = load_sde_map(sde)
+              merge_names_fallback(mp, names_json)
+              existing = load_existing_names(existing_csv)
+
+              with open(esi_body, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+              missing = []
+              rows = 0
+              with open(ndjson_out, "w", encoding="utf-8") as out:
+                for rec in data:
+                  sid = int(rec["system_id"])
+                  jumps = int(rec.get("ship_jumps", 0))
+                  name = mp.get(sid)
+                  if not name:
+                    missing.append(sid)
+                    continue
+                  if existing and name in existing:
+                    continue
+                  out.write(json.dumps({
+                    "snapshot_ts": snapshot_ts,
+                    "solarSystem": name,
+                    "ship_jumps": jumps
+                  }, ensure_ascii=False) + "\n")
+                  rows += 1
+
+              if missing:
+                missing = sorted(set(missing))
+                raise SystemExit(f"Unmapped system_id(s) after fallback: {missing[:25]}")
+
+              print(rows)
+
+            if __name__ == "__main__":
+              main()
         run: |
           set -euo pipefail
           mkdir -p .ci/py
-          echo "$B64_SDE_MISSING_IDS" | tr -d '\n' | base64 -d > .ci/py/sde_missing_ids.py
-          echo "$B64_BUILD_NDJSON" | tr -d '\n' | base64 -d > .ci/py/build_ndjson.py
+          printf '%s' "$PY_SDE_MISSING_IDS" > .ci/py/sde_missing_ids.py
+          printf '%s' "$PY_BUILD_NDJSON" > .ci/py/build_ndjson.py
           chmod +x .ci/py/sde_missing_ids.py .ci/py/build_ndjson.py
+          python3 -m py_compile .ci/py/sde_missing_ids.py
+          python3 -m py_compile .ci/py/build_ndjson.py
 
-      # ============================================================
-      # 8) OBJECTIVE — ESI → BQ + state + (opcional) /universe/names
-      # ============================================================
       - name: OBJECTIVE - ESI System Jumps -> BigQuery
         id: objective
         run: |
@@ -247,11 +390,9 @@ jobs:
             echo "$1" | sed -E 's/^[[:space:]]*W\/"//; s/^"//; s/"[[:space:]]*$//; s/[[:space:]]+$//'
           }
 
-          # HTTP status de última llamada ESI
           ESI_HTTP=""
 
           esi_request() {
-            # usage: esi_request METHOD URL HDR_OUT BODY_OUT [DATA_FILE] [IF_NONE_MATCH]
             local method="$1" url="$2" hdr="$3" body="$4"
             local data_file="${5:-}"
             local inm="${6:-}"
@@ -315,7 +456,6 @@ jobs:
             done
           }
 
-          # ---------- leer state etag ----------
           mkdir -p "$(dirname "${STATE_PATH}")"
           if [ -f "${STATE_PATH}" ]; then
             old_etag="$(jq -r '.etag // empty' "${STATE_PATH}" 2>/dev/null || true)"
@@ -324,7 +464,6 @@ jobs:
           fi
           old_etag="$(normalize_etag "${old_etag}")"
 
-          # ---------- GET ESI con If-None-Match ----------
           hdr="$(mktemp)"
           body="$(mktemp)"
           esi_request "GET" "${ESI_URL}" "$hdr" "$body" "" "${old_etag}"
@@ -349,7 +488,6 @@ jobs:
             final_next_epoch=$((RUN_START_EPOCH + 300))
           fi
 
-          # outputs por defecto
           set_last_modified="false"
           state_should_update="false"
           final_lastmod_epoch=""
@@ -380,7 +518,6 @@ jobs:
           snapshot_ts_iso="$(date -u -d "@${lastmod_epoch}" +"%Y-%m-%dT%H:%M:%SZ")"
           final_lastmod_epoch="$lastmod_epoch"
 
-          # ---------- BigQuery: crear tabla si no existe ----------
           bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false \
             "CREATE TABLE IF NOT EXISTS \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
              (
@@ -391,7 +528,6 @@ jobs:
              PARTITION BY DATE(snapshot_ts)
              CLUSTER BY solarSystem"
 
-          # ---------- BigQuery: existe snapshot? ----------
           snapshot_count="$(bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false --format=csv \
             --parameter="ts:TIMESTAMP:${snapshot_ts_iso}" \
             "SELECT COUNT(1) AS c
@@ -400,7 +536,6 @@ jobs:
 
           existing_csv=""
           if [ "${snapshot_count}" != "0" ]; then
-            # snapshot ya existe => state estaba mal
             state_should_update="true"
             set_last_modified="true"
             existing_csv="$(mktemp)"
@@ -435,7 +570,6 @@ jobs:
             exit 1
           fi
 
-          # ---------- calcular missing_ids usando SDE ----------
           missing_ids="$(mktemp)"
           stats_json="$(mktemp)"
 
@@ -447,17 +581,16 @@ jobs:
 
           sde_map_size="$(jq -r '.sde_map_size' "$stats_json")"
           universe_names_missing_ids="$(jq -r '.missing_ids' "$stats_json")"
-
           echo "Missing system_id not in SDE: ${universe_names_missing_ids}"
 
-          # ---------- decidir si activar fallback /universe/names ----------
-          # Regla: se permite si hay missing > 0 (caso real), y en especial si el SDE parece roto (map_size < threshold).
+          # Fallback permitido si hay missing > 0
+          # y especialmente si el SDE parece sospechoso (map_size < threshold)
           allow_fallback="false"
           if [ "${universe_names_missing_ids}" -gt 0 ]; then
             allow_fallback="true"
           fi
           if [ "${sde_map_size}" -lt "${SDE_MIN_MAP_SIZE}" ]; then
-            echo "SDE seems suspicious (map_size=${sde_map_size} < ${SDE_MIN_MAP_SIZE}). Fallback allowed."
+            echo "SDE suspicious (map_size=${sde_map_size} < ${SDE_MIN_MAP_SIZE}). Fallback allowed."
             allow_fallback="true"
           fi
 
@@ -489,7 +622,6 @@ jobs:
 
           echo "ESI /universe/names calls performed: ${universe_names_calls}"
 
-          # ---------- construir NDJSON final ----------
           ndjson="$(mktemp)"
 
           SDE_SOLARSYSTEMS_GZ="${SDE_SOLARSYSTEMS_GZ}" \
@@ -511,7 +643,6 @@ jobs:
               "$ndjson"
           fi
 
-          # ---------- reglas update state / last_modified ----------
           if [ "$should_dump" = "true" ]; then
             set_last_modified="true"
             state_should_update="true"
@@ -520,7 +651,6 @@ jobs:
             jq -n --arg etag "$new_etag" '{etag:$etag}' > "${STATE_PATH}"
           fi
 
-          # Outputs
           echo "final_next_epoch=${final_next_epoch}" >> "$GITHUB_OUTPUT"
           echo "final_lastmod_epoch=${final_lastmod_epoch}" >> "$GITHUB_OUTPUT"
           echo "set_last_modified=${set_last_modified}" >> "$GITHUB_OUTPUT"
@@ -529,9 +659,6 @@ jobs:
           echo "universe_names_missing_ids=${universe_names_missing_ids}" >> "$GITHUB_OUTPUT"
           echo "used_universe_names=${used_universe_names}" >> "$GITHUB_OUTPUT"
 
-      # ============================================================
-      # 9) Commit state si cambió
-      # ============================================================
       - name: Commit state (if changed)
         if: success()
         run: |
@@ -540,18 +667,13 @@ jobs:
             echo "No state changes to commit."
             exit 0
           fi
-
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git add "${STATE_PATH}"
           git commit -m "chore(state): update system_jumps etag [skip ci]" || exit 0
           git pull --rebase --autostash || true
           git push
 
-      # ============================================================
-      # 10) FINALIZE SUCCESS — status + next_run + last_modified si toca + resumen universe/names
-      # ============================================================
       - name: Finalize (completed)
         if: success()
         env:
@@ -597,9 +719,6 @@ jobs:
                 ]
               }"
 
-      # ============================================================
-      # 11) FINALIZE FAILURE — status failed + next_run = start+5m
-      # ============================================================
       - name: Finalize (failed)
         if: failure()
         env:
@@ -609,7 +728,6 @@ jobs:
           row="${SHEETS_WORKFLOW_ROW}"
           epoch=$((RUN_START_EPOCH + 300))
           serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
-
           curl -fsSL -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
