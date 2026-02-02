@@ -1,15 +1,16 @@
-"""EOU · SDE Dataset (SDE → GH) — build outputs.
+"""
+EOU · SDE Dataset (SDE → GH) — build outputs (UPDATED)
 
-Generates (overwrites) the following files in the provided output directory:
+Genera (sobrescribe) en el directorio de salida:
 
   - regions.jsonl.gz
   - constellations.jsonl.gz
   - solarsystems.jsonl.gz
-  - stations.jsonl.gz
+  - stations.jsonl.gz   (UPDATED: stationType)
   - stargates.jsonl.gz
-  - types.jsonl.gz
+  - types.jsonl.gz      (UPDATED: group, marketGroup, published-only)
 
-Only uses the official CCP SDE JSONL ZIP.
+Solo usa el ZIP oficial CCP SDE JSONL (no ESI, no "extended").
 """
 
 from __future__ import annotations
@@ -17,11 +18,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
-from typing import Dict, List, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import zipfile
 
-# Allow running this file directly ("python scripts/sde/...") without packaging.
 THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
@@ -29,6 +29,10 @@ if str(THIS_DIR) not in sys.path:
 from eou_sde_dataset_sde_to_gh_io import iter_jsonl_from_zip, write_jsonl_gz  # noqa: E402
 from eou_sde_dataset_sde_to_gh_names import moon_name, planet_name, safe_en_name  # noqa: E402
 
+
+# -----------------------------
+# Helpers de lectura (SDE)
+# -----------------------------
 
 def _read_regions(zf: zipfile.ZipFile) -> Dict[int, str]:
     regions: Dict[int, str] = {}
@@ -39,6 +43,7 @@ def _read_regions(zf: zipfile.ZipFile) -> Dict[int, str]:
 
 
 def _read_constellations(zf: zipfile.ZipFile) -> Dict[int, Tuple[str, int]]:
+    # constellationID -> (constellationNameEn, regionID)
     consts: Dict[int, Tuple[str, int]] = {}
     for obj in iter_jsonl_from_zip(zf, "mapConstellations.jsonl"):
         cid = int(obj.get("_key"))
@@ -49,7 +54,7 @@ def _read_constellations(zf: zipfile.ZipFile) -> Dict[int, Tuple[str, int]]:
 
 
 def _read_solarsystems(zf: zipfile.ZipFile) -> Dict[int, Tuple[str, int, int]]:
-    # solarSystemID -> (name_en, constellationID, regionID)
+    # solarSystemID -> (solarSystemNameEn, constellationID, regionID)
     systems: Dict[int, Tuple[str, int, int]] = {}
     for obj in iter_jsonl_from_zip(zf, "mapSolarSystems.jsonl"):
         sid = int(obj.get("_key"))
@@ -60,8 +65,11 @@ def _read_solarsystems(zf: zipfile.ZipFile) -> Dict[int, Tuple[str, int, int]]:
     return systems
 
 
-def _read_planet_orbit_names(zf: zipfile.ZipFile, systems: Dict[int, Tuple[str, int, int]]) -> Dict[int, str]:
-    # planetID -> orbitName (e.g., "Jita IV")
+def _read_planet_orbit_names(
+    zf: zipfile.ZipFile,
+    systems: Dict[int, Tuple[str, int, int]],
+) -> Dict[int, str]:
+    # planetID -> orbitName (e.g. "Jita IV")
     out: Dict[int, str] = {}
     for obj in iter_jsonl_from_zip(zf, "mapPlanets.jsonl"):
         pid = int(obj.get("_key"))
@@ -72,8 +80,11 @@ def _read_planet_orbit_names(zf: zipfile.ZipFile, systems: Dict[int, Tuple[str, 
     return out
 
 
-def _read_moon_orbit_names(zf: zipfile.ZipFile, planet_orbits: Dict[int, str]) -> Dict[int, str]:
-    # moonID -> orbitName (e.g., "Jita IV - Moon 4")
+def _read_moon_orbit_names(
+    zf: zipfile.ZipFile,
+    planet_orbits: Dict[int, str],
+) -> Dict[int, str]:
+    # moonID -> orbitName (e.g. "Jita IV - Moon 4")
     out: Dict[int, str] = {}
     for obj in iter_jsonl_from_zip(zf, "mapMoons.jsonl"):
         mid = int(obj.get("_key"))
@@ -93,6 +104,7 @@ def _read_corporations(zf: zipfile.ZipFile) -> Dict[int, str]:
 
 
 def _read_station_operations(zf: zipfile.ZipFile) -> Dict[int, Tuple[str, bool]]:
+    # operationID -> (operationName, useOperationName)
     ops: Dict[int, Tuple[str, bool]] = {}
     for obj in iter_jsonl_from_zip(zf, "stationOperations.jsonl"):
         oid = int(obj.get("_key"))
@@ -101,6 +113,62 @@ def _read_station_operations(zf: zipfile.ZipFile) -> Dict[int, Tuple[str, bool]]
         ops[oid] = (name, use_op)
     return ops
 
+
+def _read_type_name_map(zf: zipfile.ZipFile) -> Dict[int, str]:
+    # typeID -> typeNameEn
+    out: Dict[int, str] = {}
+    for obj in iter_jsonl_from_zip(zf, "types.jsonl"):
+        tid = int(obj.get("_key"))
+        out[tid] = safe_en_name(obj, fallback=str(tid))
+    return out
+
+
+def _read_group_names(zf: zipfile.ZipFile) -> Dict[int, str]:
+    # groupID -> groupNameEn
+    out: Dict[int, str] = {}
+    for obj in iter_jsonl_from_zip(zf, "groups.jsonl"):
+        gid = int(obj.get("_key"))
+        out[gid] = safe_en_name(obj, fallback=str(gid))
+    return out
+
+
+def _read_marketgroup_names(zf: zipfile.ZipFile) -> Dict[int, str]:
+    # marketGroupID -> marketGroupNameEn
+    out: Dict[int, str] = {}
+    # En el SDE oficial suele ser marketGroups.jsonl
+    for obj in iter_jsonl_from_zip(zf, "marketGroups.jsonl"):
+        mgid = int(obj.get("_key"))
+        out[mgid] = safe_en_name(obj, fallback=str(mgid))
+    return out
+
+
+def _read_contraband_set(zf: zipfile.ZipFile) -> Set[int]:
+    ids: Set[int] = set()
+    for obj in iter_jsonl_from_zip(zf, "contrabandTypes.jsonl"):
+        ids.add(int(obj.get("_key")))
+    return ids
+
+
+def _get_int(obj: Dict, *keys: str) -> Optional[int]:
+    for k in keys:
+        if k in obj and obj[k] is not None:
+            try:
+                return int(obj[k])
+            except Exception:
+                return None
+    return None
+
+
+def _get_bool(obj: Dict, *keys: str, default: bool = False) -> bool:
+    for k in keys:
+        if k in obj:
+            return bool(obj[k])
+    return default
+
+
+# -----------------------------
+# Builders de outputs
+# -----------------------------
 
 def build_regions_out(regions: Dict[int, str]) -> List[Dict]:
     rows = [{"regionID": rid, "region": name} for rid, name in regions.items()]
@@ -112,7 +180,7 @@ def build_constellations_out(
     consts: Dict[int, Tuple[str, int]],
     regions: Dict[int, str],
 ) -> List[Dict]:
-    rows = []
+    rows: List[Dict] = []
     for cid, (cname, rid) in consts.items():
         rows.append(
             {
@@ -130,7 +198,7 @@ def build_solarsystems_out(
     consts: Dict[int, Tuple[str, int]],
     regions: Dict[int, str],
 ) -> List[Dict]:
-    rows = []
+    rows: List[Dict] = []
     for sid, (sname, cid, rid) in systems.items():
         cname = consts.get(cid, (str(cid), 0))[0]
         rows.append(
@@ -152,30 +220,41 @@ def build_stations_out(
     operations: Dict[int, Tuple[str, bool]],
     planet_orbits: Dict[int, str],
     moon_orbits: Dict[int, str],
+    type_names: Dict[int, str],
 ) -> List[Dict]:
-    rows = []
+    """
+    stations.jsonl.gz (UPDATED):
+      - stationID
+      - station      (nombre construido con SDE)
+      - stationType  (nombre del type en inglés, via typeID->types.jsonl.name.en)
+      - solarSystem
+    """
+    rows: List[Dict] = []
 
-    # orbitID can point to a planet or moon. Fall back to solar system name.
+    # orbitID puede apuntar a planeta o luna; fallback: solar system name.
     orbit_names: Dict[int, str] = {}
     orbit_names.update(planet_orbits)
     orbit_names.update(moon_orbits)
 
     for obj in iter_jsonl_from_zip(zf, "npcStations.jsonl"):
         station_id = int(obj.get("_key"))
-        solar_system_id = int(obj.get("solarSystemID"))
+
+        solar_system_id = _get_int(obj, "solarSystemID")
+        if solar_system_id is None:
+            # si faltase, lo dejamos derivado del id del station (extremo)
+            solar_system_id = -1
         ss_name = systems.get(solar_system_id, (str(solar_system_id), 0, 0))[0]
 
-        orbit_id = obj.get("orbitID")
-        orbit_name = orbit_names.get(int(orbit_id), ss_name) if orbit_id is not None else ss_name
+        orbit_id = _get_int(obj, "orbitID")
+        orbit_name = orbit_names.get(orbit_id, ss_name) if orbit_id is not None else ss_name
 
-        owner_id = int(obj.get("ownerID"))
+        owner_id = _get_int(obj, "ownerID") or -1
         corp = corp_names.get(owner_id, str(owner_id))
 
-        op_id_raw = obj.get("operationID")
+        op_id = _get_int(obj, "operationID")
         op_name = ""
         use_op = False
-        if op_id_raw is not None:
-            op_id = int(op_id_raw)
+        if op_id is not None:
             op_name, use_op = operations.get(op_id, (str(op_id), False))
 
         # CCP naming rule:
@@ -185,10 +264,15 @@ def build_stations_out(
         if use_op and op_name:
             station_name = f"{station_name} {op_name}".strip()
 
+        # stationType: resolver typeID del station usando types.jsonl.name.en
+        st_type_id = _get_int(obj, "typeID", "stationTypeID", "stationTypeId")
+        st_type_name = type_names.get(st_type_id, str(st_type_id)) if st_type_id is not None else ""
+
         rows.append(
             {
                 "stationID": station_id,
-                "stationName": station_name,
+                "station": station_name,
+                "stationType": st_type_name,
                 "solarSystem": ss_name,
             }
         )
@@ -198,7 +282,7 @@ def build_stations_out(
 
 
 def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Tuple[str, int, int]]) -> List[Dict]:
-    rows = []
+    rows: List[Dict] = []
     for obj in iter_jsonl_from_zip(zf, "mapStargates.jsonl"):
         gid = int(obj.get("_key"))
         src_id = int(obj.get("solarSystemID"))
@@ -228,41 +312,42 @@ def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Tuple[str, int, 
     return rows
 
 
-def _read_group_names(zf: zipfile.ZipFile) -> Dict[int, str]:
-    out: Dict[int, str] = {}
-    for obj in iter_jsonl_from_zip(zf, "groups.jsonl"):
-        gid = int(obj.get("_key"))
-        out[gid] = safe_en_name(obj, fallback=str(gid))
-    return out
-
-
-def _read_contraband_set(zf: zipfile.ZipFile) -> Set[int]:
-    ids: Set[int] = set()
-    for obj in iter_jsonl_from_zip(zf, "contrabandTypes.jsonl"):
-        ids.add(int(obj.get("_key")))
-    return ids
-
-
 def build_types_out(zf: zipfile.ZipFile) -> List[Dict]:
+    """
+    types.jsonl.gz (UPDATED):
+      - typeID
+      - type
+      - group          (name.en)
+      - marketGroup    (name.en)
+      - is_contraband
+      - is_gategank    (group name == "Smart Bomb")
+    IMPORTANT: solo published == true
+    """
     group_names = _read_group_names(zf)
+    marketgroup_names = _read_marketgroup_names(zf)
     contraband = _read_contraband_set(zf)
 
     rows: List[Dict] = []
+
     for obj in iter_jsonl_from_zip(zf, "types.jsonl"):
+        if not _get_bool(obj, "published", default=False):
+            continue
+
         tid = int(obj.get("_key"))
         tname = safe_en_name(obj, fallback=str(tid))
 
-        # SDE uses group_id in JSONL (per schema references) but be tolerant.
-        group_id = obj.get("group_id")
-        if group_id is None:
-            group_id = obj.get("groupID")
-        gid = int(group_id) if group_id is not None else -1
-        gname = group_names.get(gid, "")
+        gid = _get_int(obj, "group_id", "groupID")
+        gname = group_names.get(gid, str(gid)) if gid is not None else ""
+
+        mgid = _get_int(obj, "marketGroupID", "market_group_id", "marketGroupId")
+        mgname = marketgroup_names.get(mgid, str(mgid)) if mgid is not None else ""
 
         rows.append(
             {
                 "typeID": tid,
                 "type": tname,
+                "group": gname,
+                "marketGroup": mgname,
                 "is_contraband": tid in contraband,
                 "is_gategank": gname == "Smart Bomb",
             }
@@ -271,6 +356,10 @@ def build_types_out(zf: zipfile.ZipFile) -> List[Dict]:
     rows.sort(key=lambda r: r["typeID"])
     return rows
 
+
+# -----------------------------
+# Main
+# -----------------------------
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -291,24 +380,27 @@ def main() -> int:
         write_jsonl_gz(out_dir / "constellations.jsonl.gz", build_constellations_out(consts, regions))
         write_jsonl_gz(out_dir / "solarsystems.jsonl.gz", build_solarsystems_out(systems, consts, regions))
 
-        # Stations: requires orbits + corp/ops
+        # Stations (UPDATED)
         planet_orbits = _read_planet_orbit_names(zf, systems)
         moon_orbits = _read_moon_orbit_names(zf, planet_orbits)
         corp_names = _read_corporations(zf)
         operations = _read_station_operations(zf)
 
+        # Para stationType: typeID -> name.en (solo SDE)
+        type_names = _read_type_name_map(zf)
+
         write_jsonl_gz(
             out_dir / "stations.jsonl.gz",
-            build_stations_out(zf, systems, corp_names, operations, planet_orbits, moon_orbits),
+            build_stations_out(zf, systems, corp_names, operations, planet_orbits, moon_orbits, type_names),
         )
 
         # Stargates
         write_jsonl_gz(out_dir / "stargates.jsonl.gz", build_stargates_out(zf, systems))
 
-        # Types
+        # Types (UPDATED: group, marketGroup, published-only)
         write_jsonl_gz(out_dir / "types.jsonl.gz", build_types_out(zf))
 
-    # Minimal sanity check: ensure files exist and are non-empty.
+    # Sanity check: ficheros existen y no vacíos
     expected = [
         "regions.jsonl.gz",
         "constellations.jsonl.gz",
