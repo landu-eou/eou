@@ -132,7 +132,6 @@ jobs:
 
           local_etag=""
           if [[ "${state_exists}" == "true" ]]; then
-            # (opcional) normalizar posibles comillas en state
             local_etag="$(jq -r '.etag // empty' "${STATE_PATH}" 2>/dev/null | sed -E 's/^"//; s/"$//' || true)"
           fi
           echo "local_etag=${local_etag}" >> "${GITHUB_OUTPUT}"
@@ -147,7 +146,6 @@ jobs:
               "${ESI_URL}")"
           fi
 
-          # Normalizar comillas en ETag del header
           remote_etag="$(grep -i '^etag:' "${headers_file}" | tail -1 \
             | sed -E 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//' \
             | tr -d '\r' \
@@ -218,11 +216,15 @@ jobs:
           http_code="${{ steps.esi.outputs.http_code }}"
           state_exists="${{ steps.esi.outputs.state_exists }}"
 
-          # FIX A: COUNT robusto: CSV headless (sin jq)
+          # COUNT robusto: CSV headless + sanitización + una sola línea
           snap_count="$(bq --project_id="${GCP_PROJECT_ID}" query --quiet --use_legacy_sql=false --format=csv --headless \
             "SELECT COUNT(1) AS c
              FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
-             WHERE snapshot_ts = TIMESTAMP('${lm_iso}')")"
+             WHERE snapshot_ts = TIMESTAMP('${lm_iso}')" \
+            | tr -d '\r' \
+            | tail -n 1 \
+            | tr -cd '0-9')"
+          snap_count="${snap_count:-0}"
 
           mode="noop"
           if [[ "${snap_count}" == "0" ]]; then
@@ -248,9 +250,10 @@ jobs:
             update_state="true"
           fi
 
-          echo "snap_count=${snap_count}" >> "${GITHUB_OUTPUT}"
-          echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
-          echo "update_state=${update_state}" >> "${GITHUB_OUTPUT}"
+          # Escribir outputs de forma segura (una línea por output)
+          printf 'snap_count=%s\n' "$snap_count" >> "${GITHUB_OUTPUT}"
+          printf 'mode=%s\n' "$mode" >> "${GITHUB_OUTPUT}"
+          printf 'update_state=%s\n' "$update_state" >> "${GITHUB_OUTPUT}"
 
       - name: Prepare load (download ESI + validate mapping + build ndjson)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' }}
