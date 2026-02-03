@@ -3,165 +3,514 @@ name: ESI System Kills (ESI → GH → BQ)
 on:
   workflow_dispatch:
 
+# Permisos mínimos:
+# - actions:read   -> Guard por REST (listar runs)
+# - contents:write -> commit de states/system_kills.json
+# - id-token:write -> WIF/OIDC hacia Google
 permissions:
+  actions: read
   contents: write
   id-token: write
 
+# Candado oficial: evita solapamiento real.
+# Los duplicados/colas "útiles" se cortan con el Guard.
 concurrency:
-  group: eou_kills_esi-gh-bq
+  group: eou_esi_kills_esi-gh-bq
   cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     env:
-      WORKFLOW_ID: eou_kills_esi-gh-bq
-      WORKFLOW_NAME: "ESI System Kills (ESI -> GH -> BQ)"
-      SHEET_ROW: "5"
-      EXPIRES: "86400"
-      LOCK_SECONDS: "60"
+      # Guard (anti-cola)
+      WORKFLOW_FILE: eou_esi_kills_esi-gh-bq.yml
+      GH_API: https://api.github.com
 
-      ESI_URL: "https://esi.evetech.net/latest/universe/system_kills/?datasource=tranquility"
-      STATE_PATH: "data/esi_gh_bq/eou_kills_esi-gh-bq.json"
-      SDE_MAP_PATH: "data/gh_sde/gh_sde_ss.jsonl.gz"
+      # Sheets (tabla de control)
+      SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
+      SHEET_TAB: workflows
+      SHEETS_WORKFLOW_ROW: "6"
+      LOCK_TIME: "120" # segundos
 
-      BQ_DATASET: "eou"
-      BQ_TABLE: "system_kills"
+      # ESI + estado local
+      ESI_URL: https://esi.evetech.net/universe/system_kills
+      STATE_PATH: states/system_kills.json
+      SDE_SOLARSYSTEMS_GZ: data/sde/solarsystems.jsonl.gz
+
+      # BigQuery
+      BQ_DATASET: eou
+      BQ_TABLE: system_kills
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Preflight (gateway)
+      # ============================================================
+      # 0) GUARD (anti-cola / anti-duplicados)
+      # - Si hay otro run in_progress => salir sin trabajo
+      # - Si un run anterior terminó success después de que este run se creara => este run es redundante
+      # ============================================================
+      - name: Guard - decide proceed (anti-cola)
+        id: guard
         shell: bash
         env:
-          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
-        run: |
-          set -euo pipefail
-          curl -sS -L "$GATEWAY_URL" | jq -e '.service=="eou_gateway_webapp"' >/dev/null
-
-      - name: START
-        id: start
-        shell: bash
-        env:
-          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
-          GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
-        run: |
-          set -euo pipefail
-          EXPIRES_START="${LOCK_SECONDS}"
-          NOW_MS="$(date -u +%s%3N)"
-          CONCLUSION="-"
-          CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|start|${EXPIRES_START}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
-          SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-          WF_NAME_ESC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")"
-          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ESC}&row=${SHEET_ROW}&phase=start&expires=${EXPIRES_START}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
-
-          RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
-          echo "$RESP" | jq -e . >/dev/null
-          OK="$(echo "$RESP" | jq -r '.ok // false')"
-          if [[ "$OK" != "true" ]]; then
-            echo "Gateway START error: $RESP"
-            exit 1
-          fi
-          LOCKED="$(echo "$RESP" | jq -r '.locked // false')"
-          echo "locked=$LOCKED" >> "$GITHUB_OUTPUT"
-
-      - name: Exit if locked
-        if: steps.start.outputs.locked == 'true'
-        run: exit 0
-
-      - name: Auth to Google Cloud (WIF)
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-
-      - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Objective (ESI -> transform -> BQ -> state)
-        shell: bash
-        env:
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          NOW_S="$(date -u +%s)"
-          echo "NEXT_RUN_EPOCH=$((NOW_S + 600))" >> "$GITHUB_ENV"
-          echo "WILL_COMMIT_STATE=false" >> "$GITHUB_ENV"
+          repo="${GITHUB_REPOSITORY}"
+          run_id="${GITHUB_RUN_ID}"
+          auth_hdr="Authorization: Bearer ${GH_TOKEN}"
+          acc_hdr="Accept: application/vnd.github+json"
 
-          python3 scripts/esi_system_kills.py
-
-          if [[ -f state_new.json ]]; then
-            mv -f state_new.json "$STATE_PATH"
-            echo "WILL_COMMIT_STATE=true" >> "$GITHUB_ENV"
-          fi
-
-      - name: Commit state JSON (pull --rebase + retry)
-        if: env.WILL_COMMIT_STATE == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if git diff --quiet -- "$STATE_PATH"; then
-            echo "No state changes to commit."
+          wf_id="$(
+            curl -sS -H "${auth_hdr}" -H "${acc_hdr}" \
+              "${GH_API}/repos/${repo}/actions/workflows/${WORKFLOW_FILE}" \
+            | jq -r '.id'
+          )"
+          if [[ -z "${wf_id}" || "${wf_id}" == "null" ]]; then
+            echo "proceed=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
+
+          self_created="$(
+            curl -sS -H "${auth_hdr}" -H "${acc_hdr}" \
+              "${GH_API}/repos/${repo}/actions/runs/${run_id}" \
+            | jq -r '.created_at'
+          )"
+          if [[ -z "${self_created}" || "${self_created}" == "null" ]]; then
+            echo "proceed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          runs_json="$(
+            curl -sS -H "${auth_hdr}" -H "${acc_hdr}" \
+              "${GH_API}/repos/${repo}/actions/workflows/${wf_id}/runs?per_page=50"
+          )"
+
+          other_inprog="$(
+            echo "${runs_json}" | jq -r --arg rid "${run_id}" '
+              [.workflow_runs[] | select(.status=="in_progress" and (.id|tostring)!=$rid)] | length
+            '
+          )"
+
+          stale_by_success="$(
+            echo "${runs_json}" | jq -r --arg created "${self_created}" --arg rid "${run_id}" '
+              [
+                .workflow_runs[]
+                | select((.id|tostring)!=$rid)
+                | select(.status=="completed" and .conclusion=="success")
+                | select(.created_at < $created and (.updated_at // "") > $created)
+              ] | length
+            '
+          )"
+
+          if [[ "${other_inprog}" -gt 0 || "${stale_by_success}" -gt 0 ]]; then
+            echo "proceed=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "proceed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Guard - exit early (no work)
+        if: ${{ steps.guard.outputs.proceed != 'true' }}
+        run: echo "Queued/duplicate dispatch detected. Exiting without work."
+
+      # ============================================================
+      # 1) BOOTSTRAP (serials de Sheets reutilizables)
+      # - RUN_START_EPOCH para el fallback de fallo (run_start + 5min)
+      # - lock_serial = now + LOCK_TIME (fase inicial)
+      # - fail_plus5_serial = run_start + 5min (fase final si falla)
+      # ============================================================
+      - name: Bootstrap - compute epoch and Sheets serials
+        if: ${{ steps.guard.outputs.proceed == 'true' }}
+        id: boot
+        shell: bash
+        run: |
+          set -euo pipefail
+          to_serial(){ awk -v s="$1" 'BEGIN{printf "%.10f", (s/86400.0)+25569.0}'; }
+
+          run_start_epoch="$(date -u +%s)"
+          echo "RUN_START_EPOCH=${run_start_epoch}" >> "${GITHUB_ENV}"
+
+          echo "lock_serial=$(to_serial "$((run_start_epoch + LOCK_TIME))")" >> "${GITHUB_OUTPUT}"
+          echo "fail_plus5_serial=$(to_serial "$((run_start_epoch + 300))")" >> "${GITHUB_OUTPUT}"
+
+      # ============================================================
+      # 2) BOOTSTRAP runtime (repo + auth + bq cli)
+      # ============================================================
+      - name: Checkout
+        if: ${{ steps.guard.outputs.proceed == 'true' }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Auth to Google (WIF)
+        if: ${{ steps.guard.outputs.proceed == 'true' }}
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: access_token
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          access_token_scopes: |
+            https://www.googleapis.com/auth/spreadsheets
+            https://www.googleapis.com/auth/cloud-platform
+
+      - name: Setup gcloud
+        if: ${{ steps.guard.outputs.proceed == 'true' }}
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      # ============================================================
+      # 3) ESI headers + snapshot
+      # - lee etag local
+      # - obtiene remote_etag + last_modified (snapshot_ts) + expires(+5min)
+      # - serials: last_modified_serial, expires_plus5_serial
+      # ============================================================
+      - name: Read state + fetch ESI headers (ETag/Expires/Last-Modified)
+        if: ${{ steps.guard.outputs.proceed == 'true' }}
+        id: esi
+        shell: bash
+        run: |
+          set -euo pipefail
+          to_serial(){ awk -v s="$1" 'BEGIN{printf "%.10f", (s/86400.0)+25569.0}'; }
+
+          state_exists="false"
+          [[ -f "${STATE_PATH}" ]] && state_exists="true"
+          echo "state_exists=${state_exists}" >> "${GITHUB_OUTPUT}"
+
+          local_etag=""
+          if [[ "${state_exists}" == "true" ]]; then
+            local_etag="$(jq -r '.etag // empty' "${STATE_PATH}" 2>/dev/null | sed -E 's/^"//; s/"$//' || true)"
+          fi
+          echo "local_etag=${local_etag}" >> "${GITHUB_OUTPUT}"
+
+          headers_file="$(mktemp)"
+          if [[ -n "${local_etag}" ]]; then
+            curl -sS -L -o /dev/null -D "${headers_file}" -H "If-None-Match: ${local_etag}" "${ESI_URL}" >/dev/null
+          else
+            curl -sS -L -o /dev/null -D "${headers_file}" "${ESI_URL}" >/dev/null
+          fi
+
+          remote_etag="$(grep -i '^etag:' "${headers_file}" | tail -1 \
+            | sed -E 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//' | tr -d '\r' | sed -E 's/^"//; s/"$//' || true)"
+
+          last_mod="$(grep -i '^last-modified:' "${headers_file}" | tail -1 \
+            | sed -E 's/^[Ll]ast-[Mm]odified:[[:space:]]*//' | tr -d '\r' || true)"
+
+          expires="$(grep -i '^expires:' "${headers_file}" | tail -1 \
+            | sed -E 's/^[Ee]xpires:[[:space:]]*//' | tr -d '\r' || true)"
+
+          [[ -z "${last_mod}" ]] && { echo "Missing Last-Modified header from ESI."; exit 1; }
+
+          lm_epoch="$(date -u -d "${last_mod}" +%s)"
+          lm_iso="$(date -u -d "@${lm_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
+          lm_serial="$(to_serial "${lm_epoch}")"
+
+          if [[ -n "${expires}" ]]; then
+            exp_epoch="$(date -u -d "${expires}" +%s)"
+          else
+            exp_epoch="$((lm_epoch + 3600))"
+          fi
+          exp_plus5_serial="$(to_serial "$((exp_epoch + 300))")"
+
+          echo "remote_etag=${remote_etag}" >> "${GITHUB_OUTPUT}"
+          echo "last_modified_iso=${lm_iso}" >> "${GITHUB_OUTPUT}"
+          echo "last_modified_serial=${lm_serial}" >> "${GITHUB_OUTPUT}"
+          echo "expires_plus5_serial=${exp_plus5_serial}" >> "${GITHUB_OUTPUT}"
+
+      # ============================================================
+      # 4) BigQuery ensure table (idempotente)
+      # ============================================================
+      - name: Ensure BigQuery table exists
+        if: ${{ steps.guard.outputs.proceed == 'true' }}
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bq --project_id="${GCP_PROJECT_ID}" query --quiet --use_legacy_sql=false "
+          CREATE TABLE IF NOT EXISTS \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\` (
+            snapshot_ts TIMESTAMP NOT NULL,
+            solarSystem STRING,
+            npc_kills INT64,
+            pod_kills INT64,
+            ship_kills INT64
+          )
+          PARTITION BY DATE(snapshot_ts)
+          CLUSTER BY solarSystem
+          "
+
+      # ============================================================
+      # 5) Decide mode (noop/full/reconcile/repair) + update_state flag
+      # ============================================================
+      - name: Decide mode (noop/full/reconcile/repair)
+        if: ${{ steps.guard.outputs.proceed == 'true' }}
+        id: mode
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          lm_iso="${{ steps.esi.outputs.last_modified_iso }}"
+          local_etag="${{ steps.esi.outputs.local_etag }}"
+          remote_etag="${{ steps.esi.outputs.remote_etag }}"
+          state_exists="${{ steps.esi.outputs.state_exists }}"
+
+          snap_count="$(
+            bq --project_id="${GCP_PROJECT_ID}" query --quiet --use_legacy_sql=false --format=csv --headless \
+              "SELECT COUNT(1) AS c
+               FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
+               WHERE snapshot_ts = TIMESTAMP('${lm_iso}')" \
+            | tr -d '\r' | tail -n 1 | tr -cd '0-9'
+          )"
+          snap_count="${snap_count:-0}"
+
+          mode="noop"
+          if [[ "${snap_count}" == "0" ]]; then
+            if [[ -z "${local_etag}" || "${local_etag}" != "${remote_etag}" ]]; then
+              mode="full"
+            else
+              mode="repair"
+            fi
+          else
+            if [[ -z "${local_etag}" || "${local_etag}" != "${remote_etag}" ]]; then
+              mode="reconcile"
+            else
+              mode="noop"
+            fi
+          fi
+
+          update_state="false"
+          if [[ "${state_exists}" != "true" || -z "${local_etag}" || "${local_etag}" != "${remote_etag}" ]]; then
+            update_state="true"
+          fi
+
+          printf 'mode=%s\n' "$mode" >> "${GITHUB_OUTPUT}"
+          printf 'update_state=%s\n' "$update_state" >> "${GITHUB_OUTPUT}"
+
+      # ============================================================
+      # 6) Prepare load (solo si mode != noop)
+      # - descarga ESI body
+      # - mapea system_id -> solarSystem (SDE)
+      # - reconcile: filtra faltantes comparando con BQ
+      # - error si falta mapping => aborta antes de tocar Sheets/BQ/State
+      # ============================================================
+      - name: Prepare load (download ESI + validate mapping + build ndjson)
+        if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' }}
+        id: prep
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mode="${{ steps.mode.outputs.mode }}"
+          lm_iso="${{ steps.esi.outputs.last_modified_iso }}"
+
+          curl -sS -L "${ESI_URL}" -o esi_body.json
+
+          gzip -cd "${SDE_SOLARSYSTEMS_GZ}" \
+            | jq -s 'map({(.solarSystemID|tostring): .solarSystem}) | add' \
+            > sde_map.json
+
+          if [[ "${mode}" == "reconcile" ]]; then
+            bq --project_id="${GCP_PROJECT_ID}" query --quiet --format=json --use_legacy_sql=false \
+              "SELECT solarSystem
+               FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
+               WHERE snapshot_ts = TIMESTAMP('${lm_iso}')" \
+              | jq 'map(.solarSystem) | map({(.): true}) | add // {}' \
+              > existing_map.json
+          else
+            echo '{}' > existing_map.json
+          fi
+
+          if [[ "${mode}" == "reconcile" ]]; then
+            jq -c --arg ts "${lm_iso}" --slurpfile map sde_map.json --slurpfile exist existing_map.json '
+              .[] |
+              {
+                snapshot_ts: $ts,
+                solarSystem: ($map[0][(.system_id|tostring)] // error("missing solarSystem mapping for system_id=" + (.system_id|tostring))),
+                npc_kills: (.npc_kills|tonumber),
+                pod_kills: (.pod_kills|tonumber),
+                ship_kills: (.ship_kills|tonumber)
+              } |
+              select( ($exist[0][.solarSystem] // false) | not )
+            ' esi_body.json > load.ndjson
+          else
+            jq -c --arg ts "${lm_iso}" --slurpfile map sde_map.json '
+              .[] |
+              {
+                snapshot_ts: $ts,
+                solarSystem: ($map[0][(.system_id|tostring)] // error("missing solarSystem mapping for system_id=" + (.system_id|tostring))),
+                npc_kills: (.npc_kills|tonumber),
+                pod_kills: (.pod_kills|tonumber),
+                ship_kills: (.ship_kills|tonumber)
+              }
+            ' esi_body.json > load.ndjson
+          fi
+
+          echo "load_lines=$(wc -l < load.ndjson | tr -d ' ')" >> "${GITHUB_OUTPUT}"
+          echo "prepared=true" >> "${GITHUB_OUTPUT}"
+
+      # ============================================================
+      # 7) Sheets lock (fase inicial)
+      # - Se ejecuta tras prep para cumplir: si falta mapping => no tocar nada
+      # - status=in_progress, next_run=now+LOCK_TIME (serial numérico)
+      # ============================================================
+      - name: Sheets - initial lock (in_progress + next_run = now + LOCK_TIME)
+        if: ${{ steps.guard.outputs.proceed == 'true' && (steps.mode.outputs.mode == 'noop' || steps.prep.outputs.prepared == 'true') }}
+        id: sheets_lock
+        shell: bash
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+
+          send_batch() {
+            curl -sS -X POST \
+              -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+              -d "$1" >/dev/null
+          }
+
+          make_body_lock() {
+            jq -n \
+              --arg tab "${SHEET_TAB}" \
+              --arg row "${SHEETS_WORKFLOW_ROW}" \
+              --arg status "in_progress" \
+              --argjson next_run "$1" \
+              '{
+                valueInputOption: "RAW",
+                data: [
+                  {range: ($tab + "!B" + $row), values: [[ $status ]]},
+                  {range: ($tab + "!D" + $row), values: [[ $next_run ]]}
+                ]
+              }'
+          }
+
+          body="$(make_body_lock "${{ steps.boot.outputs.lock_serial }}")"
+          send_batch "${body}"
+
+          echo "locked=true" >> "${GITHUB_OUTPUT}"
+
+      # ============================================================
+      # 8) BigQuery load (máximo 1 batch por run)
+      # - Solo si hay filas (load_lines != 0)
+      # ============================================================
+      - name: BigQuery load (single batch)
+        if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' && steps.prep.outputs.load_lines != '0' }}
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          printf '%s' \
+            '[{"name":"snapshot_ts","type":"TIMESTAMP","mode":"REQUIRED"},'\
+            '{"name":"solarSystem","type":"STRING","mode":"NULLABLE"},'\
+            '{"name":"npc_kills","type":"INT64","mode":"NULLABLE"},'\
+            '{"name":"pod_kills","type":"INT64","mode":"NULLABLE"},'\
+            '{"name":"ship_kills","type":"INT64","mode":"NULLABLE"}]' \
+            > schema.json
+
+          bq --project_id="${GCP_PROJECT_ID}" load --quiet \
+            --source_format=NEWLINE_DELIMITED_JSON \
+            "${BQ_DATASET}.${BQ_TABLE}" \
+            load.ndjson \
+            schema.json
+
+      # ============================================================
+      # 9) Update state (solo si lock OK y update_state==true)
+      # ============================================================
+      - name: Update state etag (commit to repo)
+        if: ${{ steps.guard.outputs.proceed == 'true' && steps.sheets_lock.outputs.locked == 'true' && steps.mode.outputs.update_state == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$(dirname "${STATE_PATH}")"
+          jq -n --arg etag "${{ steps.esi.outputs.remote_etag }}" '{etag: $etag}' > "${STATE_PATH}"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add "$STATE_PATH"
-          git commit -m "state(${WORKFLOW_ID}): commit Last-Modified/ETag" || exit 0
+          git add "${STATE_PATH}"
+          git diff --cached --quiet && exit 0
 
-          for i in 1 2 3 4 5; do
-            git fetch origin main
-            git rebase origin/main || (git rebase --abort && true)
-            if git push origin HEAD:main; then
-              echo "Pushed."
-              exit 0
-            fi
-            echo "Push failed, retry $i..."
-            sleep $((i*2))
-          done
+          git commit -m "state: update system_kills etag"
+          git pull --rebase
+          git push
 
-          echo "Push failed after retries."
-          exit 1
-
-      - name: FINISH
-        if: always() && steps.start.outputs.locked != 'true'
+      # ============================================================
+      # 10) Sheets finalize (fase final)
+      # - Si success: next_run = Expires + 5min
+      # - Si fail:    next_run = run_start + 5min
+      # - last_modified (col I) solo si success && update_state==true
+      # ============================================================
+      - name: Sheets - finalize (status + next_run + optional last_modified)
+        if: ${{ always() && steps.sheets_lock.outputs.locked == 'true' }}
         shell: bash
         env:
-          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
-          GATEWAY_SECRET: ${{ secrets.GATEWAY_SECRET }}
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           set -euo pipefail
 
-          STATUS="${{ job.status }}"
-          case "$STATUS" in
-            success) CONCLUSION="success" ;;
-            failure) CONCLUSION="failure" ;;
-            cancelled) CONCLUSION="cancelled" ;;
-            *) CONCLUSION="neutral" ;;
-          esac
+          send_batch() {
+            curl -sS -X POST \
+              -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+              -d "$1" >/dev/null
+          }
 
-          NOW_S="$(date -u +%s)"
-          NEXT_RUN="${NEXT_RUN_EPOCH:-$((NOW_S+600))}"
-          EXPIRES_TO_SEND="$(( NEXT_RUN - NOW_S ))"
-          if (( EXPIRES_TO_SEND < 0 )); then EXPIRES_TO_SEND=0; fi
+          make_body_finalize() {
+            # $1=status, $2=next_run(serial), $3=include_last_modified(true/false), $4=last_modified(serial)
+            if [[ "$3" == "true" ]]; then
+              jq -n \
+                --arg tab "${SHEET_TAB}" \
+                --arg row "${SHEETS_WORKFLOW_ROW}" \
+                --arg status "$1" \
+                --argjson next_run "$2" \
+                --argjson last_modified "$4" \
+                '{
+                  valueInputOption: "RAW",
+                  data: [
+                    {range: ($tab + "!B" + $row), values: [[ $status ]]},
+                    {range: ($tab + "!D" + $row), values: [[ $next_run ]]},
+                    {range: ($tab + "!I" + $row), values: [[ $last_modified ]]}
+                  ]
+                }'
+            else
+              jq -n \
+                --arg tab "${SHEET_TAB}" \
+                --arg row "${SHEETS_WORKFLOW_ROW}" \
+                --arg status "$1" \
+                --argjson next_run "$2" \
+                '{
+                  valueInputOption: "RAW",
+                  data: [
+                    {range: ($tab + "!B" + $row), values: [[ $status ]]},
+                    {range: ($tab + "!D" + $row), values: [[ $next_run ]]}
+                  ]
+                }'
+            fi
+          }
 
-          NOW_MS="$(date -u +%s%3N)"
-          CANONICAL="${WORKFLOW_ID}|${WORKFLOW_NAME}|${SHEET_ROW}|finish|${EXPIRES_TO_SEND}|${LOCK_SECONDS}|${CONCLUSION}|${NOW_MS}"
-          SIG="$(printf "%s" "$CANONICAL" | openssl dgst -sha256 -hmac "$GATEWAY_SECRET" -hex | awk '{print $2}')"
-          WF_NAME_ESC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['WORKFLOW_NAME']))")"
-          URL="${GATEWAY_URL}?workflow_id=${WORKFLOW_ID}&wf_name=${WF_NAME_ESC}&row=${SHEET_ROW}&phase=finish&expires=${EXPIRES_TO_SEND}&lock_seconds=${LOCK_SECONDS}&conclusion=${CONCLUSION}&now_ms=${NOW_MS}&sig=${SIG}"
-
-          RESP="$(curl -sS -L -H "Accept: application/json" "$URL")"
-          echo "$RESP" | jq -e . >/dev/null
-          OK="$(echo "$RESP" | jq -r '.ok // false')"
-          if [[ "$OK" != "true" ]]; then
-            echo "Gateway FINISH error: $RESP"
-            exit 1
+          if [[ "${JOB_STATUS}" == "success" ]]; then
+            status="completed"
+            next_run="${{ steps.esi.outputs.expires_plus5_serial }}"
+            if [[ "${{ steps.mode.outputs.update_state }}" == "true" ]]; then
+              body="$(make_body_finalize "${status}" "${next_run}" "true" "${{ steps.esi.outputs.last_modified_serial }}")"
+            else
+              body="$(make_body_finalize "${status}" "${next_run}" "false" "0")"
+            fi
+          else
+            status="failed"
+            next_run="${{ steps.boot.outputs.fail_plus5_serial }}"
+            body="$(make_body_finalize "${status}" "${next_run}" "false" "0")"
           fi
+
+          send_batch "${body}"
