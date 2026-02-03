@@ -292,7 +292,8 @@ def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Tuple[str, int, 
         src_name = systems.get(src_id, (str(src_id), 0, 0))[0]
         dst_name = systems.get(dst_id, (str(dst_id), 0, 0))[0]
 
-        stargate_name = f"{src_name} → {dst_name}"
+        # Antes: stargate_name -> se escribía como "stargateName"
+        stargate_value = f"{src_name} → {dst_name}"
 
         lo_id, hi_id = (src_id, dst_id) if src_id <= dst_id else (dst_id, src_id)
         lo_name = systems.get(lo_id, (str(lo_id), 0, 0))[0]
@@ -302,7 +303,7 @@ def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Tuple[str, int, 
         rows.append(
             {
                 "stargateID": gid,
-                "stargateName": stargate_name,
+                "stargate": stargate_value,
                 "stargateGroup": stargate_group,
                 "solarSystem": src_name,
             }
