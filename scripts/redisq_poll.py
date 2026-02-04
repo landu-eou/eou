@@ -7,7 +7,7 @@ import urllib.request
 import urllib.parse
 from typing import Any, Dict, Optional, Set
 
-# RedisQ endpoint actual (el viejo redisq.zkillboard.com puede fallar por DNS)
+# RedisQ endpoint actual
 REDISQ_BASE = "https://zkillredisq.stream/listen.php"
 
 
@@ -20,7 +20,6 @@ def clamp(n: int, lo: int, hi: int) -> int:
 
 
 def build_url(queue_id: str, ttw: int) -> str:
-    # RedisQ long-polling: ttw (1..10) = segundos que el servidor espera por un kill antes de devolver null
     params = {"queueID": queue_id, "ttw": str(ttw)}
     return f"{REDISQ_BASE}?{urllib.parse.urlencode(params)}"
 
@@ -29,12 +28,11 @@ def http_get_json(url: str, timeout_s: int = 30) -> Dict[str, Any]:
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "gh-actions-redisq-poller/1.3",
+            "User-Agent": "gh-actions-redisq-poller/1.4",
             "Accept": "application/json",
         },
         method="GET",
     )
-    # urllib sigue redirects por defecto (útil si /listen.php redirige)
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -51,26 +49,25 @@ def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
-def append_ndjson(base_dir: str, record: Dict[str, Any]) -> str:
-    # Archivo diario: redisq_kills/YYYY/MM/DD/redisq.ndjson
+def get_daily_ndjson_path(base_dir: str) -> str:
     now = dt.datetime.now(dt.timezone.utc)
     out_dir = os.path.join(base_dir, f"{now.year:04d}", f"{now.month:02d}", f"{now.day:02d}")
     ensure_dir(out_dir)
+    return os.path.join(out_dir, "redisq.ndjson")
 
-    out_path = os.path.join(out_dir, "redisq.ndjson")
 
+def append_ndjson_line(path: str, record: Dict[str, Any]) -> None:
     # NDJSON: 1 JSON por línea
-    with open(out_path, "a", encoding="utf-8") as f:
+    with open(path, "a", encoding="utf-8") as f:
         json.dump(record, f, ensure_ascii=False)
         f.write("\n")
 
-    return out_path
-
 
 def main() -> None:
+    # Nota: además de flush=True, en Actions conviene setear PYTHONUNBUFFERED=1 en el workflow.
     queue_id = os.getenv("QUEUE_ID", "").strip()
     if not queue_id:
-        raise SystemExit("QUEUE_ID is required (set it in workflow env, e.g. QUEUE_ID: 'sarandonga').")
+        raise SystemExit("QUEUE_ID is required (ej: QUEUE_ID: 'sarandonga').")
 
     poll_interval = int(float(os.getenv("POLL_INTERVAL_SECONDS", "3")))
     ttw = clamp(poll_interval, 1, 10)
@@ -78,6 +75,7 @@ def main() -> None:
 
     url = build_url(queue_id, ttw)
     base_dir = "redisq_kills"
+    out_path = get_daily_ndjson_path(base_dir)
 
     seen: Set[str] = set()
     appended = 0
@@ -88,15 +86,33 @@ def main() -> None:
     start = time.time()
     deadline = start + duration
 
-    print(f"[{utc_now_iso()}] START redisq poll | queueID={queue_id} | ttw={ttw}s | duration={duration}s")
-    print(f"[{utc_now_iso()}] URL {url}")
+    print(
+        f"[{utc_now_iso()}] START redisq poll | queueID={queue_id} | ttw={ttw}s | duration={duration}s",
+        flush=True,
+    )
+    print(f"[{utc_now_iso()}] URL {url}", flush=True)
+    print(f"[{utc_now_iso()}] OUT {out_path}", flush=True)
+
+    # Heartbeat para que siempre “veas vida” aunque no haya kills
+    next_heartbeat = start + 10
 
     while time.time() < deadline:
+        now = time.time()
+
+        if now >= next_heartbeat:
+            elapsed = int(now - start)
+            remaining = max(0, int(deadline - now))
+            print(
+                f"[{utc_now_iso()}] HB elapsed={elapsed}s remaining={remaining}s kills={appended} idle={empties} dups={dups} errors={errors}",
+                flush=True,
+            )
+            next_heartbeat = now + 10
+
         try:
             payload = http_get_json(url)
         except Exception as e:
             errors += 1
-            print(f"[{utc_now_iso()}] WARN http/json error: {e}")
+            print(f"[{utc_now_iso()}] WARN http/json error: {e}", flush=True)
             time.sleep(1)
             continue
 
@@ -104,7 +120,7 @@ def main() -> None:
         if kill_id:
             if kill_id in seen:
                 dups += 1
-                print(f"[{utc_now_iso()}] DUP  kill_id={kill_id} (same run)")
+                print(f"[{utc_now_iso()}] DUP  kill_id={kill_id} (same run)", flush=True)
             else:
                 seen.add(kill_id)
 
@@ -118,19 +134,20 @@ def main() -> None:
                     "raw": payload,
                 }
 
-                out_path = append_ndjson(base_dir, record)
+                append_ndjson_line(out_path, record)
                 appended += 1
-                print(f"[{utc_now_iso()}] KILL kill_id={kill_id} appended file={out_path}")
+                print(f"[{utc_now_iso()}] KILL kill_id={kill_id} appended -> {out_path}", flush=True)
         else:
             empties += 1
-            print(f"[{utc_now_iso()}] IDLE no kill")
+            print(f"[{utc_now_iso()}] IDLE no kill", flush=True)
 
         # RedisQ ya hace long-polling hasta ttw; micro-sleep evita bucle demasiado agresivo
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     elapsed = int(time.time() - start)
     print(
-        f"[{utc_now_iso()}] END elapsed={elapsed}s | appended={appended} | idle={empties} | dups={dups} | errors={errors}"
+        f"[{utc_now_iso()}] END elapsed={elapsed}s | appended={appended} | idle={empties} | dups={dups} | errors={errors} | out={out_path}",
+        flush=True,
     )
 
 
