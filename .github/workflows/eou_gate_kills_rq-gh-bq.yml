@@ -25,6 +25,9 @@ jobs:
       LOCK_TIME: 120
       COOLDOWN: 1800
 
+      # FIX 1: Definir explícitamente el project id desde el secret
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+
       # RedisQ queue ID
       QUEUE_SUFFIX: "test001"
 
@@ -156,7 +159,6 @@ jobs:
 
           mkdir -p out
 
-          # Ejecutar como script (más robusto que -m)
           python scripts/rq/run_gate_kills.py \
             --pending data/rq/pending_gate_kills.jsonl.gz \
             --stargates data/sde/stargates.jsonl.gz \
@@ -164,7 +166,6 @@ jobs:
             --out out \
             | tee out/metrics_print.json
 
-          # Garantía: debe existir siempre
           test -f out/metrics.json
 
           insert_count=$(jq -r '.insert_rows_count' out/metrics.json)
@@ -224,7 +225,6 @@ jobs:
             "$GCP_PROJECT_ID:$BQ_DATASET.$BQ_STAGING_TABLE" \
             out/insert_rows.ndjson
 
-          # FIX: $GCP_PROJECT_ID (no _id)
           new_count=$(bq --project_id "$GCP_PROJECT_ID" query --use_legacy_sql=false --format=json \
             "SELECT COUNT(1) AS new_count
              FROM \`$GCP_PROJECT_ID.$BQ_DATASET.$BQ_STAGING_TABLE\` s
@@ -299,13 +299,11 @@ jobs:
 
           row="$SHEETS_WORKFLOW_ROW"
 
-          # Defaults robustos por si el step bq no corrió
           bq_success="${{ steps.bq.outputs.bq_success }}"
           new_count="${{ steps.bq.outputs.new_count }}"
           if [ -z "${bq_success:-}" ]; then bq_success="false"; fi
           if [ -z "${new_count:-}" ]; then new_count="0"; fi
 
-          # Si faltan métricas, no fallar: status failed y next_run=now+600
           if [ ! -f out/metrics.json ]; then
             echo "metrics missing, writing failure status"
 
@@ -336,7 +334,6 @@ jobs:
           rq_ok=$(jq -r '.rq_ok' out/metrics.json)
           rq_time_iso=$(jq -r '.rq_time_iso' out/metrics.json)
 
-          # Si RedisQ no fue OK, fallar y next_run=now+600 (sin depender de rq_time)
           if [ "$rq_ok" != "true" ]; then
             now_s=$(date -u +%s)
             next_s=$((now_s + 600))
@@ -366,35 +363,40 @@ jobs:
 
           rq_time_s=$(date -u -d "$rq_time_iso" +%s)
 
-          # next_run: rq_ok=true -> rq_time + COOLDOWN ; rq_ok=false ya manejado arriba
           next_s=$((rq_time_s + COOLDOWN))
           next_excel=$(awk -v s="$next_s" 'BEGIN{printf "%.10f", (s/86400)+25569}')
 
-          # status: depende de BQ
           if [ "$bq_success" = "true" ]; then
             status="completed"
           else
             status="failed"
           fi
 
-          # last_modified solo si hubo inserciones nuevas y BQ ok
           last_excel=""
           if [ "$bq_success" = "true" ] && [ "$new_count" -gt 0 ]; then
             last_excel=$(awk -v s="$rq_time_s" 'BEGIN{printf "%.10f", (s/86400)+25569}')
           fi
 
+          # FIX 2: jq válido (if ... then ... else ... end)
           body=$(jq -n \
             --arg tab "$SHEET_TAB" \
             --arg row "$row" \
             --arg status "$status" \
             --argjson next "$next_excel" \
             --arg last "$last_excel" \
-            '{valueInputOption:"RAW", data:(
+            '
+            def base:
               [
                 {range:($tab+"!B"+$row+":B"+$row), values:[[ $status ]]},
                 {range:($tab+"!D"+$row+":D"+$row), values:[[ $next ]]}
-              ] + ( $last == "" ? [] : [ {range:($tab+"!I"+$row+":I"+$row), values:[[ ($last|tonumber) ]] } ] )
-            )}')
+              ];
+
+            {valueInputOption:"RAW", data:
+              (base + (if $last == "" then [] else [
+                {range:($tab+"!I"+$row+":I"+$row), values:[[ ($last|tonumber) ]]}
+              ] end))
+            }'
+          )
 
           curl -sS -X POST \
             -H "Authorization: Bearer $ACCESS_TOKEN" \
