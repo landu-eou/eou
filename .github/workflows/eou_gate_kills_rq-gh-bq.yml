@@ -29,7 +29,7 @@ jobs:
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
 
       # RedisQ queue ID
-      QUEUE_SUFFIX: "test001"
+      QUEUE_SUFFIX: "test002"
 
       # Guard
       GH_API: https://api.github.com
