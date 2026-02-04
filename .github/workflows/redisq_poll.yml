@@ -1,15 +1,10 @@
-name: RedisQ Poll (3m) → Repo JSON
+name: RedisQ Poll (90s) → Repo JSON
 
 on:
   workflow_dispatch:
     inputs:
-      queue_id:
-        description: "RedisQ queueID (opcional). Si lo dejas vacío, usa el default."
-        required: false
-        type: string
-        default: ""
       poll_interval_seconds:
-        description: "Intervalo entre polls (segundos)"
+        description: "TiempoToWait (ttw) en RedisQ (1..10). Controla cuánto espera el servidor por kill antes de devolver null."
         required: false
         type: number
         default: 3
@@ -18,7 +13,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: redisq_poll_3m
+  group: redisq_poll_90s
   cancel-in-progress: false
 
 jobs:
@@ -37,11 +32,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Poll RedisQ for 3 minutes and write kills to repo
+      - name: Poll RedisQ for 90 seconds and write kills to repo
         env:
-          QUEUE_ID: ${{ inputs.queue_id }}
+          QUEUE_ID: "sarandonga"
           POLL_INTERVAL_SECONDS: ${{ inputs.poll_interval_seconds }}
-          DURATION_SECONDS: "180"
+          DURATION_SECONDS: "90"
         run: |
           python scripts/redisq_poll.py
 
@@ -50,9 +45,8 @@ jobs:
           if git status --porcelain | grep -q .; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            COUNT=$(git status --porcelain | wc -l | tr -d ' ')
             git add redisq_kills
-            git commit -m "RedisQ: +${COUNT} files"
+            git commit -m "RedisQ: new kills"
             git push
           else
             echo "No changes to commit."
