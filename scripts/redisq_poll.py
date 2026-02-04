@@ -76,7 +76,7 @@ def main() -> None:
     if not queue_id:
         raise SystemExit("QUEUE_ID is required (ej: QUEUE_ID: 'sarandonga').")
 
-    poll_every_s = 10  # pedido
+    poll_every_s = 1  # pedido
     max_runtime_s = 20 * 60  # 20 minutos
     max_consecutive_nulls = 10  # pedido
 
