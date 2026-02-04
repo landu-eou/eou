@@ -26,7 +26,7 @@ jobs:
       COOLDOWN: 1800
 
       # RedisQ queue ID
-      QUEUE_SUFFIX: ""
+      QUEUE_SUFFIX: "test001"
 
       # Guard
       GH_API: https://api.github.com
@@ -37,7 +37,7 @@ jobs:
       BQ_STAGING_TABLE: gate_kills_incoming
 
       # ESI
-      ESI_USER_AGENT: "EOU Gate Kills (GitHub Actions) <contact: you@example.com>"
+      ESI_USER_AGENT: "EOU Gate Kills <contact: landueve78@gmail.com>"
 
     steps:
       - name: Guard (anti-cola)
