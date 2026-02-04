@@ -1,0 +1,33 @@
+{
+  "meta": {
+    "source": "redisq",
+    "ingested_at_utc": "2026-02-04T17:07:47.770106Z",
+    "kill_id": "133123830"
+  },
+  "raw": {
+    "package": {
+      "killID": 133123830,
+      "zkb": {
+        "locationID": 50014064,
+        "hash": "90cc99d808b15805b87230d92426b47278f660ec",
+        "fittedValue": 10000,
+        "droppedValue": 0,
+        "destroyedValue": 10000,
+        "totalValue": 10000,
+        "points": 1,
+        "npc": false,
+        "solo": false,
+        "awox": false,
+        "labels": [
+          "tz:eu",
+          "cat:6",
+          "#:1",
+          "pvp",
+          "loc:highsec"
+        ],
+        "attackerCount": 1,
+        "href": "https://esi.evetech.net/killmails/133123830/90cc99d808b15805b87230d92426b47278f660ec/"
+      }
+    }
+  }
+}
