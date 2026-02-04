@@ -32,7 +32,7 @@ jobs:
       COOLDOWN: 1800
 
       # RedisQ queue ID
-      QUEUE_SUFFIX: ""
+      QUEUE_SUFFIX: "test001"
 
       # Guard
       GH_API: https://api.github.com
