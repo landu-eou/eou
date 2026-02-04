@@ -96,6 +96,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # FIX 3 (recomendado): asegurar carpeta + pending vacío si no existe (idempotente)
+      - name: Ensure pending path exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p data/rq
+          test -f data/rq/pending_gate_kills.jsonl.gz || gzip -n -c /dev/null > data/rq/pending_gate_kills.jsonl.gz
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -262,6 +270,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          # FIX 3: garantizar que el directorio existe antes de copiar
+          mkdir -p data/rq
+
           insert_count=$(jq -r '.insert_rows_count' out/metrics.json)
           bq_success="${{ steps.bq.outputs.bq_success }}"
 
@@ -377,7 +388,6 @@ jobs:
             last_excel=$(awk -v s="$rq_time_s" 'BEGIN{printf "%.10f", (s/86400)+25569}')
           fi
 
-          # FIX 2: jq válido (if ... then ... else ... end)
           body=$(jq -n \
             --arg tab "$SHEET_TAB" \
             --arg row "$row" \
