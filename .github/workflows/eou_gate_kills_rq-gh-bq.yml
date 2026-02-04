@@ -43,7 +43,7 @@ jobs:
       BQ_STAGING_TABLE: gate_kills_incoming
 
       # ESI (best practice: identify your app + contact)
-      ESI_USER_AGENT: "EOU Gate Kills (GitHub Actions) <contact: you@example.com>"
+      ESI_USER_AGENT: "EOU Gate Kills <contact: landueve78@gmail.com>"
 
     steps:
       # =======================
