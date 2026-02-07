@@ -1,6 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+ESI enrich (queue consumer -> batch NDJSON + requeue).
+
+Objetivo:
+- Leer RAW NDJSON.
+- Para cada killID+hash, pedir killmail a ESI.
+- Aplicar filtros (attackers válidos, no war_id, no self-destruction estricta).
+- Validar que locationID corresponde a stargate conocido (SDE).
+- Emitir filas NDJSON para BQ.
+- Reescribir RAW dejando solo requeueados.
+- Frenos anti-abuso: parar subfase si headers indican acercamiento a límites.
+
+Contrato:
+- Outputs: ndjson_path, ndjson_rows, max_killmail_time_iso, requeued, discarded, stop_reason.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -10,6 +26,7 @@ import os
 import sys
 import time
 import urllib.request
+import urllib.error
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
@@ -47,9 +64,7 @@ def http_get_json(url: str, timeout: int, user_agent: str) -> Tuple[int, Dict[st
                 data = None
             return status, headers, data
     except urllib.error.HTTPError as e:
-        status = e.code
-        headers = {k: v for k, v in e.headers.items()}
-        return status, headers, None
+        return e.code, {k: v for k, v in e.headers.items()}, None
     except Exception:
         return 0, {}, None
 
@@ -123,7 +138,6 @@ def attackers_valid_or_discard(km: dict) -> bool:
     attackers = km.get("attackers", [])
     if not isinstance(attackers, list) or len(attackers) == 0:
         return False
-    # si ninguno tiene character_id, descarta
     for a in attackers:
         if isinstance(a, dict) and isinstance(a.get("character_id"), int):
             return True
@@ -219,7 +233,6 @@ def main() -> int:
     stop_reason = "completed"
 
     esi_requests = 0
-    esi_200 = esi_429 = esi_4xx = esi_5xx = esi_304 = 0
     retry429_total = 0
 
     max_killmail_epoch = 0
@@ -268,14 +281,13 @@ def main() -> int:
                     esi_requests += 1
                     status, headers, data = http_get_json(url, timeout=args.timeout, user_agent=_ua(args.repo))
 
-                    # freno 1: bucket limit
+                    # Freno 1: bucket/rate remaining (si existe el header y cae bajo umbral)
                     rate_rem = _h_int(headers, "X-Ratelimit-Remaining")
                     if rate_rem is not None and rate_rem <= args.esi_rate_remaining_stop:
                         obj["rearm"] = rearm + 1
                         requeue_objs.append(obj)
                         requeued += 1
                         stop_reason = "esi_rate_limit_stop"
-                        print(f"::warning:: ESI rate-limit stop: X-Ratelimit-Remaining={rate_rem}")
                         for rest in lines_iter:
                             rest = rest.strip()
                             if not rest:
@@ -288,14 +300,13 @@ def main() -> int:
                         lines_iter = iter(())  # type: ignore
                         break
 
-                    # freno 2: error limit
+                    # Freno 2: error limit (header documentado por ESI)
                     err_rem = _h_int(headers, "X-ESI-Error-Limit-Remain")
                     if err_rem is not None and err_rem <= args.esi_error_remain_stop:
                         obj["rearm"] = rearm + 1
                         requeue_objs.append(obj)
                         requeued += 1
                         stop_reason = "esi_error_limit_stop"
-                        print(f"::warning:: ESI error-limit stop: X-ESI-Error-Limit-Remain={err_rem}")
                         for rest in lines_iter:
                             rest = rest.strip()
                             if not rest:
@@ -309,10 +320,9 @@ def main() -> int:
                         break
 
                     if status == 200 and isinstance(data, dict):
-                        esi_200 += 1
                         km = data
 
-                        # Regla: attackers vacío o sin character_id => descarta
+                        # attackers vacío o sin character_id => descarta
                         if not attackers_valid_or_discard(km):
                             discarded += 1
                             break
@@ -323,7 +333,7 @@ def main() -> int:
                             discarded += 1
                             break
 
-                        # filtro2: self-destruction (estricto, sin falsos positivos)
+                        # filtro2: self-destruction (estricto)
                         if is_self_destruction_strict(km):
                             discarded += 1
                             break
@@ -366,22 +376,10 @@ def main() -> int:
                         break
 
                     if status in (400, 404, 420):
-                        esi_4xx += 1
                         discarded += 1
                         break
 
-                    if status == 304:
-                        esi_304 += 1
-                        if rearm < 10:
-                            obj["rearm"] = rearm + 1
-                            requeue_objs.append(obj)
-                            requeued += 1
-                        else:
-                            discarded += 1
-                        break
-
                     if status in (500, 502, 503, 504) or status == 0:
-                        esi_5xx += 1
                         if rearm < 10:
                             obj["rearm"] = rearm + 1
                             requeue_objs.append(obj)
@@ -391,11 +389,9 @@ def main() -> int:
                         break
 
                     if status == 429:
-                        esi_429 += 1
                         retry429_total += 1
                         ra = headers.get("Retry-After")
                         sleep_s = int(ra) if (ra and ra.isdigit()) else 5
-
                         if retry429_total < 3:
                             time.sleep(sleep_s + 2)
                             continue
@@ -404,7 +400,6 @@ def main() -> int:
                         requeue_objs.append(obj)
                         requeued += 1
                         stop_reason = "esi_429_stop"
-                        print("::warning:: ESI 429 stop: max retries reached for subphase")
                         for rest in lines_iter:
                             rest = rest.strip()
                             if not rest:
@@ -418,11 +413,10 @@ def main() -> int:
                         break
 
                     if 400 <= status < 500:
-                        esi_4xx += 1
                         discarded += 1
                         break
 
-                    # fallback
+                    # fallback conservador
                     if rearm < 10:
                         obj["rearm"] = rearm + 1
                         requeue_objs.append(obj)
@@ -434,7 +428,7 @@ def main() -> int:
                 if stop_reason != "completed":
                     break
 
-    # Reescritura RAW: solo requeueados
+    # RAW final: solo requeueados
     tmp_raw = args.raw + ".tmp"
     with open(tmp_raw, "w", encoding="utf-8") as wf:
         for obj in requeue_objs:
@@ -451,11 +445,6 @@ def main() -> int:
             "discarded": discarded,
             "stop_reason": stop_reason,
             "esi_requests": esi_requests,
-            "esi_200": esi_200,
-            "esi_429": esi_429,
-            "esi_4xx": esi_4xx,
-            "esi_5xx": esi_5xx,
-            "esi_304": esi_304,
         }
     )
 
