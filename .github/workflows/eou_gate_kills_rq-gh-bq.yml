@@ -2,11 +2,17 @@ name: RQ Gate Kills (RQ → GH → BQ)
 
 on:
   workflow_dispatch:
+    inputs:
+      queue_suffix:
+        description: "Suffix opcional para queueID (pruebas/reset cola). Puede ser vacío."
+        required: false
+        type: string
+        default: ""
 
 permissions:
-  actions: read
-  contents: write
-  id-token: write
+  actions: read          # Guard por REST (listar runs)
+  contents: write        # persistir raw_kills.jsonl (commits)
+  id-token: write        # WIF/OIDC hacia Google
 
 concurrency:
   group: eou_gate_kills_rq-gh-bq
@@ -15,402 +21,437 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
 
     env:
+      # =====================================================================
+      # CONFIG (según tu especificación)
+      # =====================================================================
       WORKFLOW_FILE: eou_gate_kills_rq-gh-bq.yml
+
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "7"
-      LOCK_TIME: 120
-      COOLDOWN: 1800
 
-      # FIX 1: Definir explícitamente el project id desde el secret
-      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-
-      # RedisQ queue ID
-      QUEUE_SUFFIX: "test002"
-
-      # Guard
-      GH_API: https://api.github.com
+      LOCK_TIME: 1800  # segundos
 
       # BigQuery
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       BQ_DATASET: eou
       BQ_TABLE: gate_kills
-      BQ_STAGING_TABLE: gate_kills_incoming
 
-      # ESI
-      ESI_USER_AGENT: "EOU Gate Kills <contact: landueve78@gmail.com>"
+      # RedisQ poll
+      REDISQ_BASE: https://zkillredisq.stream/listen.php
+      POLL_MAX_SECONDS: 1200          # 20 min
+      NULL_STREAK_MAX: 10
+      TTW: 1
+
+      # Paths
+      RAW_FILE: data/rq/raw_kills.jsonl
+      SDE_STARGATES_GZ: data/sde/stargates.jsonl.gz
+      SDE_TYPES_GZ: data/sde/types.jsonl.gz
 
     steps:
-      - name: Guard (anti-cola)
-        id: guard
-        shell: bash
+      # =====================================================================
+      # 1) GUARD — decide si este run trabaja o sale (busy)
+      # =====================================================================
+      - name: Guard - compute decision
+        id: guard_calc
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OWNER_REPO: ${{ github.repository }}
-          THIS_RUN_ID: ${{ github.run_id }}
-          THIS_RUN_NUMBER: ${{ github.run_number }}
-          THIS_CREATED_AT: ${{ github.run_created_at }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          WF_FILE: ${{ env.WORKFLOW_FILE }}
         run: |
           set -euo pipefail
 
-          wf=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "X-GitHub-Api-Version: 2022-11-28" \
-            "$GH_API/repos/$OWNER_REPO/actions/workflows/$WORKFLOW_FILE")
-          wf_id=$(echo "$wf" | jq -r '.id')
+          api="https://api.github.com/repos/${REPO}/actions/workflows/${WF_FILE}/runs?per_page=50"
+          json="$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api}")"
 
-          runs=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "X-GitHub-Api-Version: 2022-11-28" \
-            "$GH_API/repos/$OWNER_REPO/actions/workflows/$wf_id/runs?per_page=50")
+          proceed="true"
 
-          alive_at_creation=$(echo "$runs" | jq -r --arg created "$THIS_CREATED_AT" --argjson this_id "$THIS_RUN_ID" '
-            [.workflow_runs[]
-              | select(.id != $this_id)
-              | select((.status=="in_progress" or .status=="queued") and .created_at < $created and .updated_at > $created)
-            ] | length')
+          this="$(jq --arg rid "$RUN_ID" -c '
+            (.workflow_runs // [])
+            | map(select(.id == ($rid|tonumber)))
+            | .[0] // empty
+          ' <<< "$json")"
 
-          proceed=true
-          if [ "$alive_at_creation" -gt 0 ]; then
-            proceed=false
-          fi
+          if [ -n "$this" ]; then
+            this_created="$(jq -r '.created_at' <<< "$this")"
+            this_num="$(jq -r '.run_number' <<< "$this")"
 
-          if [ "$proceed" = "true" ]; then
-            leader=$(echo "$runs" | jq -r '
-              [.workflow_runs[]
-                | select(.status=="in_progress" or .status=="queued")
-                | .run_number
-              ] | min // empty')
+            alive_at_creation="$(jq --arg rid "$RUN_ID" --arg tc "$this_created" '
+              (.workflow_runs // [])
+              | map(
+                  select(.id != ($rid|tonumber))
+                  | select(.created_at < $tc)
+                  | select(.updated_at > $tc)
+                )
+              | length
+            ' <<< "$json")"
 
-            if [ -n "$leader" ] && [ "$leader" != "$THIS_RUN_NUMBER" ]; then
-              proceed=false
+            if [ "$alive_at_creation" -gt 0 ]; then
+              proceed="false"
+            else
+              leader="$(jq '
+                (.workflow_runs // [])
+                | map(select(.status=="queued" or .status=="in_progress"))
+                | map(.run_number)
+                | min // empty
+              ' <<< "$json")"
+
+              if [ -n "$leader" ] && [ "$leader" != "$this_num" ]; then
+                proceed="false"
+              fi
             fi
           fi
 
-          echo "proceed=$proceed" >> "$GITHUB_OUTPUT"
+          echo "$proceed" > /tmp/proceed
 
-      - name: Stop early if proceed=false
+      - name: Guard - publish decision
+        id: guard
+        run: |
+          echo "proceed=$(cat /tmp/proceed)" >> "$GITHUB_OUTPUT"
+
+      - name: Exit if skipped (busy)
         if: steps.guard.outputs.proceed != 'true'
         run: |
-          echo "Otro run ya estaba activo cuando este se creó. Salgo sin hacer trabajo."
+          echo "Skipped due to overlapping run"
           exit 0
 
+      # =====================================================================
+      # 2) CHECKOUT + GIT (para persistir raw_kills)
+      # =====================================================================
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
-      # FIX 3 (recomendado): asegurar carpeta + pending vacío si no existe (idempotente)
-      - name: Ensure pending path exists
-        shell: bash
+      - name: Git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Ensure raw queue file exists
         run: |
           set -euo pipefail
-          mkdir -p data/rq
-          test -f data/rq/pending_gate_kills.jsonl.gz || gzip -n -c /dev/null > data/rq/pending_gate_kills.jsonl.gz
+          mkdir -p "$(dirname "${RAW_FILE}")"
+          if [ ! -f "${RAW_FILE}" ]; then
+            : > "${RAW_FILE}"
+            git add "${RAW_FILE}"
+            git commit -m "rq: create raw_kills queue file" || true
+            git push || true
+          fi
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
+      # =====================================================================
+      # 3) AUTH GOOGLE — WIF/OIDC (sin claves)
+      # =====================================================================
       - name: Auth to Google (WIF)
-        id: auth
+        id: gcp_auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
           token_format: access_token
           access_token_scopes: |
-            https://www.googleapis.com/auth/cloud-platform
             https://www.googleapis.com/auth/spreadsheets
+            https://www.googleapis.com/auth/cloud-platform
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Sheets (start) status=in progress, next_run=now+LOCK_TIME
-        shell: bash
+      # =====================================================================
+      # 4) FASE INICIO — status=in progress + next_run=now+LOCK_TIME
+      # =====================================================================
+      - name: Phase start (in_progress + next_run lock)
         env:
-          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
+          row="${SHEETS_WORKFLOW_ROW}"
 
-          row="$SHEETS_WORKFLOW_ROW"
-          now_s=$(date -u +%s)
-          next_s=$((now_s + LOCK_TIME))
+          epoch="$(date -u -d "+${LOCK_TIME} seconds" +%s)"
+          serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
 
-          now_excel=$(awk -v s="$now_s" 'BEGIN{printf "%.10f", (s/86400)+25569}')
-          next_excel=$(awk -v s="$next_s" 'BEGIN{printf "%.10f", (s/86400)+25569}')
-
-          body=$(jq -n \
-            --arg tab "$SHEET_TAB" \
-            --arg row "$row" \
-            --arg status "in progress" \
-            --argjson next "$next_excel" \
-            '{valueInputOption:"RAW", data:[
-              {range:($tab+"!B"+$row+":B"+$row), values:[[ $status ]]},
-              {range:($tab+"!D"+$row+":D"+$row), values:[[ $next ]]}
-            ]}')
-
-          curl -sS -X POST \
-            -H "Authorization: Bearer $ACCESS_TOKEN" \
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
-            "https://sheets.googleapis.com/v4/spreadsheets/$SHEETS_ID/values:batchUpdate" \
-            -d "$body" \
-            | jq -e '.totalUpdatedCells >= 1' >/dev/null
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "{
+              \"valueInputOption\":\"RAW\",
+              \"data\":[
+                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"in progress\"]]},
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${serial}]]}
+              ]
+            }"
 
-      - name: Build insert_rows + pending candidates
-        id: build
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-
-          echo "PWD=$(pwd)"
-          echo "Listing scripts/rq:"
-          ls -R scripts/rq || true
-
-          mkdir -p out
-
-          python scripts/rq/run_gate_kills.py \
-            --pending data/rq/pending_gate_kills.jsonl.gz \
-            --stargates data/sde/stargates.jsonl.gz \
-            --types data/sde/types.jsonl.gz \
-            --out out \
-            | tee out/metrics_print.json
-
-          test -f out/metrics.json
-
-          insert_count=$(jq -r '.insert_rows_count' out/metrics.json)
-          echo "insert_rows_count=$insert_count" >> "$GITHUB_OUTPUT"
-
-      - name: BigQuery create tables if needed
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          bq --project_id "$GCP_PROJECT_ID" query --use_legacy_sql=false \
-            "CREATE TABLE IF NOT EXISTS \`$GCP_PROJECT_ID.$BQ_DATASET.$BQ_TABLE\` (
-              snapshot_ts TIMESTAMP NOT NULL,
-              killmailID INT64 NOT NULL,
-              stargate STRING NOT NULL,
-              stargateGroup STRING NOT NULL,
-              solarSystem STRING NOT NULL,
-              ship_class STRING NOT NULL,
-              smartBomb BOOL NOT NULL,
-              attackers INT64 NOT NULL,
-              corporationID ARRAY<STRUCT<corporation_id INT64>>
-            )
-            PARTITION BY DATE(snapshot_ts)
-            CLUSTER BY stargate"
-
-          bq --project_id "$GCP_PROJECT_ID" query --use_legacy_sql=false \
-            "CREATE TABLE IF NOT EXISTS \`$GCP_PROJECT_ID.$BQ_DATASET.$BQ_STAGING_TABLE\` (
-              snapshot_ts TIMESTAMP NOT NULL,
-              killmailID INT64 NOT NULL,
-              stargate STRING NOT NULL,
-              stargateGroup STRING NOT NULL,
-              solarSystem STRING NOT NULL,
-              ship_class STRING NOT NULL,
-              smartBomb BOOL NOT NULL,
-              attackers INT64 NOT NULL,
-              corporationID ARRAY<STRUCT<corporation_id INT64>>
-            )"
-
-      - name: BigQuery bulk load + dedup
-        id: bq
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          insert_count=$(jq -r '.insert_rows_count' out/metrics.json)
-          echo "new_count=0" >> "$GITHUB_OUTPUT"
-          echo "bq_success=true" >> "$GITHUB_OUTPUT"
-
-          if [ "$insert_count" -eq 0 ]; then
-            echo "No hay filas listas para insertar."
-            exit 0
-          fi
-
-          bq --project_id "$GCP_PROJECT_ID" load \
-            --source_format=NEWLINE_DELIMITED_JSON \
-            --replace \
-            "$GCP_PROJECT_ID:$BQ_DATASET.$BQ_STAGING_TABLE" \
-            out/insert_rows.ndjson
-
-          new_count=$(bq --project_id "$GCP_PROJECT_ID" query --use_legacy_sql=false --format=json \
-            "SELECT COUNT(1) AS new_count
-             FROM \`$GCP_PROJECT_ID.$BQ_DATASET.$BQ_STAGING_TABLE\` s
-             LEFT JOIN \`$GCP_PROJECT_ID.$BQ_DATASET.$BQ_TABLE\` g
-             USING(killmailID)
-             WHERE g.killmailID IS NULL" \
-            | jq -r '.[0].new_count')
-
-          echo "new_count=$new_count" >> "$GITHUB_OUTPUT"
-
-          if [ "$new_count" -eq 0 ]; then
-            echo "Todas las filas eran duplicadas (killmailID ya existía)."
-            exit 0
-          fi
-
-          bq --project_id "$GCP_PROJECT_ID" query --use_legacy_sql=false \
-            "CREATE OR REPLACE TABLE \`$GCP_PROJECT_ID.$BQ_DATASET.$BQ_TABLE\`
-             PARTITION BY DATE(snapshot_ts)
-             CLUSTER BY stargate AS
-             SELECT * EXCEPT(rn) FROM (
-               SELECT
-                 snapshot_ts, killmailID, stargate, stargateGroup, solarSystem,
-                 ship_class, smartBomb, attackers, corporationID,
-                 ROW_NUMBER() OVER(PARTITION BY killmailID ORDER BY snapshot_ts DESC) AS rn
-               FROM (
-                 SELECT * FROM \`$GCP_PROJECT_ID.$BQ_DATASET.$BQ_TABLE\`
-                 UNION ALL
-                 SELECT * FROM \`$GCP_PROJECT_ID.$BQ_DATASET.$BQ_STAGING_TABLE\`
-               )
-             )
-             WHERE rn = 1"
-
-      - name: Update pending file
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # FIX 3: garantizar que el directorio existe antes de copiar
-          mkdir -p data/rq
-
-          insert_count=$(jq -r '.insert_rows_count' out/metrics.json)
-          bq_success="${{ steps.bq.outputs.bq_success }}"
-
-          if [ "$insert_count" -gt 0 ] && [ "$bq_success" != "true" ]; then
-            echo "BQ falló con filas listas: conservo pending_with_ready (más seguro)."
-            cp -f out/pending_with_ready.jsonl.gz data/rq/pending_gate_kills.jsonl.gz
-          else
-            echo "BQ OK (o no había filas listas): aplico pending_keep."
-            cp -f out/pending_keep.jsonl.gz data/rq/pending_gate_kills.jsonl.gz
-          fi
-
-      - name: Commit pending (if changed)
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if git diff --quiet -- data/rq/pending_gate_kills.jsonl.gz; then
-            echo "No changes to commit."
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/rq/pending_gate_kills.jsonl.gz
-          git commit -m "rq: update pending_gate_kills"
-          git push
-
-      - name: Sheets (finish)
-        if: always()
-        shell: bash
+      # =====================================================================
+      # 5) FASE TRATAMIENTO PENDIENTES — Enrich #1 (sobre RAW_FILE actual)
+      #    (Scripts aún no implementados: aquí solo definimos el contrato)
+      # =====================================================================
+      - name: Heartbeat (next_run lock)
         env:
-          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
-
-          row="$SHEETS_WORKFLOW_ROW"
-
-          bq_success="${{ steps.bq.outputs.bq_success }}"
-          new_count="${{ steps.bq.outputs.new_count }}"
-          if [ -z "${bq_success:-}" ]; then bq_success="false"; fi
-          if [ -z "${new_count:-}" ]; then new_count="0"; fi
-
-          if [ ! -f out/metrics.json ]; then
-            echo "metrics missing, writing failure status"
-
-            now_s=$(date -u +%s)
-            next_s=$((now_s + 600))
-            next_excel=$(awk -v s="$next_s" 'BEGIN{printf "%.10f", (s/86400)+25569}')
-
-            body=$(jq -n \
-              --arg tab "$SHEET_TAB" \
-              --arg row "$row" \
-              --arg status "failed" \
-              --argjson next "$next_excel" \
-              '{valueInputOption:"RAW", data:[
-                {range:($tab+"!B"+$row+":B"+$row), values:[[ $status ]]},
-                {range:($tab+"!D"+$row+":D"+$row), values:[[ $next ]]}
-              ]}')
-
-            curl -sS -X POST \
-              -H "Authorization: Bearer $ACCESS_TOKEN" \
-              -H "Content-Type: application/json" \
-              "https://sheets.googleapis.com/v4/spreadsheets/$SHEETS_ID/values:batchUpdate" \
-              -d "$body" \
-              | jq -e '.totalUpdatedCells >= 1' >/dev/null
-
-            exit 0
-          fi
-
-          rq_ok=$(jq -r '.rq_ok' out/metrics.json)
-          rq_time_iso=$(jq -r '.rq_time_iso' out/metrics.json)
-
-          if [ "$rq_ok" != "true" ]; then
-            now_s=$(date -u +%s)
-            next_s=$((now_s + 600))
-            next_excel=$(awk -v s="$next_s" 'BEGIN{printf "%.10f", (s/86400)+25569}')
-
-            status="failed"
-
-            body=$(jq -n \
-              --arg tab "$SHEET_TAB" \
-              --arg row "$row" \
-              --arg status "$status" \
-              --argjson next "$next_excel" \
-              '{valueInputOption:"RAW", data:[
-                {range:($tab+"!B"+$row+":B"+$row), values:[[ $status ]]},
-                {range:($tab+"!D"+$row+":D"+$row), values:[[ $next ]]}
-              ]}')
-
-            curl -sS -X POST \
-              -H "Authorization: Bearer $ACCESS_TOKEN" \
-              -H "Content-Type: application/json" \
-              "https://sheets.googleapis.com/v4/spreadsheets/$SHEETS_ID/values:batchUpdate" \
-              -d "$body" \
-              | jq -e '.totalUpdatedCells >= 1' >/dev/null
-
-            exit 0
-          fi
-
-          rq_time_s=$(date -u -d "$rq_time_iso" +%s)
-
-          next_s=$((rq_time_s + COOLDOWN))
-          next_excel=$(awk -v s="$next_s" 'BEGIN{printf "%.10f", (s/86400)+25569}')
-
-          if [ "$bq_success" = "true" ]; then
-            status="completed"
-          else
-            status="failed"
-          fi
-
-          last_excel=""
-          if [ "$bq_success" = "true" ] && [ "$new_count" -gt 0 ]; then
-            last_excel=$(awk -v s="$rq_time_s" 'BEGIN{printf "%.10f", (s/86400)+25569}')
-          fi
-
-          body=$(jq -n \
-            --arg tab "$SHEET_TAB" \
-            --arg row "$row" \
-            --arg status "$status" \
-            --argjson next "$next_excel" \
-            --arg last "$last_excel" \
-            '
-            def base:
-              [
-                {range:($tab+"!B"+$row+":B"+$row), values:[[ $status ]]},
-                {range:($tab+"!D"+$row+":D"+$row), values:[[ $next ]]}
-              ];
-
-            {valueInputOption:"RAW", data:
-              (base + (if $last == "" then [] else [
-                {range:($tab+"!I"+$row+":I"+$row), values:[[ ($last|tonumber) ]]}
-              ] end))
-            }'
-          )
-
-          curl -sS -X POST \
-            -H "Authorization: Bearer $ACCESS_TOKEN" \
+          row="${SHEETS_WORKFLOW_ROW}"
+          epoch="$(date -u -d "+${LOCK_TIME} seconds" +%s)"
+          serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
-            "https://sheets.googleapis.com/v4/spreadsheets/$SHEETS_ID/values:batchUpdate" \
-            -d "$body" \
-            | jq -e '.totalUpdatedCells >= 1' >/dev/null
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "{
+              \"valueInputOption\":\"RAW\",
+              \"data\":[
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${serial}]]}
+              ]
+            }"
+
+      - name: Enrich pending kills (ESI 1x1, filter2, requeue, batch output)
+        id: enrich_1
+        run: |
+          set -euo pipefail
+          # Contrato de salida (a implementar en el script):
+          # - escribe en $GITHUB_OUTPUT:
+          #   ndjson_path=<path o vacío>
+          #   ndjson_rows=<int>
+          #   max_killmail_time_iso=<ISO o vacío>
+          python scripts/rq/eou_gate_kills_enrich.py \
+            --raw "${RAW_FILE}" \
+            --sde-stargates "${SDE_STARGATES_GZ}" \
+            --sde-types "${SDE_TYPES_GZ}" \
+            --mode pending
+
+      - name: Persist raw queue after enrich #1 (if changed)
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- "${RAW_FILE}"; then
+            git add "${RAW_FILE}"
+            git commit -m "rq: enrich requeue update (phase 1)" || true
+            git push || true
+          fi
+
+      - name: Build batch file (append from enrich #1)
+        run: |
+          set -euo pipefail
+          : > /tmp/gate_kills_batch.ndjson
+          if [ -n "${{ steps.enrich_1.outputs.ndjson_path }}" ] && [ -f "${{ steps.enrich_1.outputs.ndjson_path }}" ]; then
+            cat "${{ steps.enrich_1.outputs.ndjson_path }}" >> /tmp/gate_kills_batch.ndjson
+          fi
+
+      # =====================================================================
+      # 6) FASE OBJETIVO — Poll RedisQ (20 min / 10 null)
+      # =====================================================================
+      - name: Heartbeat before poll (next_run lock)
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          row="${SHEETS_WORKFLOW_ROW}"
+          epoch="$(date -u -d "+${LOCK_TIME} seconds" +%s)"
+          serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "{
+              \"valueInputOption\":\"RAW\",
+              \"data\":[
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${serial}]]}
+              ]
+            }"
+
+      - name: Poll RedisQ (flush each minute to raw_kills.jsonl)
+        id: poll
+        env:
+          QUEUE_SUFFIX: ${{ inputs.queue_suffix }}
+        run: |
+          set -euo pipefail
+          # Contrato de salida (a implementar en el script):
+          # - escribe en $GITHUB_OUTPUT:
+          #   poll_reason=timeout|null_streak
+          #   accepted=<int>
+          #   null_streak=<int>
+          # Nota: el script debe loguear kills + PASS/FAIL + null_streak X/10
+          # y debe hacer flush cada minuto al RAW_FILE (append).
+          python scripts/rq/eou_gate_kills_poll.py \
+            --base "${REDISQ_BASE}" \
+            --raw "${RAW_FILE}" \
+            --workflow-file "${WORKFLOW_FILE}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --queue-suffix "${QUEUE_SUFFIX}" \
+            --ttw "${TTW}" \
+            --poll-max-seconds "${POLL_MAX_SECONDS}" \
+            --null-max "${NULL_STREAK_MAX}"
+
+      # =====================================================================
+      # 7) SUBFASE ENRICH #2 + batch append
+      # =====================================================================
+      - name: Enrich new kills (ESI 1x1, filter2, requeue, batch output)
+        id: enrich_2
+        run: |
+          set -euo pipefail
+          python scripts/rq/eou_gate_kills_enrich.py \
+            --raw "${RAW_FILE}" \
+            --sde-stargates "${SDE_STARGATES_GZ}" \
+            --sde-types "${SDE_TYPES_GZ}" \
+            --mode post_poll
+
+      - name: Persist raw queue after enrich #2 (if changed)
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- "${RAW_FILE}"; then
+            git add "${RAW_FILE}"
+            git commit -m "rq: enrich requeue update (phase 2)" || true
+            git push || true
+          fi
+
+      - name: Append from enrich #2 to batch file
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.enrich_2.outputs.ndjson_path }}" ] && [ -f "${{ steps.enrich_2.outputs.ndjson_path }}" ]; then
+            cat "${{ steps.enrich_2.outputs.ndjson_path }}" >> /tmp/gate_kills_batch.ndjson
+          fi
+
+      # =====================================================================
+      # 8) BigQuery — crear tabla si no existe + load (en batch)
+      # =====================================================================
+      - name: Ensure BigQuery table exists (partition + cluster)
+        run: |
+          set -euo pipefail
+          if bq show --format=prettyjson "${GCP_PROJECT_ID}:${BQ_DATASET}.${BQ_TABLE}" >/dev/null 2>&1; then
+            echo "BigQuery table exists: ${BQ_DATASET}.${BQ_TABLE}"
+            exit 0
+          fi
+
+          cat > /tmp/gate_kills_schema.json <<'EOF'
+          [
+            {"name":"snapshot_ts","type":"TIMESTAMP","mode":"REQUIRED"},
+            {"name":"killmailID","type":"INT64","mode":"REQUIRED"},
+            {"name":"stargate","type":"STRING","mode":"REQUIRED"},
+            {"name":"stargateGroup","type":"STRING","mode":"REQUIRED"},
+            {"name":"solarSystem","type":"STRING","mode":"REQUIRED"},
+            {"name":"ship_class","type":"STRING","mode":"REQUIRED"},
+            {"name":"smartBomb","type":"BOOL","mode":"REQUIRED"},
+            {"name":"attackers","type":"INT64","mode":"REQUIRED"},
+            {"name":"corporationID","type":"RECORD","mode":"REPEATED","fields":[
+              {"name":"corporation_id","type":"INT64","mode":"REQUIRED"}
+            ]}
+          ]
+          EOF
+
+          bq mk --table \
+            --time_partitioning_field=snapshot_ts \
+            --time_partitioning_type=DAY \
+            --clustering_fields=stargate,solarSystem,ship_class \
+            --schema=/tmp/gate_kills_schema.json \
+            "${GCP_PROJECT_ID}:${BQ_DATASET}.${BQ_TABLE}"
+
+      - name: Load batch to BigQuery (dedupe + 1 load job)
+        id: load_bq
+        run: |
+          set -euo pipefail
+          # Contrato (a implementar en el script):
+          # - si /tmp/gate_kills_batch.ndjson está vacío => no hace nada
+          # - dedupe por killmailID contra BQ (query pruning por partición)
+          # - 1 load job append con los nuevos
+          # - escribe en $GITHUB_OUTPUT:
+          #   inserted_rows=<int>
+          python scripts/rq/eou_gate_kills_load.py \
+            --project "${GCP_PROJECT_ID}" \
+            --dataset "${BQ_DATASET}" \
+            --table "${BQ_TABLE}" \
+            --batch "/tmp/gate_kills_batch.ndjson"
+
+      # =====================================================================
+      # 9) FINAL — status + next_run (5m/30m) + last_modified (col I si success)
+      # =====================================================================
+      - name: Finalize (completed + next_run + last_modified)
+        if: success()
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          row="${SHEETS_WORKFLOW_ROW}"
+
+          reason="${{ steps.poll.outputs.poll_reason }}"
+          cooldown=1800
+          if [ "$reason" = "timeout" ]; then cooldown=300; fi
+          if [ "$reason" = "null_streak" ]; then cooldown=1800; fi
+
+          # next_run
+          epoch="$(date -u -d "+${cooldown} seconds" +%s)"
+          next_serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
+
+          # last_modified: max(max_killmail_time_iso de enrich_1 y enrich_2)
+          max_iso=""
+          if [ -n "${{ steps.enrich_1.outputs.max_killmail_time_iso }}" ]; then
+            max_iso="${{ steps.enrich_1.outputs.max_killmail_time_iso }}"
+          fi
+          if [ -n "${{ steps.enrich_2.outputs.max_killmail_time_iso }}" ]; then
+            if [ -z "$max_iso" ]; then
+              max_iso="${{ steps.enrich_2.outputs.max_killmail_time_iso }}"
+            else
+              e1="$(date -u -d "$max_iso" +%s || echo 0)"
+              e2="$(date -u -d "${{ steps.enrich_2.outputs.max_killmail_time_iso }}" +%s || echo 0)"
+              if [ "$e2" -gt "$e1" ]; then
+                max_iso="${{ steps.enrich_2.outputs.max_killmail_time_iso }}"
+              fi
+            fi
+          fi
+
+          # Construye payload Sheets
+          if [ -n "$max_iso" ]; then
+            lm_epoch="$(date -u -d "$max_iso" +%s)"
+            lm_serial="$(awk "BEGIN { printf \"%.10f\", (${lm_epoch}/86400) + 25569 }")"
+            data_payload="[
+              {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"completed\"]]},
+              {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${next_serial}]]},
+              {\"range\":\"${SHEET_TAB}!I${row}:I${row}\",\"values\":[[${lm_serial}]]}
+            ]"
+          else
+            data_payload="[
+              {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"completed\"]]},
+              {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${next_serial}]]}
+            ]"
+          fi
+
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "{
+              \"valueInputOption\":\"RAW\",
+              \"data\": ${data_payload}
+            }"
+
+      - name: Finalize (failed + next_run)
+        if: failure()
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          row="${SHEETS_WORKFLOW_ROW}"
+
+          # Conservador en fallo: 30 min
+          cooldown=1800
+          epoch="$(date -u -d "+${cooldown} seconds" +%s)"
+          serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
+
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "{
+              \"valueInputOption\":\"RAW\",
+              \"data\":[
+                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"failed\"]]},
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${serial}]]}
+              ]
+            }"
