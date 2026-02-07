@@ -10,9 +10,9 @@ on:
         default: ""
 
 permissions:
-  actions: read          # Guard por REST (listar runs)
-  contents: write        # persistir raw_kills.jsonl (commits)
-  id-token: write        # WIF/OIDC hacia Google
+  actions: read
+  contents: write
+  id-token: write
 
 concurrency:
   group: eou_gate_kills_rq-gh-bq
@@ -24,25 +24,25 @@ jobs:
     timeout-minutes: 45
 
     env:
-      # =====================================================================
-      # CONFIG (según tu especificación)
-      # =====================================================================
+      # =========================
+      # CONFIG (según tu spec)
+      # =========================
       WORKFLOW_FILE: eou_gate_kills_rq-gh-bq.yml
 
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "7"
 
-      LOCK_TIME: 1800  # segundos
+      LOCK_TIME: 1800
 
       # BigQuery
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       BQ_DATASET: eou
       BQ_TABLE: gate_kills
 
-      # RedisQ poll
+      # RedisQ
       REDISQ_BASE: https://zkillredisq.stream/listen.php
-      POLL_MAX_SECONDS: 1200          # 20 min
+      POLL_MAX_SECONDS: 1200
       NULL_STREAK_MAX: 10
       TTW: 1
 
@@ -53,7 +53,7 @@ jobs:
 
     steps:
       # =====================================================================
-      # 1) GUARD — decide si este run trabaja o sale (busy)
+      # 1) GUARD — si ya hay run trabajando/leader, este run sale sin trabajo
       # =====================================================================
       - name: Guard - compute decision
         id: guard_calc
@@ -120,17 +120,22 @@ jobs:
       - name: Exit if skipped (busy)
         if: steps.guard.outputs.proceed != 'true'
         run: |
-          echo "Skipped due to overlapping run"
+          echo "Skipped due to overlapping/queued run (guard)."
           exit 0
 
       # =====================================================================
-      # 2) CHECKOUT + GIT (para persistir raw_kills)
+      # 2) CHECKOUT + PYTHON
       # =====================================================================
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
 
       - name: Git identity
         run: |
@@ -149,7 +154,7 @@ jobs:
           fi
 
       # =====================================================================
-      # 3) AUTH GOOGLE — WIF/OIDC (sin claves)
+      # 3) AUTH GOOGLE — WIF/OIDC
       # =====================================================================
       - name: Auth to Google (WIF)
         id: gcp_auth
@@ -168,7 +173,7 @@ jobs:
       # =====================================================================
       # 4) FASE INICIO — status=in progress + next_run=now+LOCK_TIME
       # =====================================================================
-      - name: Phase start (in_progress + next_run lock)
+      - name: Phase start (in progress + next_run lock)
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
@@ -191,8 +196,7 @@ jobs:
             }"
 
       # =====================================================================
-      # 5) FASE TRATAMIENTO PENDIENTES — Enrich #1 (sobre RAW_FILE actual)
-      #    (Scripts aún no implementados: aquí solo definimos el contrato)
+      # 5) FASE TRATAMIENTO PENDIENTES — Enrich #1
       # =====================================================================
       - name: Heartbeat (next_run lock)
         env:
@@ -213,20 +217,16 @@ jobs:
               ]
             }"
 
-      - name: Enrich pending kills (ESI 1x1, filter2, requeue, batch output)
+      - name: Enrich pending kills (ESI 1x1, filter2, requeue)
         id: enrich_1
         run: |
           set -euo pipefail
-          # Contrato de salida (a implementar en el script):
-          # - escribe en $GITHUB_OUTPUT:
-          #   ndjson_path=<path o vacío>
-          #   ndjson_rows=<int>
-          #   max_killmail_time_iso=<ISO o vacío>
           python scripts/rq/eou_gate_kills_enrich.py \
             --raw "${RAW_FILE}" \
             --sde-stargates "${SDE_STARGATES_GZ}" \
             --sde-types "${SDE_TYPES_GZ}" \
-            --mode pending
+            --mode pending \
+            --repo "${GITHUB_REPOSITORY}"
 
       - name: Persist raw queue after enrich #1 (if changed)
         run: |
@@ -237,16 +237,21 @@ jobs:
             git push || true
           fi
 
-      - name: Build batch file (append from enrich #1)
+      - name: Init batch file
         run: |
           set -euo pipefail
           : > /tmp/gate_kills_batch.ndjson
-          if [ -n "${{ steps.enrich_1.outputs.ndjson_path }}" ] && [ -f "${{ steps.enrich_1.outputs.ndjson_path }}" ]; then
-            cat "${{ steps.enrich_1.outputs.ndjson_path }}" >> /tmp/gate_kills_batch.ndjson
+
+      - name: Append enrich #1 NDJSON to batch
+        run: |
+          set -euo pipefail
+          p="${{ steps.enrich_1.outputs.ndjson_path }}"
+          if [ -n "$p" ] && [ -f "$p" ]; then
+            cat "$p" >> /tmp/gate_kills_batch.ndjson
           fi
 
       # =====================================================================
-      # 6) FASE OBJETIVO — Poll RedisQ (20 min / 10 null)
+      # 6) FASE OBJETIVO — Poll RedisQ (20 min / 10 null) + flush cada minuto
       # =====================================================================
       - name: Heartbeat before poll (next_run lock)
         env:
@@ -273,13 +278,6 @@ jobs:
           QUEUE_SUFFIX: ${{ inputs.queue_suffix }}
         run: |
           set -euo pipefail
-          # Contrato de salida (a implementar en el script):
-          # - escribe en $GITHUB_OUTPUT:
-          #   poll_reason=timeout|null_streak
-          #   accepted=<int>
-          #   null_streak=<int>
-          # Nota: el script debe loguear kills + PASS/FAIL + null_streak X/10
-          # y debe hacer flush cada minuto al RAW_FILE (append).
           python scripts/rq/eou_gate_kills_poll.py \
             --base "${REDISQ_BASE}" \
             --raw "${RAW_FILE}" \
@@ -293,7 +291,7 @@ jobs:
       # =====================================================================
       # 7) SUBFASE ENRICH #2 + batch append
       # =====================================================================
-      - name: Enrich new kills (ESI 1x1, filter2, requeue, batch output)
+      - name: Enrich new kills (ESI 1x1, filter2, requeue)
         id: enrich_2
         run: |
           set -euo pipefail
@@ -301,7 +299,8 @@ jobs:
             --raw "${RAW_FILE}" \
             --sde-stargates "${SDE_STARGATES_GZ}" \
             --sde-types "${SDE_TYPES_GZ}" \
-            --mode post_poll
+            --mode post_poll \
+            --repo "${GITHUB_REPOSITORY}"
 
       - name: Persist raw queue after enrich #2 (if changed)
         run: |
@@ -312,21 +311,31 @@ jobs:
             git push || true
           fi
 
-      - name: Append from enrich #2 to batch file
+      - name: Append enrich #2 NDJSON to batch
         run: |
           set -euo pipefail
-          if [ -n "${{ steps.enrich_2.outputs.ndjson_path }}" ] && [ -f "${{ steps.enrich_2.outputs.ndjson_path }}" ]; then
-            cat "${{ steps.enrich_2.outputs.ndjson_path }}" >> /tmp/gate_kills_batch.ndjson
+          p="${{ steps.enrich_2.outputs.ndjson_path }}"
+          if [ -n "$p" ] && [ -f "$p" ]; then
+            cat "$p" >> /tmp/gate_kills_batch.ndjson
           fi
 
       # =====================================================================
-      # 8) BigQuery — crear tabla si no existe + load (en batch)
+      # 8) BigQuery — dataset/table si no existe + load (dedupe+append)
       # =====================================================================
+      - name: Ensure BigQuery dataset exists
+        run: |
+          set -euo pipefail
+          if bq show --format=prettyjson "${GCP_PROJECT_ID}:${BQ_DATASET}" >/dev/null 2>&1; then
+            echo "Dataset exists: ${BQ_DATASET}"
+            exit 0
+          fi
+          bq mk --dataset "${GCP_PROJECT_ID}:${BQ_DATASET}"
+
       - name: Ensure BigQuery table exists (partition + cluster)
         run: |
           set -euo pipefail
           if bq show --format=prettyjson "${GCP_PROJECT_ID}:${BQ_DATASET}.${BQ_TABLE}" >/dev/null 2>&1; then
-            echo "BigQuery table exists: ${BQ_DATASET}.${BQ_TABLE}"
+            echo "Table exists: ${BQ_DATASET}.${BQ_TABLE}"
             exit 0
           fi
 
@@ -357,12 +366,6 @@ jobs:
         id: load_bq
         run: |
           set -euo pipefail
-          # Contrato (a implementar en el script):
-          # - si /tmp/gate_kills_batch.ndjson está vacío => no hace nada
-          # - dedupe por killmailID contra BQ (query pruning por partición)
-          # - 1 load job append con los nuevos
-          # - escribe en $GITHUB_OUTPUT:
-          #   inserted_rows=<int>
           python scripts/rq/eou_gate_kills_load.py \
             --project "${GCP_PROJECT_ID}" \
             --dataset "${BQ_DATASET}" \
@@ -385,11 +388,10 @@ jobs:
           if [ "$reason" = "timeout" ]; then cooldown=300; fi
           if [ "$reason" = "null_streak" ]; then cooldown=1800; fi
 
-          # next_run
           epoch="$(date -u -d "+${cooldown} seconds" +%s)"
           next_serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
 
-          # last_modified: max(max_killmail_time_iso de enrich_1 y enrich_2)
+          # last_modified = max(max_killmail_time_iso de enrich_1/enrich_2)
           max_iso=""
           if [ -n "${{ steps.enrich_1.outputs.max_killmail_time_iso }}" ]; then
             max_iso="${{ steps.enrich_1.outputs.max_killmail_time_iso }}"
@@ -406,7 +408,6 @@ jobs:
             fi
           fi
 
-          # Construye payload Sheets
           if [ -n "$max_iso" ]; then
             lm_epoch="$(date -u -d "$max_iso" +%s)"
             lm_serial="$(awk "BEGIN { printf \"%.10f\", (${lm_epoch}/86400) + 25569 }")"
@@ -439,7 +440,6 @@ jobs:
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
 
-          # Conservador en fallo: 30 min
           cooldown=1800
           epoch="$(date -u -d "+${cooldown} seconds" +%s)"
           serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
