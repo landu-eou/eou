@@ -14,6 +14,7 @@ permissions:
   contents: write
   id-token: write
 
+# Candado oficial (GitHub): evita paralelismo del mismo workflow.
 concurrency:
   group: eou_gate_kills_rq-gh-bq
   cancel-in-progress: false
@@ -26,20 +27,24 @@ jobs:
     env:
       WORKFLOW_FILE: eou_gate_kills_rq-gh-bq.yml
 
+      # Sheets: solo escritura (status/next_run/last_modified) para orquestación externa.
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "7"
       LOCK_TIME: 1800
 
+      # BigQuery
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       BQ_DATASET: eou
       BQ_TABLE: gate_kills
 
+      # RedisQ
       REDISQ_BASE: https://zkillredisq.stream/listen.php
       POLL_MAX_SECONDS: 1200
       NULL_STREAK_MAX: 10
       TTW: 1
 
+      # Repo state
       RAW_FILE: data/rq/raw_kills.jsonl
       SDE_STARGATES_GZ: data/sde/stargates.jsonl.gz
       SDE_TYPES_GZ: data/sde/types.jsonl.gz
@@ -48,7 +53,7 @@ jobs:
 
     steps:
       # ==========================================================
-      # 1) GUARD (1 step): anti-cola + anotación
+      # 1) GUARD: anti-cola/anti-solape (1 step, outputs oficiales)
       # ==========================================================
       - name: Guard (anti-overlap / anti-queue)
         id: guard
@@ -114,10 +119,6 @@ jobs:
           echo "proceed=${proceed}" >> "$GITHUB_OUTPUT"
           echo "reason=${reason}" >> "$GITHUB_OUTPUT"
 
-          if [ "${proceed}" != "true" ]; then
-            echo "::notice:: skipped due to overlap/queue (reason=${reason})"
-          fi
-
       # ==========================================================
       # 2) CHECKOUT + PYTHON (solo si proceed=true)
       # ==========================================================
@@ -172,7 +173,7 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
 
       # ==========================================================
-      # 4) FASE INICIO — status=in progress + next_run=now+LOCK_TIME
+      # 4) FASE INICIO — status=in progress + next_run lock
       # ==========================================================
       - name: Phase start (in progress + next_run lock)
         if: steps.guard.outputs.proceed == 'true'
@@ -228,7 +229,7 @@ jobs:
           fi
 
       # ==========================================================
-      # 6) Heartbeat antes del poll (único heartbeat extra)
+      # 6) Heartbeat antes del poll (lock)
       # ==========================================================
       - name: Heartbeat before poll (next_run lock)
         if: steps.guard.outputs.proceed == 'true'
@@ -298,7 +299,7 @@ jobs:
           fi
 
       # ==========================================================
-      # 9) BigQuery: solo si hay payload (y create table dentro del load.py)
+      # 9) BigQuery: solo si hay payload
       # ==========================================================
       - name: Detect payload
         if: steps.guard.outputs.proceed == 'true'
@@ -307,10 +308,8 @@ jobs:
           set -euo pipefail
           if [ -s /tmp/gate_kills_batch.ndjson ]; then
             echo "has_payload=true" >> "$GITHUB_OUTPUT"
-            echo "batch_bytes=$(wc -c < /tmp/gate_kills_batch.ndjson | tr -d ' ')" >> "$GITHUB_OUTPUT"
           else
             echo "has_payload=false" >> "$GITHUB_OUTPUT"
-            echo "batch_bytes=0" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Load batch to BigQuery (dedupe + 1 load job)
@@ -325,7 +324,7 @@ jobs:
             --batch "/tmp/gate_kills_batch.ndjson"
 
       # ==========================================================
-      # 10) FINAL — status + next_run + last_modified (solo si proceed=true)
+      # 10) FINAL — status + next_run + last_modified
       # ==========================================================
       - name: Finalize (completed + next_run + last_modified)
         if: success() && steps.guard.outputs.proceed == 'true'
@@ -343,6 +342,7 @@ jobs:
           max_iso=""
           iso1="${{ steps.enrich_1.outputs.max_killmail_time_iso }}"
           iso2="${{ steps.enrich_2.outputs.max_killmail_time_iso }}"
+
           if [ -n "$iso1" ]; then max_iso="$iso1"; fi
           if [ -n "$iso2" ]; then
             if [ -z "$max_iso" ]; then
@@ -377,73 +377,9 @@ jobs:
           SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
-          cooldown=1800
           python scripts/rq/eou_gate_kills_sheets_write.py \
             --sheets-id "${SHEETS_ID}" \
             --tab "${SHEET_TAB}" \
             --row "${SHEETS_WORKFLOW_ROW}" \
             --status "failed" \
-            --next-run-seconds "${cooldown}"
-
-      # ==========================================================
-      # 11) JOB SUMMARY (always) — sin checkout requerido
-      # ==========================================================
-      - name: Job Summary
-        if: always()
-        env:
-          GUARD_PROCEED: ${{ steps.guard.outputs.proceed }}
-          GUARD_REASON: ${{ steps.guard.outputs.reason }}
-
-          POLL_REASON: ${{ steps.poll.outputs.poll_reason }}
-          POLL_DURATION: ${{ steps.poll.outputs.duration_seconds }}
-          POLL_ACCEPTED: ${{ steps.poll.outputs.accepted }}
-          POLL_DISCARDED: ${{ steps.poll.outputs.discarded }}
-          POLL_NULL_STREAK: ${{ steps.poll.outputs.null_streak }}
-          POLL_HTTP_429: ${{ steps.poll.outputs.http_429 }}
-          POLL_HTTP_5XX: ${{ steps.poll.outputs.http_5xx }}
-          POLL_HTTP_OTHER: ${{ steps.poll.outputs.http_other }}
-
-          EN1_ROWS: ${{ steps.enrich_1.outputs.ndjson_rows }}
-          EN1_REQUEUED: ${{ steps.enrich_1.outputs.requeued }}
-          EN1_DISCARDED: ${{ steps.enrich_1.outputs.discarded }}
-          EN1_STOP: ${{ steps.enrich_1.outputs.stop_reason }}
-
-          EN2_ROWS: ${{ steps.enrich_2.outputs.ndjson_rows }}
-          EN2_REQUEUED: ${{ steps.enrich_2.outputs.requeued }}
-          EN2_DISCARDED: ${{ steps.enrich_2.outputs.discarded }}
-          EN2_STOP: ${{ steps.enrich_2.outputs.stop_reason }}
-
-          HAS_PAYLOAD: ${{ steps.payload.outputs.has_payload }}
-          BATCH_BYTES: ${{ steps.payload.outputs.batch_bytes }}
-
-          LOAD_CANDIDATE: ${{ steps.load_bq.outputs.candidate_rows }}
-          LOAD_DUP: ${{ steps.load_bq.outputs.duplicate_rows }}
-          LOAD_INSERTED: ${{ steps.load_bq.outputs.inserted_rows }}
-          LOAD_STOP: ${{ steps.load_bq.outputs.stop_reason }}
-          LOAD_SKIPPED: ${{ steps.load_bq.outputs.load_skipped }}
-        run: |
-          set -euo pipefail
-          {
-            echo "## RQ Gate Kills — Summary"
-            echo ""
-            echo "### Guard"
-            echo "- proceed: ${GUARD_PROCEED:-}"
-            echo "- reason: ${GUARD_REASON:-}"
-            echo ""
-            echo "### Poll (RedisQ)"
-            echo "- reason: ${POLL_REASON:-}"
-            echo "- duration_seconds: ${POLL_DURATION:-}"
-            echo "- accepted / discarded: ${POLL_ACCEPTED:-} / ${POLL_DISCARDED:-}"
-            echo "- null_streak: ${POLL_NULL_STREAK:-}"
-            echo "- http_429 / http_5xx / http_other: ${POLL_HTTP_429:-} / ${POLL_HTTP_5XX:-} / ${POLL_HTTP_OTHER:-}"
-            echo ""
-            echo "### Enrich"
-            echo "- enrich_1 rows/requeued/discarded/stop: ${EN1_ROWS:-} / ${EN1_REQUEUED:-} / ${EN1_DISCARDED:-} / ${EN1_STOP:-}"
-            echo "- enrich_2 rows/requeued/discarded/stop: ${EN2_ROWS:-} / ${EN2_REQUEUED:-} / ${EN2_DISCARDED:-} / ${EN2_STOP:-}"
-            echo ""
-            echo "### Batch + BigQuery"
-            echo "- has_payload: ${HAS_PAYLOAD:-}"
-            echo "- batch_bytes: ${BATCH_BYTES:-}"
-            echo "- load_skipped: ${LOAD_SKIPPED:-}"
-            echo "- load candidate/dups/inserted/stop: ${LOAD_CANDIDATE:-} / ${LOAD_DUP:-} / ${LOAD_INSERTED:-} / ${LOAD_STOP:-}"
-          } >> "$GITHUB_STEP_SUMMARY"
+            --next-run-seconds "1800"
