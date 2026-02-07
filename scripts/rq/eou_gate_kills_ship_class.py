@@ -14,7 +14,7 @@ from __future__ import annotations
 GROUP_TO_CLASS = {
     "Capsule": "pod",
 
-    # subcapital (según tu lista)
+    # subcapital
     "Assault Frigate": "subcapital",
     "Attack Battlecruiser": "subcapital",
     "Battleship": "subcapital",
