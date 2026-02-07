@@ -9,6 +9,7 @@ Genera (sobrescribe) en el directorio de salida:
   - stations.jsonl.gz
   - stargates.jsonl.gz
   - types.jsonl.gz   (incluye group, category, marketGroup; published-only)
+  - corporations.jsonl.gz  (npcCorporations)
 
 Solo usa el ZIP oficial CCP SDE JSONL (no ESI, no "extended").
 """
@@ -224,6 +225,17 @@ def build_solarsystems_out(
     return rows
 
 
+def build_corporations_out(corp_names: Dict[int, str]) -> List[Dict]:
+    """
+    corporations.jsonl.gz:
+      - corporationID  (npcCorporations._key)
+      - corporation    (npcCorporations.name.en)
+    """
+    rows: List[Dict] = [{"corporationID": cid, "corporation": name} for cid, name in corp_names.items()]
+    rows.sort(key=lambda r: r["corporationID"])
+    return rows
+
+
 def build_stations_out(
     zf: zipfile.ZipFile,
     systems: Dict[int, Tuple[str, int, int]],
@@ -242,7 +254,6 @@ def build_stations_out(
     """
     rows: List[Dict] = []
 
-    # orbitID puede apuntar a planeta o luna; fallback: solar system name.
     orbit_names: Dict[int, str] = {}
     orbit_names.update(planet_orbits)
     orbit_names.update(moon_orbits)
@@ -267,14 +278,10 @@ def build_stations_out(
         if op_id is not None:
             op_name, use_op = operations.get(op_id, (str(op_id), False))
 
-        # CCP naming rule:
-        #  - if useOperationName: <orbitName> - <corporationName> <operationName>
-        #  - else:              <orbitName> - <corporationName>
         station_name = f"{orbit_name} - {corp}".strip()
         if use_op and op_name:
             station_name = f"{station_name} {op_name}".strip()
 
-        # stationType: resolver typeID del station usando types.jsonl.name.en
         st_type_id = _get_int(obj, "typeID", "stationTypeID", "stationTypeId")
         st_type_name = type_names.get(st_type_id, str(st_type_id)) if st_type_id is not None else ""
 
@@ -403,10 +410,13 @@ def main() -> int:
         write_jsonl_gz(out_dir / "constellations.jsonl.gz", build_constellations_out(consts, regions))
         write_jsonl_gz(out_dir / "solarsystems.jsonl.gz", build_solarsystems_out(systems, consts, regions))
 
+        # Corporations (NEW)
+        corp_names = _read_corporations(zf)
+        write_jsonl_gz(out_dir / "corporations.jsonl.gz", build_corporations_out(corp_names))
+
         # Stations
         planet_orbits = _read_planet_orbit_names(zf, systems)
         moon_orbits = _read_moon_orbit_names(zf, planet_orbits)
-        corp_names = _read_corporations(zf)
         operations = _read_station_operations(zf)
         type_names = _read_type_name_map(zf)
 
@@ -429,6 +439,7 @@ def main() -> int:
         "stations.jsonl.gz",
         "stargates.jsonl.gz",
         "types.jsonl.gz",
+        "corporations.jsonl.gz",  # NEW
     ]
     for name in expected:
         p = out_dir / name
