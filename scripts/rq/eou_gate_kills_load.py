@@ -8,8 +8,8 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime
-from typing import Any, Dict, List, Set
+import time
+from typing import Any, Dict, List, Set, Tuple
 
 
 def write_outputs(kv: Dict[str, Any]) -> None:
@@ -26,10 +26,62 @@ def run_cmd(cmd: List[str]) -> subprocess.CompletedProcess:
 
 
 def date_of_snapshot(snapshot_ts: str) -> str:
-    # "2026-02-02T12:34:56Z" -> "2026-02-02"
-    if not snapshot_ts:
-        return ""
-    return snapshot_ts[:10]
+    return snapshot_ts[:10] if snapshot_ts else ""
+
+
+def extract_json(stdout: str) -> Any:
+    """
+    bq --format=json debería devolver JSON puro, pero a veces hay ruido.
+    Extraemos desde el primer '[' o '{' y parseamos.
+    """
+    s = stdout.strip()
+    if not s:
+        return []
+    i_list = s.find("[")
+    i_obj = s.find("{")
+    candidates = [i for i in [i_list, i_obj] if i != -1]
+    if not candidates:
+        raise ValueError("No JSON found in stdout")
+    i = min(candidates)
+    return json.loads(s[i:])
+
+
+def bq_query_existing_ids(project: str, dataset: str, table: str, ids: List[int], dates: List[str]) -> Tuple[Set[int], str]:
+    ids_sql = ",".join(str(x) for x in ids)
+    dates_sql = ",".join(f"DATE '{d}'" for d in dates)
+
+    sql = f"""
+    SELECT killmailID
+    FROM `{project}.{dataset}.{table}`
+    WHERE killmailID IN UNNEST([{ids_sql}])
+      AND DATE(snapshot_ts) IN UNNEST([{dates_sql}])
+    """
+
+    cmd = [
+        "bq", "query",
+        "--quiet",
+        "--use_legacy_sql=false",
+        "--format=json",
+        "--project_id", project,
+        sql
+    ]
+
+    p = run_cmd(cmd)
+    if p.returncode != 0:
+        return set(), (p.stdout + "\n" + p.stderr)
+
+    data = extract_json(p.stdout)
+    existing: Set[int] = set()
+    if isinstance(data, list):
+        for r in data:
+            if not isinstance(r, dict):
+                continue
+            v = r.get("killmailID")
+            if isinstance(v, int):
+                existing.add(v)
+            elif isinstance(v, str) and v.isdigit():
+                existing.add(int(v))
+    return existing, ""
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,9 +95,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    target = f"{args.project}:{args.dataset}.{args.table}"
+    target_cli = f"{args.project}:{args.dataset}.{args.table}"
 
-    # read batch
+    # Leer batch
     rows: List[dict] = []
     ids: List[int] = []
     dates_set: Set[str] = set()
@@ -92,64 +144,32 @@ def main() -> int:
         })
         return 0
 
-    # Dedupe query (1 query)
     ids_unique = sorted(set(ids))
     dates_sorted = sorted(dates_set)
     dedupe_dates = ",".join(dates_sorted)
 
-    # Build SQL using array literals (evita líos de parámetros del CLI)
-    ids_sql = ",".join(str(x) for x in ids_unique)
-    dates_sql = ",".join(f"DATE '{d}'" for d in dates_sorted)
-
-    sql = f"""
-    SELECT killmailID
-    FROM `{args.project}.{args.dataset}.{args.table}`
-    WHERE killmailID IN UNNEST([{ids_sql}])
-      AND DATE(snapshot_ts) IN UNNEST([{dates_sql}])
-    """
-
-    p = run_cmd([
-        "bq", "query",
-        "--quiet",
-        "--use_legacy_sql=false",
-        "--format=json",
-        "--project_id", args.project,
-        sql
-    ])
-
-    if p.returncode != 0:
-        print(p.stdout, file=sys.stderr)
-        print(p.stderr, file=sys.stderr)
-        write_outputs({
-            "candidate_rows": candidate_rows,
-            "duplicate_rows": 0,
-            "inserted_rows": 0,
-            "load_skipped": "true",
-            "dedupe_dates": dedupe_dates,
-            "stop_reason": "bq_query_failed",
-        })
-        return 1
-
+    # 1 query dedupe con 1 retry si es “not found” justo después de crear tabla
     existing: Set[int] = set()
-    try:
-        data = json.loads(p.stdout) if p.stdout.strip() else []
-        for r in data:
-            v = r.get("killmailID")
-            if isinstance(v, str) and v.isdigit():
-                existing.add(int(v))
-            elif isinstance(v, int):
-                existing.add(v)
-    except Exception:
-        # si falla parse, por seguridad: no cargues nada
-        write_outputs({
-            "candidate_rows": candidate_rows,
-            "duplicate_rows": 0,
-            "inserted_rows": 0,
-            "load_skipped": "true",
-            "dedupe_dates": dedupe_dates,
-            "stop_reason": "bq_query_failed",
-        })
-        return 1
+    err = ""
+    for attempt in [1, 2]:
+        existing, err = bq_query_existing_ids(args.project, args.dataset, args.table, ids_unique, dates_sorted)
+        if err and ("Not found" in err or "notFound" in err) and attempt == 1:
+            print("[load] WARN: table not found right after create; retry in 3s", file=sys.stderr)
+            time.sleep(3)
+            continue
+        if err:
+            print("[load] ERROR: bq query failed", file=sys.stderr)
+            print(err, file=sys.stderr)
+            write_outputs({
+                "candidate_rows": candidate_rows,
+                "duplicate_rows": 0,
+                "inserted_rows": 0,
+                "load_skipped": "true",
+                "dedupe_dates": dedupe_dates,
+                "stop_reason": "bq_query_failed",
+            })
+            return 1
+        break
 
     new_rows = [r for r in rows if r["killmailID"] not in existing]
     duplicate_rows = candidate_rows - len(new_rows)
@@ -165,6 +185,7 @@ def main() -> int:
         })
         return 0
 
+    # 1 load job
     load_file = "/tmp/gate_kills_to_load.ndjson"
     with open(load_file, "w", encoding="utf-8") as f:
         for r in new_rows:
@@ -175,11 +196,12 @@ def main() -> int:
         "--quiet",
         "--source_format=NEWLINE_DELIMITED_JSON",
         "--ignore_unknown_values=true",
-        target,
+        target_cli,
         load_file
     ])
 
     if p2.returncode != 0:
+        print("[load] ERROR: bq load failed", file=sys.stderr)
         print(p2.stdout, file=sys.stderr)
         print(p2.stderr, file=sys.stderr)
         write_outputs({
