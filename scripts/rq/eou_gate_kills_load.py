@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+BigQuery loader (dedupe + single load job).
+
+Objetivo:
+- Leer batch NDJSON (candidatos).
+- Dedupe por killmailID dentro de las fechas (partition pruning por DATE(snapshot_ts)).
+- Crear dataset/tabla solo si hay filas (minimiza llamadas y quota).
+- Hacer 1 bq load con NDJSON.
+
+Contrato (outputs):
+- candidate_rows, duplicate_rows, inserted_rows, load_skipped, dedupe_dates, stop_reason
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -61,24 +74,21 @@ def date_of_snapshot(snapshot_ts: str) -> str:
 
 
 def ensure_dataset(project: str, dataset: str) -> bool:
-    p = run_cmd(["bq", "show", "--format=prettyjson", f"{project}:{dataset}"])
-    if p.returncode == 0:
+    if run_cmd(["bq", "show", "--format=prettyjson", f"{project}:{dataset}"]).returncode == 0:
         return True
-    p2 = run_cmd(["bq", "mk", "--dataset", f"{project}:{dataset}"])
-    return p2.returncode == 0
+    return run_cmd(["bq", "mk", "--dataset", f"{project}:{dataset}"]).returncode == 0
 
 
 def ensure_table(project: str, dataset: str, table: str) -> bool:
     fq = f"{project}:{dataset}.{table}"
-    p = run_cmd(["bq", "show", "--format=prettyjson", fq])
-    if p.returncode == 0:
+    if run_cmd(["bq", "show", "--format=prettyjson", fq]).returncode == 0:
         return True
 
     schema_path = "/tmp/gate_kills_schema.json"
     with open(schema_path, "w", encoding="utf-8") as f:
         json.dump(SCHEMA_JSON, f, ensure_ascii=False)
 
-    p2 = run_cmd(
+    p = run_cmd(
         [
             "bq",
             "mk",
@@ -90,12 +100,7 @@ def ensure_table(project: str, dataset: str, table: str) -> bool:
             fq,
         ]
     )
-    if p2.returncode != 0:
-        print("[load] ERROR: bq mk table failed", file=sys.stderr)
-        print(p2.stdout, file=sys.stderr)
-        print(p2.stderr, file=sys.stderr)
-        return False
-    return True
+    return p.returncode == 0
 
 
 def bq_query_existing_ids(project: str, dataset: str, table: str, ids: List[int], dates: List[str]) -> Tuple[Set[int], str]:
@@ -109,18 +114,18 @@ def bq_query_existing_ids(project: str, dataset: str, table: str, ids: List[int]
       AND DATE(snapshot_ts) IN UNNEST([{dates_sql}])
     """
 
-    cmd = [
-        "bq",
-        "query",
-        "--quiet",
-        "--use_legacy_sql=false",
-        "--format=json",
-        "--project_id",
-        project,
-        sql,
-    ]
-
-    p = run_cmd(cmd)
+    p = run_cmd(
+        [
+            "bq",
+            "query",
+            "--quiet",
+            "--use_legacy_sql=false",
+            "--format=json",
+            "--project_id",
+            project,
+            sql,
+        ]
+    )
     if p.returncode != 0:
         return set(), (p.stdout + "\n" + p.stderr)
 
@@ -201,7 +206,7 @@ def main() -> int:
         )
         return 0
 
-    # asegurar BQ solo si hay filas
+    # Crear/asegurar BQ solo si hay filas candidatas.
     if not ensure_dataset(args.project, args.dataset) or not ensure_table(args.project, args.dataset, args.table):
         write_outputs(
             {
@@ -224,12 +229,10 @@ def main() -> int:
     for attempt in [1, 2]:
         existing, err = bq_query_existing_ids(args.project, args.dataset, args.table, ids_unique, dates_sorted)
         if err and ("Not found" in err or "notFound" in err) and attempt == 1:
-            print("[load] WARN: table not found right after create; retry in 3s", file=sys.stderr)
             time.sleep(3)
             continue
         if err:
-            print("[load] ERROR: bq query failed", file=sys.stderr)
-            print(err, file=sys.stderr)
+            print("bq query failed", file=sys.stderr)
             write_outputs(
                 {
                     "candidate_rows": candidate_rows,
@@ -264,7 +267,7 @@ def main() -> int:
         for r in new_rows:
             f.write(json.dumps(r, separators=(",", ":"), ensure_ascii=False) + "\n")
 
-    p2 = run_cmd(
+    p = run_cmd(
         [
             "bq",
             "load",
@@ -275,11 +278,8 @@ def main() -> int:
             load_file,
         ]
     )
-
-    if p2.returncode != 0:
-        print("::warning:: bq load failed", file=sys.stderr)
-        print(p2.stdout, file=sys.stderr)
-        print(p2.stderr, file=sys.stderr)
+    if p.returncode != 0:
+        print("bq load failed", file=sys.stderr)
         write_outputs(
             {
                 "candidate_rows": candidate_rows,
@@ -303,7 +303,6 @@ def main() -> int:
             "stop_reason": "completed",
         }
     )
-    print(f"[load] inserted_rows={inserted_rows} duplicates={duplicate_rows} dates={dedupe_dates}")
     return 0
 
 
