@@ -147,3 +147,14 @@
 {"killID":133195811,"zkb":{"hash":"42fe4f3ce8f16ecbfd6dd963c5ee9b96e08feef6","locationID":50002087,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133195813,"zkb":{"hash":"c72ae532b2de4fdeef60315bd63133e1ddf098e2","locationID":50011209,"labels":["tz:eu","cat:6","#:10+","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133195814,"zkb":{"hash":"a584fecde2fad2504d2100c11bcb11204ae5c9b4","locationID":50011031,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133195815,"zkb":{"hash":"d9b9d84ff2ac71fad83f54bbef170ebab8ead880","locationID":50002573,"labels":["tz:eu","cat:6","#:1","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133195816,"zkb":{"hash":"7759c00527b90b905c36c6de5b29d22a3527a269","locationID":50003830,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec","isk:1b+"]},"rearm":0}
+{"killID":133195821,"zkb":{"hash":"87aca3760bd1fae01af898d7538e2d58d9f5a654","locationID":50002045,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133195830,"zkb":{"hash":"cc70528c48a0bb8892d67cc893f3d81b2df79fd2","locationID":50007002,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133195832,"zkb":{"hash":"14f88366727cbcb16949250cbc2c875af8eccfef","locationID":50011031,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133195833,"zkb":{"hash":"0b0427dc031a275107a05487349098619cfac2bb","locationID":50011209,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133195841,"zkb":{"hash":"d44f20de22791b4664f66d7a88cdc62c086eeeaa","locationID":50016544,"labels":["tz:eu","cat:6","#:2+","pvp"]},"rearm":0}
+{"killID":133195843,"zkb":{"hash":"3d12347e07c25963bfb34442cef199d88333a4eb","locationID":50013707,"labels":["tz:eu","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133195846,"zkb":{"hash":"951531deb329ff511d933185e04cc46d0502c59c","locationID":50003414,"labels":["tz:eu","cat:6","#:25+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133195850,"zkb":{"hash":"d0ae7b7009009602407e37e762c01ea3d865e681","locationID":50002956,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133195859,"zkb":{"hash":"22c022f186015ddf9fefadc894162ea3526609d0","locationID":50016285,"labels":["tz:eu","cat:6","#:2+","pvp","loc:lowsec","fw:gallente","fw:calgal"]},"rearm":0}
