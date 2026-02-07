@@ -46,11 +46,6 @@ jobs:
     steps:
       # =====================================================================
       # 0) Guard anti-cola / anti-solapamiento
-      # Objetivo: si el cron dispara doble y se crean runs en cola, SOLO trabaja el líder.
-      # Estrategia:
-      #   - Leemos runs del workflow.
-      #   - Si este run se creó mientras había otro run “vivo”, salimos.
-      #   - Si hay varios queued/in_progress, solo trabaja el de run_number más bajo.
       # =====================================================================
       - name: Guard (skip duplicates)
         id: guard
@@ -157,7 +152,7 @@ jobs:
             }"
 
       # =====================================================================
-      # 3) Checkout + Python (para generar outputs desde scripts/*.py)
+      # 3) Checkout + Python
       # =====================================================================
       - name: Checkout
         uses: actions/checkout@v4
@@ -171,8 +166,6 @@ jobs:
 
       # =====================================================================
       # 4) Leer headers del SDE final (ETag + Last-Modified)
-      # - curl -L: seguir redirect del “latest”
-      # - parse: tomamos headers del ÚLTIMO bloque HTTP
       # =====================================================================
       - name: SDE - fetch headers (etag + last-modified)
         id: sde_headers
@@ -214,8 +207,6 @@ jobs:
 
       # =====================================================================
       # 5) Decisión de update
-      # - Si force_refresh == "true" => needs_update=true
-      # - Si no, compara states/sde.json.etag con el ETag remoto
       # =====================================================================
       - name: Decide update (etag compare or force)
         id: decide
@@ -245,10 +236,6 @@ jobs:
 
       # =====================================================================
       # 6) Build (solo si needs_update=true)
-      # - Descarga ZIP
-      # - Ejecuta tu builder Python (en archivo .py)
-      # - Escribe states/sde.json con el ETag remoto (sin Python)
-      # - Reemplaza outputs “de una vez”
       # =====================================================================
       - name: Build outputs (SDE → data/sde/*.jsonl.gz)
         if: steps.decide.outputs.needs_update == 'true'
@@ -270,7 +257,7 @@ jobs:
           jq -n --arg etag "${{ steps.sde_headers.outputs.etag }}" '{etag:$etag}' > states/sde.json
 
           # replace: sobrescritura única (evita commits parciales)
-          for f in regions constellations solarsystems stations stargates types; do
+          for f in regions constellations solarsystems stations stargates types corporations; do
             mv -f ".tmp/sde/out/${f}.jsonl.gz" "data/sde/${f}.jsonl.gz"
           done
 
@@ -295,12 +282,6 @@ jobs:
 
       # =====================================================================
       # 7) Finalize (Sheets)
-      # Reglas:
-      # - Si updated o forced => next_run = (Last-Modified + 30m) a la próxima fecha futura
-      # - Si no updated:
-      #     - si hora UTC en [10,15) => next_run = now + 1h
-      #     - si no => next_run = (Last-Modified + 30m) a la próxima fecha futura
-      # - last_modified (col I) solo si “se volcó correctamente” (updated/forced)
       # =====================================================================
       - name: Sheets - finalize (completed)
         if: success()
