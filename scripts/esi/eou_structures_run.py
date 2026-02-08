@@ -9,8 +9,8 @@ EOU · ESI Structures runner
 - Reescritura BQ (delete+create+load) solo si hay cambios y hay filas completas a volcar
 - Actualiza states/structures.json (ETag del listado) solo si:
     * ETag del listado cambió
-    * data file se reescribió OK (o no se reescribió porque no había cambios)
-    * BQ se reescribió OK (o no se reescribió porque no había nada que volcar / no tocaba)
+    * data file se reescribió OK (o no se reescribió porque correspondía: sin cambios)
+    * BQ se reescribió OK (o no se reescribió porque correspondía: no tocaba)
 """
 
 from __future__ import annotations
@@ -36,8 +36,7 @@ STRUCTURE_DETAIL_URL = ESI_BASE + "/universe/structures/{structure_id}/"
 # Cortesía + sostenibilidad: muy pequeño; el throttle real viene por error-limit headers y 420.
 MIN_REQUEST_INTERVAL_SECS = 0.05
 
-# En ESI, 4xx/5xx cuentan para el "error limit". Para evitar 420, si el remain cae bajo,
-# dormimos hasta reset (cap conservador para no eternizar el job).
+# Si el error-limit está crítico, dormimos hasta reset (cap conservador).
 ERROR_LIMIT_SLEEP_CAP_SECS = 180
 
 
@@ -52,6 +51,32 @@ def _env_required(name: str) -> str:
     if not v:
         raise RuntimeError(f"Missing required env var: {name}")
     return v
+
+
+def _env_optional(name: str) -> Optional[str]:
+    v = os.getenv(name)
+    if v is None:
+        return None
+    v = v.strip()
+    return v if v else None
+
+
+def _env_required_path_with_fallback(name: str, fallbacks: List[str]) -> str:
+    """
+    Required path env var with robust fallback to known runner temp locations.
+
+    This fixes the observed failure: STRUCTURE_LIST_JSON was empty even though
+    the producer step typically writes RUNNER_TEMP/structure_list.json.
+    """
+    v = _env_optional(name)
+    if v:
+        return v
+
+    for fb in fallbacks:
+        if fb and Path(fb).exists():
+            return fb
+
+    raise RuntimeError(f"Missing required env var: {name}")
 
 
 def _env_json_dict(name: str) -> Dict[str, Any]:
@@ -157,24 +182,9 @@ def _read_gz_jsonl(path: str) -> Dict[int, Dict[str, Any]]:
                 continue
             obj = json.loads(line)
             sid = int(obj["stationID"])
-            # Normaliza ETag por si el fichero lo guardó con comillas.
             obj["etag"] = _normalize_etag(obj.get("etag"))
             records[sid] = obj
     return records
-
-
-def _write_gz_jsonl_atomic(path: str, records: Iterable[Dict[str, Any]]) -> None:
-    dst = Path(path)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_suffix(dst.suffix + ".tmp")
-
-    with gzip.open(tmp, "wt", encoding="utf-8", newline="\n") as f:
-        for obj in records:
-            # Nunca escribimos campos internos (p.ej. _type_id) si existieran.
-            clean = {k: v for k, v in obj.items() if not k.startswith("_")}
-            f.write(json.dumps(clean, ensure_ascii=False, separators=(",", ":")) + "\n")
-
-    tmp.replace(dst)
 
 
 def _write_text_atomic(path: str, content: str) -> None:
@@ -225,7 +235,6 @@ def _load_types_subset(types_gz: str, needed_type_ids: Iterable[int]) -> Dict[in
                 tname = obj.get("type")
                 if isinstance(tname, str):
                     out[tid] = tname
-                # early exit si ya los tenemos todos
                 if len(out) == len(need):
                     break
     return out
@@ -275,7 +284,7 @@ class EsiClient:
             attempt += 1
             self._throttle()
 
-            char_id, token = self._current_token()
+            _char_id, token = self._current_token()
             headers = {
                 "Authorization": f"Bearer {token}",
             }
@@ -287,12 +296,10 @@ class EsiClient:
             limit = _parse_error_limit(r.headers)
             etag_new = _normalize_etag(r.headers.get("ETag"))
 
-            # Ser buen ciudadano con el error limit
             if r.status_code >= 400:
                 _sleep_for_error_limit(limit)
 
             if r.status_code in (401, 420):
-                # Retry global (máx 3 para todo el run)
                 if self.retry_budget_401_420 <= 0:
                     raise RuntimeError(
                         f"Retry budget exhausted for 401/420 (last status={r.status_code})"
@@ -300,11 +307,9 @@ class EsiClient:
                 self.retry_budget_401_420 -= 1
 
                 sleep_secs = 30
-                # Para 420, si Reset viene mayor, esperamos (>=30) para no rebotar.
                 if r.status_code == 420 and limit.reset is not None and limit.reset > sleep_secs:
                     sleep_secs = min(limit.reset + 1, ERROR_LIMIT_SLEEP_CAP_SECS)
 
-                # Para 401, probamos rotar token por si este está caducado.
                 if r.status_code == 401:
                     self._rotate_token()
 
@@ -319,11 +324,8 @@ class EsiClient:
                 try:
                     return r.status_code, r.json(), etag_new, limit
                 except Exception:
-                    # JSON inválido: cuenta como error práctico; tratamos como 5xx para no romper datos,
-                    # pero abortamos antes de escribir archivos (run fallará) para evitar incoherencias.
                     raise RuntimeError(f"Invalid JSON in 200 response for structure {structure_id}")
 
-            # 304 / 403 / 404 / 5xx / otros
             return r.status_code, None, etag_new, limit
 
 
@@ -333,7 +335,6 @@ def _bq_rewrite_table_and_load(
     client = bigquery.Client(project=project_id)
     table_id = f"{project_id}.{dataset}.{table}"
 
-    # Delete + create (tabla sin particiones, con clustering)
     client.delete_table(table_id, not_found_ok=True)
 
     schema = [
@@ -355,11 +356,16 @@ def _bq_rewrite_table_and_load(
 
     with open(ndjson_path, "rb") as f:
         job = client.load_table_from_file(f, table_id, job_config=job_config)
-    job.result()  # raise on failure
+    job.result()
 
 
 def main() -> int:
-    structure_list_json = _env_required("STRUCTURE_LIST_JSON")
+    # ---- Robust fix for observed failure: STRUCTURE_LIST_JSON env var empty ----
+    runner_temp = _env_optional("RUNNER_TEMP") or "/tmp"
+    fallback_list = str(Path(runner_temp) / "structure_list.json")
+
+    structure_list_json = _env_required_path_with_fallback("STRUCTURE_LIST_JSON", [fallback_list])
+
     data_file = _env_required("DATA_FILE")
     state_file = _env_required("STATE_FILE")
     types_file = _env_required("TYPES_FILE")
@@ -371,8 +377,8 @@ def main() -> int:
 
     user_agent = os.getenv("ESI_USER_AGENT", "landu-eou/eou (GitHub Actions; ESI Structures)")
 
-    prior_list_etag = _normalize_etag(os.getenv("PRIOR_LIST_ETAG", "") or None)
-    new_list_etag = _normalize_etag(os.getenv("STRUCTURES_LIST_ETAG", "") or None)
+    prior_list_etag = _normalize_etag(_env_optional("PRIOR_LIST_ETAG"))
+    new_list_etag = _normalize_etag(_env_optional("STRUCTURES_LIST_ETAG"))
 
     tokens = _select_access_tokens()
     esi = EsiClient(tokens=tokens, user_agent=user_agent)
@@ -408,7 +414,6 @@ def main() -> int:
             }
             data_changed = True
         else:
-            # Asegura market=true (lista filtrada por mercado)
             if records[sid].get("market") is not True:
                 records[sid]["market"] = True
                 data_changed = True
@@ -418,34 +423,30 @@ def main() -> int:
     pending_type_ids: Dict[int, int] = {}  # stationID -> type_id
 
     # 5) Enriquecimiento por estructura
-    # Orden estable para diffs mínimos y reproducibilidad.
     sorted_ids = sorted(records.keys())
     print(f"[run] structures in list: {len(sorted_ids)} (existing file had {len(records)})")
 
-    for i, sid in enumerate(sorted_ids, start=1):
+    for sid in sorted_ids:
         rec = records.get(sid)
         if rec is None:
-            continue  # pudo borrarse por 404 previo
+            continue
 
         status, payload, etag_new, _limit = esi.get_structure(sid, rec.get("etag"))
 
         if status == 304:
-            # Mantener registro actual para este run
             continue
 
         if status == 200 and payload is not None:
-            # ESI devuelve name, solar_system_id, type_id, owner_id (según docs).
             name = payload.get("name")
             solar_system_id = payload.get("solar_system_id")
             type_id = payload.get("type_id")
 
-            # Dock: interpretación práctica alineada con el propio requisito y la semántica del endpoint:
-            # si podemos leer /universe/structures/{id}/ con token authed, la estructura es "dockable" (para ese contexto).
-            # En 403 explícitamente quieren dock=null.
             dock = True
 
             solar_name = None
-            if isinstance(solar_system_id, int) or (isinstance(solar_system_id, str) and solar_system_id.isdigit()):
+            if isinstance(solar_system_id, int) or (
+                isinstance(solar_system_id, str) and solar_system_id.isdigit()
+            ):
                 solar_name = solar_map.get(int(solar_system_id))
 
             updates = {
@@ -469,7 +470,6 @@ def main() -> int:
             continue
 
         if status == 403:
-            # Actualizar registro con nulls + market=true + nuevo etag
             updates = {
                 "station": None,
                 "stationType": None,
@@ -483,17 +483,13 @@ def main() -> int:
             continue
 
         if status == 404:
-            # Borrar registro
             del records[sid]
             data_changed = True
             continue
 
         if status >= 500:
-            # Mantener registro actual para este run
             continue
 
-        # Otros códigos 4xx no especificados: mantener registro (conservador).
-        # Cuentan como error para ESI, pero no tocamos datos para no generar ruido.
         continue
 
     # 6) Resolver stationType (solo los type_id que hemos visto en 200)
@@ -510,7 +506,6 @@ def main() -> int:
             data_changed = True
 
     # 7) Preparar volcado a BQ (solo filas completas)
-    # Regla de volcado: solo si hay algo que volcar Y ha habido cambios.
     rows_to_load: List[Dict[str, Any]] = []
     if data_changed:
         for rec in records.values():
@@ -533,13 +528,12 @@ def main() -> int:
 
     bq_should_write = bool(data_changed and len(rows_to_load) > 0)
 
-    # 8) Volcados (de golpe, evitando estados parciales):
-    #    - Escribimos data a .tmp (sin reemplazar) y NDJSON a temp.
-    #    - Si BQ toca, reescribimos BQ.
-    #    - Si todo OK, reemplazamos data file y (si corresponde) state file.
-    data_tmp_path = None
+    # 8) Volcados (de golpe):
+    #    - Preconstruir data gzip en tmpbuild si hay cambios
+    #    - Reescribir BQ si toca
+    #    - Si todo OK, reemplazar data file y (si corresponde) state file
+    data_tmp_path: Optional[str] = None
     if data_changed:
-        # Pre-escribe el gzip final a tmp (para no modificar el repo si BQ falla luego)
         dst = Path(data_file)
         dst.parent.mkdir(parents=True, exist_ok=True)
         data_tmp_path = str(dst.with_suffix(dst.suffix + ".tmpbuild"))
@@ -549,9 +543,9 @@ def main() -> int:
                 clean = {k: v for k, v in obj.items() if not k.startswith("_")}
                 f.write(json.dumps(clean, ensure_ascii=False, separators=(",", ":")) + "\n")
 
-    ndjson_tmp = None
+    ndjson_tmp: Optional[str] = None
     if bq_should_write:
-        ndjson_tmp = str(Path(os.getenv("RUNNER_TEMP", "/tmp")) / "eou_structures_bq.ndjson")
+        ndjson_tmp = str(Path(runner_temp) / "eou_structures_bq.ndjson")
         with open(ndjson_tmp, "w", encoding="utf-8", newline="\n") as f:
             for row in rows_to_load:
                 f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -560,17 +554,18 @@ def main() -> int:
         _bq_rewrite_table_and_load(project_id, bq_dataset, bq_table, ndjson_tmp)
         print("[bq] OK")
 
-    # Si llegamos aquí, BQ o se escribió OK o no tocaba.
     if data_changed and data_tmp_path:
         Path(data_tmp_path).replace(Path(data_file))
         print(f"[data] Updated {data_file} ({len(records)} records).")
     else:
         print("[data] No changes; data file not rewritten.")
 
-    # 9) Actualizar states/structures.json (etag del listado) SOLO si:
+    # 9) Actualizar states/structures.json SOLO si:
     #    - etag cambió
-    #    - data OK (reescrito o no tocaba)  -> aquí siempre OK si no se lanzó excepción
-    #    - bq OK (reescrito o no tocaba)    -> aquí siempre OK si no se lanzó excepción
+    #    - data OK (reescrito o no reescrito porque correspondía)
+    #    - bq OK (reescrito o no reescrito porque correspondía)
+    #
+    # Si STRUCTURES_LIST_ETAG viene vacío, no tocamos state (estricto).
     if new_list_etag and new_list_etag != prior_list_etag:
         state_payload = json.dumps({"etag": new_list_etag}, ensure_ascii=False, separators=(",", ":")) + "\n"
         _write_text_atomic(state_file, state_payload)
@@ -585,6 +580,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as e:
-        # Fallo “duro”: no tocará el state etag, y el workflow quedará failed (next_run corto).
         print(f"[fatal] {e}", file=sys.stderr)
         raise
