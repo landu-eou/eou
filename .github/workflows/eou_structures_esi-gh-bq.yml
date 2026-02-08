@@ -239,7 +239,6 @@ jobs:
             -m "UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
           for i in 1 2 3; do
-            # Evita fallo por cambios concurrentes de otros workflows
             git pull --rebase || true
             if git push; then
               echo "pushed=true" >> "$GITHUB_OUTPUT"
@@ -260,13 +259,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Base: outputs del script
           status="${{ steps.structures.outputs.status }}"
           next_epoch="${{ steps.structures.outputs.next_run_epoch }}"
           lm_epoch="${{ steps.structures.outputs.last_modified_epoch }}"
           write_lm="${{ steps.structures.outputs.write_last_modified }}"
 
-          # Si el script no llegó a publicar outputs, defaultea a failed + 30m
           if [ -z "$status" ] || [ -z "$next_epoch" ]; then
             status="failed"
             next_epoch="$(date -u -d "+30 minutes" +%s)"
@@ -274,7 +271,6 @@ jobs:
             lm_epoch=""
           fi
 
-          # Override si hubo que hacer push y falló (evita marcar completed sin persistencia)
           if [ "${{ steps.git_push.outcome }}" = "failure" ]; then
             status="failed"
             next_epoch="$(date -u -d "+30 minutes" +%s)"
