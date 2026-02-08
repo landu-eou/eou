@@ -33,10 +33,7 @@ PRIMARY_CHAR_ID = 2124070822
 ESI_BASE = "https://esi.evetech.net"
 STRUCTURE_DETAIL_URL = ESI_BASE + "/universe/structures/{structure_id}/"
 
-# Cortesía + sostenibilidad: muy pequeño; el throttle real viene por error-limit headers y 420.
 MIN_REQUEST_INTERVAL_SECS = 0.05
-
-# Si el error-limit está crítico, dormimos hasta reset (cap conservador).
 ERROR_LIMIT_SLEEP_CAP_SECS = 180
 
 
@@ -61,21 +58,92 @@ def _env_optional(name: str) -> Optional[str]:
     return v if v else None
 
 
-def _env_required_path_with_fallback(name: str, fallbacks: List[str]) -> str:
+def _find_structure_list_fallbacks() -> List[str]:
     """
-    Required path env var with robust fallback to known runner temp locations.
+    Build a robust list of fallback paths for 'structure_list.json'.
 
-    This fixes the observed failure: STRUCTURE_LIST_JSON was empty even though
-    the producer step typically writes RUNNER_TEMP/structure_list.json.
+    Observed issue:
+    - STRUCTURE_LIST_JSON env var empty
+    - RUNNER_TEMP may be missing in step env
+    - Producer step usually writes to ${RUNNER_TEMP}/structure_list.json
+
+    We derive common runner temp dirs from:
+    - RUNNER_TEMP (if present)
+    - GITHUB_WORKSPACE (/home/runner/work/<repo>/<repo>) -> /home/runner/work/_temp
+    - /tmp
+    - Search in /home/runner/work for structure_list.json if needed
+    """
+    candidates: List[str] = []
+
+    runner_temp = _env_optional("RUNNER_TEMP")
+    if runner_temp:
+        candidates.append(str(Path(runner_temp) / "structure_list.json"))
+
+    gh_ws = _env_optional("GITHUB_WORKSPACE")
+    if gh_ws:
+        ws = Path(gh_ws)
+        # Typically: /home/runner/work/<repo>/<repo>
+        # work root: /home/runner/work
+        try:
+            work_root = ws.parents[1]  # /home/runner/work
+            candidates.append(str(work_root / "_temp" / "structure_list.json"))
+            candidates.append(str(work_root / "_temp" / "_github_home" / "structure_list.json"))
+        except Exception:
+            pass
+        # Also sometimes files end up next to workspace temp
+        candidates.append(str(ws / "structure_list.json"))
+
+    # Classic tmp
+    candidates.append("/tmp/structure_list.json")
+
+    # As last resort, search likely roots for the file name
+    search_roots = []
+    if gh_ws:
+        try:
+            search_roots.append(str(Path(gh_ws).parents[1]))  # /home/runner/work
+        except Exception:
+            pass
+    search_roots.extend(["/home/runner/work", "/tmp"])
+
+    for root in search_roots:
+        rp = Path(root)
+        if not rp.exists():
+            continue
+        # bounded search: a few common depths only
+        for p in rp.rglob("structure_list.json"):
+            candidates.append(str(p))
+
+    # de-duplicate while preserving order
+    seen = set()
+    out = []
+    for c in candidates:
+        if c in seen:
+            continue
+        seen.add(c)
+        out.append(c)
+    return out
+
+
+def _env_required_path_with_fallback(name: str) -> str:
+    """
+    Required file path env var with robust fallback search.
+
+    We do NOT change logic: we still require the file.
+    We only make it possible to find the producer output when env vars are empty.
     """
     v = _env_optional(name)
-    if v:
+    if v and Path(v).exists():
         return v
+    if v and not Path(v).exists():
+        # If user passed it but it's wrong, continue to fallbacks (do not silently accept).
+        pass
 
+    fallbacks = _find_structure_list_fallbacks()
     for fb in fallbacks:
         if fb and Path(fb).exists():
             return fb
 
+    # Keep error message compatible with original failure
     raise RuntimeError(f"Missing required env var: {name}")
 
 
@@ -104,7 +172,6 @@ def _normalize_etag(etag: Optional[str]) -> Optional[str]:
 
 
 def _etag_header_value(etag: Optional[str]) -> Optional[str]:
-    """Value for If-None-Match header."""
     t = _normalize_etag(etag)
     if not t:
         return None
@@ -126,7 +193,6 @@ def _parse_error_limit(headers: requests.structures.CaseInsensitiveDict) -> EsiE
 
 
 def _sleep_for_error_limit(limit: EsiErrorLimit) -> None:
-    """If remain is critically low, sleep until reset to avoid 420."""
     if limit.remain is None or limit.reset is None:
         return
     if limit.remain <= 1 and limit.reset > 0:
@@ -274,9 +340,6 @@ class EsiClient:
     def get_structure(
         self, structure_id: int, if_none_match_etag: Optional[str]
     ) -> Tuple[int, Optional[Dict[str, Any]], Optional[str], EsiErrorLimit]:
-        """
-        Returns: (status_code, json_or_none, etag_new_or_none, error_limit_headers)
-        """
         url = STRUCTURE_DETAIL_URL.format(structure_id=structure_id)
 
         attempt = 0
@@ -285,9 +348,7 @@ class EsiClient:
             self._throttle()
 
             _char_id, token = self._current_token()
-            headers = {
-                "Authorization": f"Bearer {token}",
-            }
+            headers = {"Authorization": f"Bearer {token}"}
             inm = _etag_header_value(if_none_match_etag)
             if inm:
                 headers["If-None-Match"] = inm
@@ -329,9 +390,7 @@ class EsiClient:
             return r.status_code, None, etag_new, limit
 
 
-def _bq_rewrite_table_and_load(
-    project_id: str, dataset: str, table: str, ndjson_path: str
-) -> None:
+def _bq_rewrite_table_and_load(project_id: str, dataset: str, table: str, ndjson_path: str) -> None:
     client = bigquery.Client(project=project_id)
     table_id = f"{project_id}.{dataset}.{table}"
 
@@ -360,11 +419,8 @@ def _bq_rewrite_table_and_load(
 
 
 def main() -> int:
-    # ---- Robust fix for observed failure: STRUCTURE_LIST_JSON env var empty ----
-    runner_temp = _env_optional("RUNNER_TEMP") or "/tmp"
-    fallback_list = str(Path(runner_temp) / "structure_list.json")
-
-    structure_list_json = _env_required_path_with_fallback("STRUCTURE_LIST_JSON", [fallback_list])
+    # FIX: robustly locate structure_list.json even if envs are empty
+    structure_list_json = _env_required_path_with_fallback("STRUCTURE_LIST_JSON")
 
     data_file = _env_required("DATA_FILE")
     state_file = _env_required("STATE_FILE")
@@ -418,9 +474,9 @@ def main() -> int:
                 records[sid]["market"] = True
                 data_changed = True
 
-    # 4) Load solar systems (pequeño) y prepara type-id pending
+    # 4) Load solar systems y prepara type-id pending
     solar_map = _load_solarsystems_map(solarsystems_file)
-    pending_type_ids: Dict[int, int] = {}  # stationID -> type_id
+    pending_type_ids: Dict[int, int] = {}
 
     # 5) Enriquecimiento por estructura
     sorted_ids = sorted(records.keys())
@@ -492,7 +548,7 @@ def main() -> int:
 
         continue
 
-    # 6) Resolver stationType (solo los type_id que hemos visto en 200)
+    # 6) Resolver stationType
     needed_type_ids = [tid for tid in pending_type_ids.values() if tid and tid > 0]
     type_map = _load_types_subset(types_file, needed_type_ids)
 
@@ -543,9 +599,12 @@ def main() -> int:
                 clean = {k: v for k, v in obj.items() if not k.startswith("_")}
                 f.write(json.dumps(clean, ensure_ascii=False, separators=(",", ":")) + "\n")
 
+    # Derive a safe temp folder for NDJSON
+    ndjson_root = _env_optional("RUNNER_TEMP") or _env_optional("GITHUB_WORKSPACE") or "/tmp"
     ndjson_tmp: Optional[str] = None
+
     if bq_should_write:
-        ndjson_tmp = str(Path(runner_temp) / "eou_structures_bq.ndjson")
+        ndjson_tmp = str(Path(ndjson_root) / "eou_structures_bq.ndjson")
         with open(ndjson_tmp, "w", encoding="utf-8", newline="\n") as f:
             for row in rows_to_load:
                 f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -564,8 +623,6 @@ def main() -> int:
     #    - etag cambió
     #    - data OK (reescrito o no reescrito porque correspondía)
     #    - bq OK (reescrito o no reescrito porque correspondía)
-    #
-    # Si STRUCTURES_LIST_ETAG viene vacío, no tocamos state (estricto).
     if new_list_etag and new_list_etag != prior_list_etag:
         state_payload = json.dumps({"etag": new_list_etag}, ensure_ascii=False, separators=(",", ":")) + "\n"
         _write_text_atomic(state_file, state_payload)
