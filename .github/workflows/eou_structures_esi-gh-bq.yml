@@ -77,17 +77,17 @@ jobs:
             "${api}")"
 
           python3 - <<'PY' > /tmp/proceed
-import json, os, sys
-this = int(os.environ["THIS_RUN_NUMBER"])
-data = json.loads(sys.stdin.read())
-runs = data.get("workflow_runs") or []
-
-alive = [r for r in runs if r.get("status") in ("queued","in_progress")]
-leader = min([r.get("run_number") for r in alive if isinstance(r.get("run_number"), int)], default=this)
-
-# Procede solo si eres el líder vivo (evita colas trabajando).
-print("true" if this == leader else "false")
-PY
+          import json, os, sys
+          this = int(os.environ["THIS_RUN_NUMBER"])
+          data = json.loads(sys.stdin.read())
+          runs = data.get("workflow_runs") or []
+          
+          alive = [r for r in runs if r.get("status") in ("queued","in_progress")]
+          leader = min([r.get("run_number") for r in alive if isinstance(r.get("run_number"), int)], default=this)
+          
+          # Procede solo si eres el líder vivo (evita colas trabajando).
+          print("true" if this == leader else "false")
+          PY
           echo "proceed=$(cat /tmp/proceed)" >> "$GITHUB_OUTPUT"
         shell: bash
         stdin: ${{ steps.guard.inputs.json }}
