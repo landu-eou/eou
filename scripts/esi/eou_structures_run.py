@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
 EOU · ESI Structures runner
-- Inputs vía env vars (interfaz exacta esperada por el workflow YAML)
-- Reconciliación + enriquecimiento por estructura con ETag por registro
-- Retries globales para 401/420 (máx 3 en todo el run; sleep >= 30s)
-- Manejo 403 (nulls + market=true), 404 (borrar), 5xx (mantener)
-- Volcado "de golpe" (atomic replace) a data/esi/structures.jsonl.gz
-- Reescritura BQ (delete+create+load) solo si hay cambios y hay filas completas a volcar
-- Actualiza states/structures.json (ETag del listado) solo si:
-    * ETag del listado cambió
-    * data file se reescribió OK (o no se reescribió porque correspondía: sin cambios)
-    * BQ se reescribió OK (o no se reescribió porque correspondía: no tocaba)
+
+Interfaz (env vars) esperada por el YAML:
+- STRUCTURE_LIST_JSON (puede venir vacío en tu caso)
+- STRUCTURES_URL
+- STATE_FILE, DATA_FILE, TYPES_FILE, SOLARSYSTEMS_FILE
+- STRUCTURES_LIST_ETAG, PRIOR_LIST_ETAG (pueden venir vacíos)
+- EOU_ACCESS_TOKENS_1, EOU_ACCESS_TOKENS_2
+- GCP_PROJECT_ID, BQ_DATASET, BQ_TABLE
+- ESI_USER_AGENT
+
+Corrección aplicada (sin cambiar el resto de la lógica):
+- Si falta STRUCTURE_LIST_JSON y no existe el archivo listado en el runner, el script
+  obtiene el listado directamente de STRUCTURES_URL usando If-None-Match desde STATE_FILE.
+  Maneja 200/304 y falla en 420/5xx/otros.
 """
 
 from __future__ import annotations
@@ -56,95 +60,6 @@ def _env_optional(name: str) -> Optional[str]:
         return None
     v = v.strip()
     return v if v else None
-
-
-def _find_structure_list_fallbacks() -> List[str]:
-    """
-    Build a robust list of fallback paths for 'structure_list.json'.
-
-    Observed issue:
-    - STRUCTURE_LIST_JSON env var empty
-    - RUNNER_TEMP may be missing in step env
-    - Producer step usually writes to ${RUNNER_TEMP}/structure_list.json
-
-    We derive common runner temp dirs from:
-    - RUNNER_TEMP (if present)
-    - GITHUB_WORKSPACE (/home/runner/work/<repo>/<repo>) -> /home/runner/work/_temp
-    - /tmp
-    - Search in /home/runner/work for structure_list.json if needed
-    """
-    candidates: List[str] = []
-
-    runner_temp = _env_optional("RUNNER_TEMP")
-    if runner_temp:
-        candidates.append(str(Path(runner_temp) / "structure_list.json"))
-
-    gh_ws = _env_optional("GITHUB_WORKSPACE")
-    if gh_ws:
-        ws = Path(gh_ws)
-        # Typically: /home/runner/work/<repo>/<repo>
-        # work root: /home/runner/work
-        try:
-            work_root = ws.parents[1]  # /home/runner/work
-            candidates.append(str(work_root / "_temp" / "structure_list.json"))
-            candidates.append(str(work_root / "_temp" / "_github_home" / "structure_list.json"))
-        except Exception:
-            pass
-        # Also sometimes files end up next to workspace temp
-        candidates.append(str(ws / "structure_list.json"))
-
-    # Classic tmp
-    candidates.append("/tmp/structure_list.json")
-
-    # As last resort, search likely roots for the file name
-    search_roots = []
-    if gh_ws:
-        try:
-            search_roots.append(str(Path(gh_ws).parents[1]))  # /home/runner/work
-        except Exception:
-            pass
-    search_roots.extend(["/home/runner/work", "/tmp"])
-
-    for root in search_roots:
-        rp = Path(root)
-        if not rp.exists():
-            continue
-        # bounded search: a few common depths only
-        for p in rp.rglob("structure_list.json"):
-            candidates.append(str(p))
-
-    # de-duplicate while preserving order
-    seen = set()
-    out = []
-    for c in candidates:
-        if c in seen:
-            continue
-        seen.add(c)
-        out.append(c)
-    return out
-
-
-def _env_required_path_with_fallback(name: str) -> str:
-    """
-    Required file path env var with robust fallback search.
-
-    We do NOT change logic: we still require the file.
-    We only make it possible to find the producer output when env vars are empty.
-    """
-    v = _env_optional(name)
-    if v and Path(v).exists():
-        return v
-    if v and not Path(v).exists():
-        # If user passed it but it's wrong, continue to fallbacks (do not silently accept).
-        pass
-
-    fallbacks = _find_structure_list_fallbacks()
-    for fb in fallbacks:
-        if fb and Path(fb).exists():
-            return fb
-
-    # Keep error message compatible with original failure
-    raise RuntimeError(f"Missing required env var: {name}")
 
 
 def _env_json_dict(name: str) -> Dict[str, Any]:
@@ -306,6 +221,34 @@ def _load_types_subset(types_gz: str, needed_type_ids: Iterable[int]) -> Dict[in
     return out
 
 
+def _bq_rewrite_table_and_load(project_id: str, dataset: str, table: str, ndjson_path: str) -> None:
+    client = bigquery.Client(project=project_id)
+    table_id = f"{project_id}.{dataset}.{table}"
+
+    client.delete_table(table_id, not_found_ok=True)
+
+    schema = [
+        bigquery.SchemaField("stationID", "INTEGER", mode="REQUIRED"),
+        bigquery.SchemaField("station", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("stationType", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("solarSystem", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("dock", "BOOLEAN", mode="REQUIRED"),
+        bigquery.SchemaField("market", "BOOLEAN", mode="REQUIRED"),
+    ]
+    t = bigquery.Table(table_id, schema=schema)
+    t.clustering_fields = ["solarSystem"]
+    client.create_table(t)
+
+    job_config = bigquery.LoadJobConfig(
+        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+    )
+
+    with open(ndjson_path, "rb") as f:
+        job = client.load_table_from_file(f, table_id, job_config=job_config)
+    job.result()
+
+
 class EsiClient:
     def __init__(self, tokens: List[Tuple[int, str]], user_agent: str):
         self.tokens = tokens
@@ -390,40 +333,92 @@ class EsiClient:
             return r.status_code, None, etag_new, limit
 
 
-def _bq_rewrite_table_and_load(project_id: str, dataset: str, table: str, ndjson_path: str) -> None:
-    client = bigquery.Client(project=project_id)
-    table_id = f"{project_id}.{dataset}.{table}"
+def _try_find_list_file_from_env_or_common_paths() -> Optional[str]:
+    # 1) env var value (may be empty)
+    v = _env_optional("STRUCTURE_LIST_JSON")
+    if v and Path(v).exists():
+        return v
 
-    client.delete_table(table_id, not_found_ok=True)
+    # 2) common derived locations
+    candidates: List[str] = []
 
-    schema = [
-        bigquery.SchemaField("stationID", "INTEGER", mode="REQUIRED"),
-        bigquery.SchemaField("station", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("stationType", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("solarSystem", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("dock", "BOOLEAN", mode="REQUIRED"),
-        bigquery.SchemaField("market", "BOOLEAN", mode="REQUIRED"),
-    ]
-    t = bigquery.Table(table_id, schema=schema)
-    t.clustering_fields = ["solarSystem"]
-    client.create_table(t)
+    rt = _env_optional("RUNNER_TEMP")
+    if rt:
+        candidates.append(str(Path(rt) / "structure_list.json"))
 
-    job_config = bigquery.LoadJobConfig(
-        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-    )
+    ws = _env_optional("GITHUB_WORKSPACE")
+    if ws:
+        ws_p = Path(ws)
+        candidates.append(str(ws_p / "structure_list.json"))
+        # typical: /home/runner/work/<repo>/<repo> -> /home/runner/work/_temp
+        try:
+            work_root = ws_p.parents[1]
+            candidates.append(str(work_root / "_temp" / "structure_list.json"))
+        except Exception:
+            pass
 
-    with open(ndjson_path, "rb") as f:
-        job = client.load_table_from_file(f, table_id, job_config=job_config)
-    job.result()
+    candidates.append("/tmp/structure_list.json")
+
+    for c in candidates:
+        if c and Path(c).exists():
+            return c
+
+    return None
+
+
+def _fetch_structure_list_fallback(structures_url: str, state_file: str, user_agent: str) -> Tuple[List[int], Optional[str]]:
+    """
+    Fallback only when no structure_list.json is available:
+    - Uses If-None-Match from states/structures.json if present
+    - 200 => returns list + new_etag
+    - 304 => returns empty list + None (caller should exit cleanly)
+    - otherwise raises
+    """
+    prior_etag = None
+    if Path(state_file).exists():
+        try:
+            obj = _read_json_file(state_file)
+            if isinstance(obj, dict):
+                prior_etag = _normalize_etag(obj.get("etag"))
+        except Exception:
+            prior_etag = None
+
+    headers = {"Accept": "application/json", "User-Agent": user_agent}
+    inm = _etag_header_value(prior_etag)
+    if inm:
+        headers["If-None-Match"] = inm
+
+    r = requests.get(structures_url, headers=headers, timeout=(5, 60))
+    new_etag = _normalize_etag(r.headers.get("ETag"))
+    limit = _parse_error_limit(r.headers)
+    if r.status_code >= 400:
+        _sleep_for_error_limit(limit)
+
+    if r.status_code == 304:
+        print("[fallback] structures list 304 Not Modified; exiting without work.")
+        return [], None
+
+    if r.status_code == 200:
+        try:
+            data = r.json()
+        except Exception:
+            raise RuntimeError("[fallback] 200 but invalid JSON for structures list")
+        if not isinstance(data, list):
+            raise RuntimeError("[fallback] structures list JSON is not a list")
+        return [int(x) for x in data], new_etag
+
+    if r.status_code == 420:
+        raise RuntimeError("[fallback] structures list returned 420 (error limited)")
+    if r.status_code >= 500:
+        raise RuntimeError(f"[fallback] structures list returned {r.status_code} (server error)")
+
+    raise RuntimeError(f"[fallback] structures list returned unexpected status {r.status_code}")
 
 
 def main() -> int:
-    # FIX: robustly locate structure_list.json even if envs are empty
-    structure_list_json = _env_required_path_with_fallback("STRUCTURE_LIST_JSON")
-
-    data_file = _env_required("DATA_FILE")
+    structures_url = _env_required("STRUCTURES_URL")
     state_file = _env_required("STATE_FILE")
+    data_file = _env_required("DATA_FILE")
     types_file = _env_required("TYPES_FILE")
     solarsystems_file = _env_required("SOLARSYSTEMS_FILE")
 
@@ -433,22 +428,31 @@ def main() -> int:
 
     user_agent = os.getenv("ESI_USER_AGENT", "landu-eou/eou (GitHub Actions; ESI Structures)")
 
+    # These may be empty in your logs; keep as optional.
     prior_list_etag = _normalize_etag(_env_optional("PRIOR_LIST_ETAG"))
     new_list_etag = _normalize_etag(_env_optional("STRUCTURES_LIST_ETAG"))
 
-    tokens = _select_access_tokens()
-    esi = EsiClient(tokens=tokens, user_agent=user_agent)
+    # 1) Obtain structure_list:
+    list_file = _try_find_list_file_from_env_or_common_paths()
+    if list_file:
+        structure_ids_raw = _read_json_file(list_file)
+        if not isinstance(structure_ids_raw, list):
+            raise RuntimeError("STRUCTURE_LIST_JSON is not a JSON list")
+        structure_ids = [int(x) for x in structure_ids_raw]
+    else:
+        # Fallback: fetch list directly (only because the intermediate file/env isn't available)
+        structure_ids, fetched_etag = _fetch_structure_list_fallback(structures_url, state_file, user_agent)
+        # If 304, exit cleanly; equivalent to workflow early exit.
+        if not structure_ids and fetched_etag is None:
+            return 0
+        # If YAML didn’t pass list etag, we can use the fetched one for strict state update logic.
+        if not new_list_etag and fetched_etag:
+            new_list_etag = fetched_etag
 
-    # 1) Load structure_list (IDs públicos de mercado)
-    structure_ids = _read_json_file(structure_list_json)
-    if not isinstance(structure_ids, list):
-        raise RuntimeError("STRUCTURE_LIST_JSON is not a JSON list")
-
-    desired_ids = set(int(x) for x in structure_ids)
+    desired_ids = set(structure_ids)
 
     # 2) Load existing records
     records = _read_gz_jsonl(data_file)
-
     data_changed = False
 
     # 3) Reconciliación (delete missing, add new)
@@ -479,6 +483,9 @@ def main() -> int:
     pending_type_ids: Dict[int, int] = {}
 
     # 5) Enriquecimiento por estructura
+    tokens = _select_access_tokens()
+    esi = EsiClient(tokens=tokens, user_agent=user_agent)
+
     sorted_ids = sorted(records.keys())
     print(f"[run] structures in list: {len(sorted_ids)} (existing file had {len(records)})")
 
@@ -585,9 +592,6 @@ def main() -> int:
     bq_should_write = bool(data_changed and len(rows_to_load) > 0)
 
     # 8) Volcados (de golpe):
-    #    - Preconstruir data gzip en tmpbuild si hay cambios
-    #    - Reescribir BQ si toca
-    #    - Si todo OK, reemplazar data file y (si corresponde) state file
     data_tmp_path: Optional[str] = None
     if data_changed:
         dst = Path(data_file)
@@ -599,7 +603,6 @@ def main() -> int:
                 clean = {k: v for k, v in obj.items() if not k.startswith("_")}
                 f.write(json.dumps(clean, ensure_ascii=False, separators=(",", ":")) + "\n")
 
-    # Derive a safe temp folder for NDJSON
     ndjson_root = _env_optional("RUNNER_TEMP") or _env_optional("GITHUB_WORKSPACE") or "/tmp"
     ndjson_tmp: Optional[str] = None
 
@@ -623,6 +626,8 @@ def main() -> int:
     #    - etag cambió
     #    - data OK (reescrito o no reescrito porque correspondía)
     #    - bq OK (reescrito o no reescrito porque correspondía)
+    #
+    # Si new_list_etag sigue vacío, no tocamos state (estricto).
     if new_list_etag and new_list_etag != prior_list_etag:
         state_payload = json.dumps({"etag": new_list_etag}, ensure_ascii=False, separators=(",", ":")) + "\n"
         _write_text_atomic(state_file, state_payload)
