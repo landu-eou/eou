@@ -20,11 +20,10 @@ jobs:
     env:
       WORKFLOW_FILE: eou_structures_esi-gh-bq.yml
 
-      # Sheets (solo write)
+      # Sheets
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "8"
-
       LOCK_TIME: 300
 
       # Google / BigQuery
@@ -43,84 +42,60 @@ jobs:
       ESI_STRUCTURES_LIST_URL: https://esi.evetech.net/universe/structures/?filter=market
       ESI_STRUCTURE_DETAIL_URL_TEMPLATE: https://esi.evetech.net/universe/structures/{structure_id}/
 
+      # Token selection
       PRIMARY_CHAR_ID: "2124070822"
       RETRY_BUDGET: "3"
 
-      # ESI ritmo (operacional, configurable)
-      ESI_MAX_RPM: "60"          # hard cap inicial (requests/min)
-      ESI_MIN_SLEEP_MS: "150"    # micro-delay mínimo entre requests
-      ESI_BURST: "5"             # pequeño burst permitido
-      ESI_SOFT_ERR_REMAIN: "15"  # si quedan <=15 errores/ventana, se baja ritmo
-      ESI_HARD_ERR_REMAIN: "5"   # si quedan <=5, se duerme hasta reset
+      # ESI sustainability (operational knobs)
+      # - conservative default: 60 req/min (~1 rps)
+      ESI_MAX_RPM: "60"
+      # If remain drops below this, slow down sharply until reset
+      ESI_ERR_REMAIN_SOFT: "20"
+      ESI_ERR_REMAIN_HARD: "5"
 
     steps:
-      - name: Guard (anti-cola + anti-solapamiento efectivo)
+      - name: Guard (anti-cola) — exit if another run is active / leader is different
         id: guard
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
-          WF_FILE: ${{ env.WORKFLOW_FILE }}
+          THIS_RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
+          api_base="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs?per_page=20"
 
-          # Usa gh CLI (preinstalado en ubuntu-latest) para evitar curl+jq.
-          # API oficial GitHub Actions: workflow runs. :contentReference[oaicite:4]{index=4} (rate limiting is different; keeping citations elsewhere)
-          json="$(gh api -H "Accept: application/vnd.github+json" \
-            "/repos/${REPO}/actions/workflows/${WF_FILE}/runs?per_page=20")"
+          inprog_json="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${api_base}&status=in_progress")"
+          inprog_other="$(echo "$inprog_json" | jq --arg rid "$RUN_ID" '[.workflow_runs[]? | select(.id != ($rid|tonumber))] | length')"
 
-          # Extrae lo mínimo para decidir: run_id, run_number, created_at, updated_at, status
-          # (gh no necesita jq externo: su --jq existe, pero aquí simplificamos con python -c? No: evitamos heredocs.
-          # Así que usamos gh api y un parse minimal con node? Tampoco. Usamos jq (ya está en runner) pero sin curl.
-          this="$(jq --arg rid "$RUN_ID" '
-            (.workflow_runs // []) | map(select(.id == ($rid|tonumber))) | .[0] // empty
-          ' <<<"$json")"
-
-          proceed="true"
-          if [ -n "$this" ]; then
-            tc="$(jq -r '.created_at' <<<"$this")"
-            tn="$(jq -r '.run_number' <<<"$this")"
-
-            alive_at_creation="$(jq --arg rid "$RUN_ID" --arg tc "$tc" '
-              (.workflow_runs // [])
-              | map(select(.id != ($rid|tonumber))
-                    | select(.created_at < $tc)
-                    | select(.updated_at > $tc))
-              | length
-            ' <<<"$json")"
-
-            if [ "$alive_at_creation" -gt 0 ]; then
-              proceed="false"
-            else
-              leader="$(jq '
-                (.workflow_runs // [])
-                | map(select(.status=="queued" or .status=="in_progress"))
-                | map(.run_number)
-                | min // empty
-              ' <<<"$json")"
-              if [ -n "$leader" ] && [ "$leader" != "$tn" ]; then
-                proceed="false"
-              fi
-            fi
+          if [ "${inprog_other}" -gt 0 ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          echo "proceed=${proceed}" >> "$GITHUB_OUTPUT"
+          queued_json="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${api_base}&status=queued")"
+          leader="$(echo "$queued_json" | jq '[.workflow_runs[]? | .run_number] | (min // empty)')"
 
-      - name: Exit if busy (no work)
+          if [ -n "${leader}" ] && [ "${leader}" != "null" ] && [ "${leader}" != "${THIS_RUN_NUMBER}" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Exit if busy
         if: steps.guard.outputs.proceed != 'true'
         run: |
-          echo "Skipped due to overlapping/queued run." >> "$GITHUB_STEP_SUMMARY"
+          echo "Skipped due to overlapping run"
           exit 0
 
       - name: Checkout
-        if: steps.guard.outputs.proceed == 'true'
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
       - name: Auth to Google (WIF)
         id: gcp_auth
-        if: steps.guard.outputs.proceed == 'true'
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -132,19 +107,16 @@ jobs:
             https://www.googleapis.com/auth/cloud-platform
 
       - name: Setup Python
-        if: steps.guard.outputs.proceed == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Setup gcloud
-        if: steps.guard.outputs.proceed == 'true'
         uses: google-github-actions/setup-gcloud@v3
         with:
           version: '>= 390.0.0'
 
-      - name: Lock start (in_progress + next_run)
-        if: steps.guard.outputs.proceed == 'true' && steps.gcp_auth.outcome == 'success'
+      - name: Lock (in_progress + next_run as value)
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
@@ -152,17 +124,18 @@ jobs:
           row="${SHEETS_WORKFLOW_ROW}"
           epoch="$(date -u -d "+${LOCK_TIME} seconds" +%s)"
           serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
-          body="$(printf '{"valueInputOption":"RAW","data":[{"range":"%s!B%s:B%s","values":[["in_progress"]]},{"range":"%s!D%s:D%s","values":[[%s]]}]}' \
-            "$SHEET_TAB" "$row" "$row" "$SHEET_TAB" "$row" "$row" "$serial")"
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
-            -d "${body}"
+          payload="$(jq -cn --arg tab "$SHEET_TAB" --arg row "$row" --arg status "in_progress" --argjson serial "$serial" '{
+            valueInputOption:"RAW",
+            data:[
+              {range:($tab+"!B"+$row+":B"+$row), values:[[ $status ]]},
+              {range:($tab+"!D"+$row+":D"+$row), values:[[ $serial ]]}
+            ]
+          }')"
+          curl -fsSL -X POST -H "Authorization: Bearer ${ACCESS_TOKEN}" -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" -d "$payload"
 
-      - name: Run pipeline (ESI → GH → BQ)
+      - name: Run structures pipeline
         id: structures
-        if: steps.guard.outputs.proceed == 'true'
         env:
           EOU_ACCESS_TOKENS_1: ${{ secrets.EOU_ACCESS_TOKENS_1 }}
           EOU_ACCESS_TOKENS_2: ${{ secrets.EOU_ACCESS_TOKENS_2 }}
@@ -170,92 +143,81 @@ jobs:
           set -euo pipefail
           python scripts/esi/eou_structures_run.py
 
-      - name: Commit and push (only if repo_dirty)
+      - name: Commit & push (only if repo_dirty)
         id: git_push
-        if: steps.guard.outputs.proceed == 'true' && steps.structures.outcome == 'success' && steps.structures.outputs.repo_dirty == 'true'
+        if: steps.structures.outputs.repo_dirty == 'true'
         continue-on-error: true
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git add "${DATA_STRUCTURES_PATH}" "${STATE_ETAG_PATH}" || true
           if git diff --cached --quiet; then
             echo "pushed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
-          git commit -m "EOU: update structures" \
-            -m "Workflow: ${WORKFLOW_FILE}" \
-            -m "UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-          ok="false"
+          git commit -m "EOU: update structures" -m "Workflow: ${WORKFLOW_FILE}" -m "UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           for i in 1 2 3; do
             git pull --rebase || true
-            if git push; then ok="true"; break; fi
-            sleep $((15 + RANDOM % 20))
+            if git push; then
+              echo "pushed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep $((12 + RANDOM % 18))
           done
-
-          echo "pushed=${ok}" >> "$GITHUB_OUTPUT"
-          if [ "$ok" != "true" ]; then exit 1; fi
-
-      - name: Finalize decision
-        id: final
-        if: always() && steps.guard.outputs.proceed == 'true'
-        run: |
-          set -euo pipefail
-          status="${{ steps.structures.outputs.status }}"
-          next_epoch="${{ steps.structures.outputs.next_run_epoch }}"
-          lm_epoch="${{ steps.structures.outputs.last_modified_epoch }}"
-          write_lm="${{ steps.structures.outputs.write_last_modified }}"
-
-          if [ -z "$status" ] || [ -z "$next_epoch" ]; then
-            status="failed"
-            next_epoch="$(date -u -d "+30 minutes" +%s)"
-            write_lm="false"
-            lm_epoch=""
-          fi
-
-          # Si se necesitaba push y falló, marcamos failed operacionalmente
-          if [ "${{ steps.git_push.outcome }}" = "failure" ]; then
-            status="failed"
-            next_epoch="$(date -u -d "+30 minutes" +%s)"
-          fi
-
-          echo "status=${status}" >> "$GITHUB_OUTPUT"
-          echo "next_run_epoch=${next_epoch}" >> "$GITHUB_OUTPUT"
-          echo "write_last_modified=${write_lm}" >> "$GITHUB_OUTPUT"
-          echo "last_modified_epoch=${lm_epoch}" >> "$GITHUB_OUTPUT"
+          echo "pushed=false" >> "$GITHUB_OUTPUT"
+          exit 1
 
       - name: Finalize Sheets (status + next_run [+ last_modified])
-        if: always() && steps.guard.outputs.proceed == 'true' && steps.gcp_auth.outcome == 'success'
+        if: always()
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
 
-          status="${{ steps.final.outputs.status }}"
-          next_epoch="${{ steps.final.outputs.next_run_epoch }}"
-          write_lm="${{ steps.final.outputs.write_last_modified }}"
-          lm_epoch="${{ steps.final.outputs.last_modified_epoch }}"
+          status="${{ steps.structures.outputs.status }}"
+          next_epoch="${{ steps.structures.outputs.next_run_epoch }}"
+          write_lm="${{ steps.structures.outputs.write_last_modified }}"
+          lm_epoch="${{ steps.structures.outputs.last_modified_epoch }}"
+
+          if [ -z "${status}" ] || [ -z "${next_epoch}" ]; then
+            status="failed"
+            next_epoch="$(date -u -d "+30 minutes" +%s)"
+            write_lm="false"
+            lm_epoch=""
+          fi
+
+          if [ "${{ steps.git_push.outcome }}" = "failure" ]; then
+            status="failed"
+            next_epoch="$(date -u -d "+30 minutes" +%s)"
+          fi
 
           next_serial="$(awk "BEGIN { printf \"%.10f\", (${next_epoch}/86400) + 25569 }")"
 
-          data='[{"range":"'"${SHEET_TAB}!B${row}:B${row}"'","values":[["'"${status}"'"]]},{"range":"'"${SHEET_TAB}!D${row}:D${row}"'","values":[['"${next_serial}"']]}]'
-          if [ "$write_lm" = "true" ] && [ -n "$lm_epoch" ]; then
+          if [ "${write_lm}" = "true" ] && [ -n "${lm_epoch}" ]; then
             lm_serial="$(awk "BEGIN { printf \"%.10f\", (${lm_epoch}/86400) + 25569 }")"
-            data="${data%]}},{\"range\":\"${SHEET_TAB}!I${row}:I${row}\",\"values\":[[${lm_serial}]]}]"
+            payload="$(jq -cn --arg tab "$SHEET_TAB" --arg row "$row" --arg status "$status" --argjson nexts "$next_serial" --argjson lms "$lm_serial" '{
+              valueInputOption:"RAW",
+              data:[
+                {range:($tab+"!B"+$row+":B"+$row), values:[[ $status ]]},
+                {range:($tab+"!D"+$row+":D"+$row), values:[[ $nexts ]]},
+                {range:($tab+"!I"+$row+":I"+$row), values:[[ $lms ]]}
+              ]
+            }')"
+          else
+            payload="$(jq -cn --arg tab "$SHEET_TAB" --arg row "$row" --arg status "$status" --argjson nexts "$next_serial" '{
+              valueInputOption:"RAW",
+              data:[
+                {range:($tab+"!B"+$row+":B"+$row), values:[[ $status ]]},
+                {range:($tab+"!D"+$row+":D"+$row), values:[[ $nexts ]]}
+              ]
+            }')"
           fi
 
-          body="$(printf '{"valueInputOption":"RAW","data":%s}' "${data}")"
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
-            -d "${body}"
+          curl -fsSL -X POST -H "Authorization: Bearer ${ACCESS_TOKEN}" -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" -d "$payload"
 
-      - name: Fail job if final status is failed
-        if: always() && steps.guard.outputs.proceed == 'true' && steps.final.outputs.status == 'failed'
-        run: |
-          exit 1
+          if [ "${status}" = "failed" ]; then
+            exit 1
+          fi
