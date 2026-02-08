@@ -135,7 +135,14 @@ jobs:
           exit 0
 
       # =====================================================================
-      # 3) AUTH GOOGLE — WIF/OIDC (sin claves)
+      # 3) CHECKOUT — debe ir ANTES de auth@v2 cuando create_credentials_file=true
+      # =====================================================================
+      - name: Checkout
+        if: steps.guard.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+
+      # =====================================================================
+      # 4) AUTH GOOGLE — WIF/OIDC (sin claves)
       # =====================================================================
       - name: Auth to Google (WIF)
         id: gcp_auth
@@ -144,18 +151,15 @@ jobs:
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          create_credentials_file: true
           token_format: access_token
           access_token_scopes: |
             https://www.googleapis.com/auth/spreadsheets
             https://www.googleapis.com/auth/cloud-platform
 
       # =====================================================================
-      # 4) CHECKOUT + TOOLING
+      # 5) TOOLING
       # =====================================================================
-      - name: Checkout
-        if: steps.guard.outputs.proceed == 'true'
-        uses: actions/checkout@v4
-
       - name: Setup Python
         if: steps.guard.outputs.proceed == 'true'
         uses: actions/setup-python@v5
@@ -165,9 +169,11 @@ jobs:
       - name: Setup gcloud
         if: steps.guard.outputs.proceed == 'true'
         uses: google-github-actions/setup-gcloud@v2
+        with:
+          export_default_credentials: true
 
       # =====================================================================
-      # 5) LOCK INICIAL
+      # 6) LOCK INICIAL
       #    - status=in_progress
       #    - next_run (col D) como VALOR numérico (serial Sheets), no string
       # =====================================================================
@@ -195,7 +201,7 @@ jobs:
             }"
 
       # =====================================================================
-      # 6) OBJETIVO — ESI → (GH files) → BQ
+      # 7) OBJETIVO — ESI → (GH files) → BQ
       # =====================================================================
       - name: Run structures pipeline
         id: structures
@@ -209,7 +215,7 @@ jobs:
           python scripts/esi/eou_structures_run.py
 
       # =====================================================================
-      # 7) COMMIT/PUSH — solo si hubo cambios y la fase objetivo fue OK
+      # 8) COMMIT/PUSH — solo si hubo cambios y la fase objetivo fue OK
       # =====================================================================
       - name: Commit and push changes
         id: git_push
@@ -246,7 +252,7 @@ jobs:
           exit 1
 
       # =====================================================================
-      # 8) DECISIÓN FINAL PARA SHEETS (incluye override si git push falla)
+      # 9) DECISIÓN FINAL PARA SHEETS (incluye override si git push falla)
       # =====================================================================
       - name: Compute final decision
         id: final
@@ -280,7 +286,7 @@ jobs:
           echo "last_modified_epoch=${lm_epoch}" >> "$GITHUB_OUTPUT"
 
       # =====================================================================
-      # 9) FINALIZE — escribe status/next_run/last_modified en Sheets (sin leer)
+      # 10) FINALIZE — escribe status/next_run/last_modified en Sheets (sin leer)
       # =====================================================================
       - name: Finalize (status + next_run [+ last_modified])
         if: always() && steps.guard.outputs.proceed == 'true' && steps.gcp_auth.outcome == 'success'
@@ -314,7 +320,7 @@ jobs:
             -d "{\"valueInputOption\":\"RAW\",\"data\":${data}}"
 
       # =====================================================================
-      # 10) FALLA EL JOB SI EL RESULTADO FINAL ES failed
+      # 11) FALLA EL JOB SI EL RESULTADO FINAL ES failed
       # =====================================================================
       - name: Fail job if final status is failed
         if: always() && steps.guard.outputs.proceed == 'true' && steps.final.outputs.status == 'failed'
