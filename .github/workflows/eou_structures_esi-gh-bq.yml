@@ -8,6 +8,8 @@ permissions:
   contents: write
   id-token: write
 
+# Candado oficial: evita solapamiento real.
+# Las colas “inútiles” se cortan con el Guard (anti-cola) al inicio.
 concurrency:
   group: eou_structures_esi-gh-bq
   cancel-in-progress: false
@@ -20,7 +22,7 @@ jobs:
     env:
       WORKFLOW_FILE: eou_structures_esi-gh-bq.yml
 
-      # Sheets
+      # Sheets (solo escritura)
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "8"
@@ -42,19 +44,20 @@ jobs:
       ESI_STRUCTURES_LIST_URL: https://esi.evetech.net/universe/structures/?filter=market
       ESI_STRUCTURE_DETAIL_URL_TEMPLATE: https://esi.evetech.net/universe/structures/{structure_id}/
 
-      # Token selection
+      # Token selection + retries globales 401/420
       PRIMARY_CHAR_ID: "2124070822"
       RETRY_BUDGET: "3"
 
-      # ESI sustainability (operational knobs)
-      # - conservative default: 60 req/min (~1 rps)
+      # ESI sustainability (knobs operativos)
       ESI_MAX_RPM: "60"
-      # If remain drops below this, slow down sharply until reset
       ESI_ERR_REMAIN_SOFT: "20"
       ESI_ERR_REMAIN_HARD: "5"
 
     steps:
-      - name: Guard (anti-cola) — exit if another run is active / leader is different
+      # Guard anti-cola:
+      # - Si hay otro run in_progress => salir
+      # - Si hay runs queued y este no es el leader (min run_number) => salir
+      - name: Guard (anti-cola)
         id: guard
         env:
           GH_TOKEN: ${{ github.token }}
@@ -63,20 +66,33 @@ jobs:
           THIS_RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
-          api_base="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs?per_page=20"
+          api="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs?per_page=30"
+          json="$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$api")"
 
-          inprog_json="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${api_base}&status=in_progress")"
-          inprog_other="$(echo "$inprog_json" | jq --arg rid "$RUN_ID" '[.workflow_runs[]? | select(.id != ($rid|tonumber))] | length')"
+          inprog_other="$(echo "$json" | jq --arg rid "$RUN_ID" '
+            (.workflow_runs // [])
+            | map(select(.status=="in_progress"))
+            | map(select(.id != ($rid|tonumber)))
+            | length
+          ')"
 
-          if [ "${inprog_other}" -gt 0 ]; then
+          if [ "$inprog_other" -gt 0 ]; then
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          queued_json="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${api_base}&status=queued")"
-          leader="$(echo "$queued_json" | jq '[.workflow_runs[]? | .run_number] | (min // empty)')"
+          leader="$(echo "$json" | jq '
+            (.workflow_runs // [])
+            | map(select(.status=="queued"))
+            | map(.run_number)
+            | (min // empty)
+          ')"
 
-          if [ -n "${leader}" ] && [ "${leader}" != "null" ] && [ "${leader}" != "${THIS_RUN_NUMBER}" ]; then
+          if [ -n "$leader" ] && [ "$leader" != "null" ] && [ "$leader" != "${THIS_RUN_NUMBER}" ]; then
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -85,15 +101,14 @@ jobs:
 
       - name: Exit if busy
         if: steps.guard.outputs.proceed != 'true'
-        run: |
-          echo "Skipped due to overlapping run"
-          exit 0
+        run: exit 0
 
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
+      # WIF/OIDC hacia Google (sin claves). Se usa para Sheets y para BigQuery CLI.
       - name: Auth to Google (WIF)
         id: gcp_auth
         uses: google-github-actions/auth@v2
@@ -113,10 +128,9 @@ jobs:
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v3
-        with:
-          version: '>= 390.0.0'
 
-      - name: Lock (in_progress + next_run as value)
+      # Lock inicial: status=in_progress y next_run=now+LOCK_TIME (serial numérico)
+      - name: Lock (in_progress + next_run)
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
@@ -131,8 +145,11 @@ jobs:
               {range:($tab+"!D"+$row+":D"+$row), values:[[ $serial ]]}
             ]
           }')"
-          curl -fsSL -X POST -H "Authorization: Bearer ${ACCESS_TOKEN}" -H "Content-Type: application/json" \
-            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" -d "$payload"
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "$payload"
 
       - name: Run structures pipeline
         id: structures
@@ -143,6 +160,7 @@ jobs:
           set -euo pipefail
           python scripts/esi/eou_structures_run.py
 
+      # Persistencia repo: solo si el script dice repo_dirty=true
       - name: Commit & push (only if repo_dirty)
         id: git_push
         if: steps.structures.outputs.repo_dirty == 'true'
@@ -168,6 +186,8 @@ jobs:
           echo "pushed=false" >> "$GITHUB_OUTPUT"
           exit 1
 
+      # Finalize: escribe status/next_run y opcionalmente last_modified (sin leer Sheets)
+      # Override: si push falló, marca failed + 30m para no declarar completed sin persistencia.
       - name: Finalize Sheets (status + next_run [+ last_modified])
         if: always()
         env:
@@ -215,8 +235,11 @@ jobs:
             }')"
           fi
 
-          curl -fsSL -X POST -H "Authorization: Bearer ${ACCESS_TOKEN}" -H "Content-Type: application/json" \
-            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" -d "$payload"
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "$payload"
 
           if [ "${status}" = "failed" ]; then
             exit 1
