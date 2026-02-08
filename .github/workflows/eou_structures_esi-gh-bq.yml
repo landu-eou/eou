@@ -18,25 +18,21 @@ jobs:
     timeout-minutes: 90
 
     env:
-      # =====================================================================
-      # 0) CONFIG
-      # =====================================================================
+      # Config
       WORKFLOW_FILE: eou_structures_esi-gh-bq.yml
 
-      # Sheets (tabla de control)
+      # Sheets (solo escritura)
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "8"
-
-      # Locking
-      LOCK_TIME: 300 # segundos
+      LOCK_TIME: 300
 
       # Google / BigQuery
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       BQ_DATASET: eou
       BQ_TABLE: structures
 
-      # Paths (repo)
+      # Paths
       STATE_ETAG_PATH: states/structures.json
       DATA_STRUCTURES_PATH: data/esi/structures.jsonl.gz
       SDE_SOLARSYSTEMS_PATH: data/sde/solarsystems.jsonl.gz
@@ -49,138 +45,102 @@ jobs:
 
       # Auth token selection
       PRIMARY_CHAR_ID: "2124070822"
-
-      # Retries globales para 401/420
       RETRY_BUDGET: "3"
 
+      # ESI pacing (operacional)
+      # - BASE_RPM: límite inicial conservador
+      # - MIN_RPM: mínimo al que degradar si hay señales de riesgo
+      # - SOFT_REMAIN: si X-ESI-Error-Limit-Remain baja de esto, frenamos más
+      ESI_BASE_RPM: "60"
+      ESI_MIN_RPM: "20"
+      ESI_SOFT_REMAIN: "15"
+
     steps:
-      # =====================================================================
-      # 1) GUARD — decide si este run debe trabajar o salir (busy)
-      # =====================================================================
-      - name: Guard - compute decision
-        id: guard_calc
+      # 1) Guard anti-cola (barato: 1 llamada, sin jq)
+      - name: Guard (anti-queue)
+        id: guard
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
           WF_FILE: ${{ env.WORKFLOW_FILE }}
+          THIS_RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
 
-          api="https://api.github.com/repos/${REPO}/actions/workflows/${WF_FILE}/runs?per_page=50"
+          # Solo necesitamos runs vivos (queued o in_progress) para decidir líder.
+          # API oficial: workflow runs. :contentReference[oaicite:4]{index=4}
+          api="https://api.github.com/repos/${REPO}/actions/workflows/${WF_FILE}/runs?per_page=20"
           json="$(curl -fsSL \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "${api}")"
 
-          proceed="true"
+          python3 - <<'PY' > /tmp/proceed
+import json, os, sys
+this = int(os.environ["THIS_RUN_NUMBER"])
+data = json.loads(sys.stdin.read())
+runs = data.get("workflow_runs") or []
 
-          this="$(jq --arg rid "$RUN_ID" -c '
-            (.workflow_runs // [])
-            | map(select(.id == ($rid|tonumber)))
-            | .[0] // empty
-          ' <<< "$json")"
+alive = [r for r in runs if r.get("status") in ("queued","in_progress")]
+leader = min([r.get("run_number") for r in alive if isinstance(r.get("run_number"), int)], default=this)
 
-          if [ -n "$this" ]; then
-            this_created="$(jq -r '.created_at' <<< "$this")"
-            this_num="$(jq -r '.run_number' <<< "$this")"
-
-            alive_at_creation="$(jq --arg rid "$RUN_ID" --arg tc "$this_created" '
-              (.workflow_runs // [])
-              | map(
-                  select(.id != ($rid|tonumber))
-                  | select(.created_at < $tc)
-                  | select(.updated_at > $tc)
-                )
-              | length
-            ' <<< "$json")"
-
-            if [ "$alive_at_creation" -gt 0 ]; then
-              proceed="false"
-            else
-              leader="$(jq '
-                (.workflow_runs // [])
-                | map(select(.status=="queued" or .status=="in_progress"))
-                | map(.run_number)
-                | min // empty
-              ' <<< "$json")"
-
-              if [ -n "$leader" ] && [ "$leader" != "$this_num" ]; then
-                proceed="false"
-              fi
-            fi
-          fi
-
-          echo "$proceed" > /tmp/proceed
-
-      - name: Guard - publish decision
-        id: guard
-        run: |
+# Procede solo si eres el líder vivo (evita colas trabajando).
+print("true" if this == leader else "false")
+PY
           echo "proceed=$(cat /tmp/proceed)" >> "$GITHUB_OUTPUT"
+        shell: bash
+        stdin: ${{ steps.guard.inputs.json }}
 
-      # =====================================================================
-      # 2) BUSY EXIT — si no procede, salir sin tocar nada
-      # =====================================================================
-      - name: Exit if skipped (busy)
+      - name: Exit if busy
         if: steps.guard.outputs.proceed != 'true'
         run: |
-          echo "Skipped due to overlapping run"
+          echo "Skipped (not leader)."
           exit 0
 
-      # =====================================================================
-      # 3) CHECKOUT — debe ir ANTES de auth@v2 cuando create_credentials_file=true
-      # =====================================================================
-      - name: Checkout
-        if: steps.guard.outputs.proceed == 'true'
+      # 2) Checkout mínimo (menos red/IO)
+      - name: Checkout (shallow + sparse)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          sparse-checkout: |
+            scripts/esi/eou_structures_run.py
+            states/structures.json
+            data/esi/structures.jsonl.gz
+            data/sde/solarsystems.jsonl.gz
+            data/sde/types.jsonl.gz
+          sparse-checkout-cone-mode: false
 
-      # =====================================================================
-      # 4) AUTH GOOGLE — WIF/OIDC (sin claves)
-      # =====================================================================
+      # 3) Auth Google WIF/OIDC
       - name: Auth to Google (WIF)
         id: gcp_auth
-        if: steps.guard.outputs.proceed == 'true'
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-          create_credentials_file: true
           token_format: access_token
           access_token_scopes: |
             https://www.googleapis.com/auth/spreadsheets
             https://www.googleapis.com/auth/cloud-platform
 
-      # =====================================================================
-      # 5) TOOLING
-      # =====================================================================
-      - name: Setup Python
-        if: steps.guard.outputs.proceed == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      # setup-gcloud@v3 + versión >= 390.0.0 para bq con WIF
+      # 4) gcloud + bq (sin fijar version salvo que lo necesites)
       - name: Setup gcloud
-        if: steps.guard.outputs.proceed == 'true'
         uses: google-github-actions/setup-gcloud@v3
         with:
           version: '>= 390.0.0'
 
-      # =====================================================================
-      # 6) LOCK INICIAL
-      # =====================================================================
-      - name: Initial lock (in_progress + next_run as value)
-        if: steps.guard.outputs.proceed == 'true' && steps.gcp_auth.outcome == 'success'
+      # 5) Lock inicial (solo escritura a Sheets)
+      - name: Initial lock (in_progress)
+        if: steps.gcp_auth.outcome == 'success'
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
-
           epoch="$(date -u -d "+${LOCK_TIME} seconds" +%s)"
           serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
 
+          # RAW = se guarda tal cual, números siguen siendo números. :contentReference[oaicite:5]{index=5}
           curl -fsSL -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
@@ -193,42 +153,33 @@ jobs:
               ]
             }"
 
-      # =====================================================================
-      # 7) OBJETIVO — ESI → (GH files) → BQ
-      # =====================================================================
+      # 6) Run pipeline (el script escribe summary y outputs)
       - name: Run structures pipeline
         id: structures
-        if: steps.guard.outputs.proceed == 'true'
         env:
           EOU_ACCESS_TOKENS_1: ${{ secrets.EOU_ACCESS_TOKENS_1 }}
           EOU_ACCESS_TOKENS_2: ${{ secrets.EOU_ACCESS_TOKENS_2 }}
         run: |
           set -euo pipefail
-          python scripts/esi/eou_structures_run.py
+          python3 scripts/esi/eou_structures_run.py
 
-      # =====================================================================
-      # 8) COMMIT/PUSH — solo si hubo cambios y la fase objetivo fue OK
-      # =====================================================================
+      # 7) Commit/push solo si dirty
       - name: Commit and push changes
         id: git_push
-        if: steps.guard.outputs.proceed == 'true' && steps.structures.outcome == 'success' && steps.structures.outputs.repo_dirty == 'true'
+        if: steps.structures.outcome == 'success' && steps.structures.outputs.repo_dirty == 'true'
         continue-on-error: true
         run: |
           set -euo pipefail
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add "${DATA_STRUCTURES_PATH}" "${STATE_ETAG_PATH}" || true
-
           if git diff --cached --quiet; then
             echo "pushed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          git commit -m "EOU: update structures" \
-            -m "Workflow: ${WORKFLOW_FILE}" \
-            -m "UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git commit -m "EOU: update structures" -m "Workflow: ${WORKFLOW_FILE}" -m "UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
           for i in 1 2 3; do
             git pull --rebase || true
@@ -242,15 +193,12 @@ jobs:
           echo "pushed=false" >> "$GITHUB_OUTPUT"
           exit 1
 
-      # =====================================================================
-      # 9) DECISIÓN FINAL PARA SHEETS
-      # =====================================================================
+      # 8) Decisión final (override si push falló)
       - name: Compute final decision
         id: final
-        if: always() && steps.guard.outputs.proceed == 'true'
+        if: always()
         run: |
           set -euo pipefail
-
           status="${{ steps.structures.outputs.status }}"
           next_epoch="${{ steps.structures.outputs.next_run_epoch }}"
           lm_epoch="${{ steps.structures.outputs.last_modified_epoch }}"
@@ -273,11 +221,9 @@ jobs:
           echo "write_last_modified=${write_lm}" >> "$GITHUB_OUTPUT"
           echo "last_modified_epoch=${lm_epoch}" >> "$GITHUB_OUTPUT"
 
-      # =====================================================================
-      # 10) FINALIZE — escribe status/next_run/last_modified en Sheets (sin leer)
-      # =====================================================================
-      - name: Finalize (status + next_run [+ last_modified])
-        if: always() && steps.guard.outputs.proceed == 'true' && steps.gcp_auth.outcome == 'success'
+      # 9) Finalize Sheets (solo escritura)
+      - name: Finalize Sheets
+        if: always() && steps.gcp_auth.outcome == 'success'
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
@@ -290,7 +236,6 @@ jobs:
           lm_epoch="${{ steps.final.outputs.last_modified_epoch }}"
 
           next_serial="$(awk "BEGIN { printf \"%.10f\", (${next_epoch}/86400) + 25569 }")"
-
           data='[
             {"range":"'"${SHEET_TAB}!B${row}:B${row}"'","values":[["'"${status}"'"]]},
             {"range":"'"${SHEET_TAB}!D${row}:D${row}"'","values":[['"${next_serial}"']]}
@@ -307,10 +252,6 @@ jobs:
             "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
             -d "{\"valueInputOption\":\"RAW\",\"data\":${data}}"
 
-      # =====================================================================
-      # 11) FALLA EL JOB SI EL RESULTADO FINAL ES failed
-      # =====================================================================
       - name: Fail job if final status is failed
-        if: always() && steps.guard.outputs.proceed == 'true' && steps.final.outputs.status == 'failed'
-        run: |
-          exit 1
+        if: always() && steps.final.outputs.status == 'failed'
+        run: exit 1
