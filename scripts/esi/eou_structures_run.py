@@ -2,56 +2,50 @@
 """
 EOU · ESI Structures (ESI → GH → BQ)
 
-Objetivo:
-  - Calcular SDE_NEXT_RUN (HEAD sin etag, usa Last-Modified hh:mm:ss -> próxima ocurrencia + 1800 + jitter[300..900])
-  - Consultar listado de estructuras (sin auth) con If-None-Match usando states/structures.json
-  - Si 304: terminar completed, next_run=SDE_NEXT_RUN, last_modified del header del listado (si existe)
-  - Si 200: reconciliar data/esi/structures.jsonl.gz en memoria:
-      * quitar IDs que ya no están en el listado
-      * añadir IDs nuevos con campos null y market=true
-  - Enriquecer cada structure_id (auth + If-None-Match por registro):
-      * 200: actualizar name + dock + guardar type_id y solar_system_id para resolver con SDE + guardar etag
-      * 304: mantener registro
-      * 403: station/solarSystem/dock/stationType -> null, market=true, guardar etag
-      * 404: borrar registro
-      * 401/420: retry tras 30s con presupuesto global RETRY_BUDGET (401 rota token; 420 reintenta)
-      * 5xx/429: mantener registro (con backoff)
-  - Resolver stationType/solarSystem usando SDE (types.jsonl.gz, solarsystems.jsonl.gz) solo para IDs necesarios
-  - BigQuery:
-      * solo reescribir si cambió el conjunto de filas y hay filas (>0)
-      * tabla eou.structures clustered by solarSystem (si no existe, se crea)
-      * carga con bq load --replace
-  - data file:
-      * solo reescribir data/esi/structures.jsonl.gz si cambió (sobrescritura atómica)
-  - states/structures.json:
-      * actualizar etag del listado SOLO si:
-          - el etag cambió
-          - data stage no falló (SKIPPED es OK porque “no correspondía”)
-          - bq stage no falló (SKIPPED es OK porque “no correspondía”)
+Objetivo
+--------
+Pipeline "silencioso" (sin logs para usuario) para:
+- Calcular SDE_NEXT_RUN (HEAD a SDE_ZIP_URL sin etag).
+- Consultar listado de estructuras (ESI_STRUCTURES_LIST_URL) usando ETag global almacenado en states/structures.json.
+- Mantener un cache local en data/esi/structures.jsonl.gz (JSONL comprimido, sobrescritura atómica cuando corresponde).
+- Enriquecer estructura por estructura (ESI_STRUCTURE_DETAIL_URL_TEMPLATE) autenticado, usando ETag por registro, con retries globales para 401/420.
+- Volcar a BigQuery Sandbox (tabla eou.structures) SOLO si corresponde (cambios + filas válidas).
+- Actualizar states/structures.json (ETag global del listado) SOLO si corresponde:
+    * etag cambió
+    * y las fases "data" y "bq" no fallaron (pueden estar SKIPPED porque "no correspondía reescribir")
 
-Contrato (inputs por env vars):
-  Required:
-    GCP_PROJECT_ID, BQ_DATASET, BQ_TABLE
-    STATE_ETAG_PATH, DATA_STRUCTURES_PATH
-    SDE_SOLARSYSTEMS_PATH, SDE_TYPES_PATH
-    SDE_ZIP_URL
-    ESI_STRUCTURES_LIST_URL
-    ESI_STRUCTURE_DETAIL_URL_TEMPLATE
-    PRIMARY_CHAR_ID
-    RETRY_BUDGET
-    EOU_ACCESS_TOKENS_1, EOU_ACCESS_TOKENS_2  (JSON dict {char_id: access_token})
+Contrato (inputs por env vars)
+-----------------------------
+Requeridos:
+  - GCP_PROJECT_ID, BQ_DATASET, BQ_TABLE
+  - STATE_ETAG_PATH, DATA_STRUCTURES_PATH
+  - SDE_SOLARSYSTEMS_PATH, SDE_TYPES_PATH
+  - SDE_ZIP_URL
+  - ESI_STRUCTURES_LIST_URL
+  - ESI_STRUCTURE_DETAIL_URL_TEMPLATE  (usa {structure_id})
+  - PRIMARY_CHAR_ID
+  - RETRY_BUDGET
+  - EOU_ACCESS_TOKENS_1, EOU_ACCESS_TOKENS_2  (JSON dict {char_id: access_token})
 
-Knobs sostenibilidad ESI:
-    ESI_MAX_RPM (default 60)
-    ESI_ERR_REMAIN_SOFT (default 20)
-    ESI_ERR_REMAIN_HARD (default 5)
+Controles operativos (sostenibilidad ESI; no alteran decisiones, solo pacing):
+  - ESI_MAX_RPM (default 60)
+  - ESI_ERR_REMAIN_SOFT (default 20)
+  - ESI_ERR_REMAIN_HARD (default 5)
 
-Outputs (a $GITHUB_OUTPUT):
-  status: completed|failed
-  next_run_epoch: int (UTC)
-  write_last_modified: true|false
-  last_modified_epoch: int|"" (UTC, si corresponde)
-  repo_dirty: true|false
+Outputs (a $GITHUB_OUTPUT)
+--------------------------
+  - status: completed|failed
+  - next_run_epoch: int (UTC epoch seconds)
+  - write_last_modified: true|false
+  - last_modified_epoch: int|""  (UTC epoch seconds del header Last-Modified del listado)
+  - repo_dirty: true|false       (si el repo debe commitear data/states)
+
+Notas de diseño
+---------------
+- No imprime métricas, no escribe Step Summary, no imprime tracebacks.
+- El workflow decide estado/next_run escribiendo en Sheets usando estos outputs.
+- ESI: aplica limitación por RPM y se vuelve conservador si X-ESI-Error-Limit-Remain baja,
+  para reducir riesgo de 420 (error limiting).
 """
 
 from __future__ import annotations
@@ -76,7 +70,7 @@ from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 UTC = timezone.utc
 
 
-# ----------------------------- env / outputs -----------------------------
+# ------------------------- helpers: env + GHA outputs -------------------------
 
 def _env(name: str, default: Optional[str] = None) -> str:
     v = os.getenv(name)
@@ -88,6 +82,10 @@ def _env(name: str, default: Optional[str] = None) -> str:
 
 
 def gha_set_output(key: str, value: str) -> None:
+    """
+    Escribe outputs para consumo del workflow (step.id.outputs.*).
+    No imprime nada: en modo "silencioso" la señal es únicamente exit code + outputs.
+    """
     path = os.getenv("GITHUB_OUTPUT")
     if not path:
         return
@@ -115,31 +113,42 @@ def parse_http_date_to_epoch(http_date: Optional[str]) -> Optional[int]:
 def sleep_with_jitter(seconds: int, jitter_max: int = 3) -> None:
     if seconds <= 0:
         return
-    time.sleep(seconds + random.SystemRandom().randint(0, jitter_max))
+    jitter = random.SystemRandom().randint(0, jitter_max)
+    time.sleep(seconds + jitter)
 
 
-# ----------------------------- ESI rate policy -----------------------------
+# ------------------------- stage states (para condición "strict state update") -------------------------
+
+SKIPPED = "SKIPPED"
+DONE_OK = "DONE_OK"
+FAILED = "FAILED"
+
+
+# ------------------------- ESI throttle / pacing policy -------------------------
 
 class RateLimiter:
     """
-    Sliding-window limiter: max RPM + slowdown dinámico usando X-ESI-Error-Limit-*.
+    Limitador por ventana deslizante (max RPM) + ralentización dinámica.
 
-    Nota:
-      ESI rate limiting es por errores (error window). Al bajar "remain", reducimos RPM.
+    - Base: max_rpm requests/min
+    - Dynamic: si X-ESI-Error-Limit-Remain baja, se reduce el ritmo hasta el reset.
     """
+
     def __init__(self, max_rpm: int) -> None:
         self.base_rpm = max(1, max_rpm)
         self.window: Deque[float] = deque()
         self.dynamic_rpm: Optional[int] = None
 
     def _effective_rpm(self) -> int:
-        return max(1, min(self.base_rpm, self.dynamic_rpm)) if self.dynamic_rpm else self.base_rpm
+        if self.dynamic_rpm is None:
+            return self.base_rpm
+        return max(1, min(self.base_rpm, self.dynamic_rpm))
 
     def before_request(self) -> None:
         rpm = self._effective_rpm()
         interval = 60.0 / float(rpm)
-        now = time.monotonic()
 
+        now = time.monotonic()
         while self.window and (now - self.window[0]) > 60.0:
             self.window.popleft()
 
@@ -151,11 +160,18 @@ class RateLimiter:
         self.window.append(time.monotonic())
 
     def observe_error_limit_headers(self, headers_lc: Dict[str, str], soft: int, hard: int) -> None:
+        """
+        ESI error limit headers:
+          - X-ESI-Error-Limit-Remain
+          - X-ESI-Error-Limit-Reset
+        Se usan para volverse más conservador y evitar 420.
+        """
         remain_s = headers_lc.get("x-esi-error-limit-remain")
         try:
             if remain_s is None:
                 return
             remain = int(remain_s)
+
             if remain < hard:
                 self.dynamic_rpm = max(1, self.base_rpm // 6)
             elif remain < soft:
@@ -166,6 +182,10 @@ class RateLimiter:
             return
 
     def backoff_on_420_or_429(self, headers_lc: Dict[str, str]) -> None:
+        """
+        Backoff fuerte para 420/429.
+        Si hay headers de retry/reset se respetan; si no, se usa un mínimo conservador.
+        """
         reset_s = headers_lc.get("x-esi-error-limit-reset")
         retry_after = headers_lc.get("retry-after")
         wait = 60
@@ -177,6 +197,8 @@ class RateLimiter:
                 pass
         sleep_with_jitter(wait + 2, jitter_max=5)
 
+
+# ------------------------- HTTP (headers normalized to lowercase) -------------------------
 
 def http_request(
     limiter: RateLimiter,
@@ -201,11 +223,11 @@ def http_request(
         body = e.read() if method != "HEAD" else b""
         return int(e.code), hdrs, body
     except Exception as e:
-        # Se trata como 503-like (mantener registro / fail según fase)
+        # Fallos de red/timeout se tratan como 503-like para decisiones de "5xx".
         return 503, {}, (str(e).encode("utf-8")[:200])
 
 
-# ----------------------------- ETag utils -----------------------------
+# ------------------------- ETag normalization (global y por registro) -------------------------
 
 def normalize_etag(etag: Optional[str]) -> Optional[str]:
     if not etag:
@@ -221,10 +243,12 @@ def normalize_etag(etag: Optional[str]) -> Optional[str]:
 
 def etag_to_if_none_match(stored_etag: Optional[str]) -> Optional[str]:
     n = normalize_etag(stored_etag)
-    return f"\"{n}\"" if n else None
+    if not n:
+        return None
+    return f"\"{n}\""
 
 
-# ----------------------------- data model / IO -----------------------------
+# ------------------------- data model: structures cache (jsonl.gz) -------------------------
 
 @dataclasses.dataclass
 class StructureRecord:
@@ -236,11 +260,12 @@ class StructureRecord:
     market: bool = True
     etag: Optional[str] = None
 
-    # transient: ids para resolver con SDE
+    # Campos transitorios (para resolver nombres SDE "on-demand")
     _type_id: Optional[int] = None
     _solar_system_id: Optional[int] = None
 
     def to_json_obj(self) -> Dict[str, Any]:
+        # Orden estable (útil para diffs/hashes)
         return {
             "stationID": self.stationID,
             "station": self.station,
@@ -290,6 +315,10 @@ def canonical_hash_records(records: Dict[int, StructureRecord]) -> str:
 
 
 def write_structures_gz(path: str, records: Dict[int, StructureRecord]) -> None:
+    """
+    Sobrescritura atómica: escribe tmp y luego os.replace.
+    No deja rastros de la versión anterior.
+    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(prefix="tmp_structures_", suffix=".jsonl.gz", dir=os.path.dirname(path))
     os.close(fd)
@@ -334,7 +363,7 @@ def atomic_write_text(path: str, text: str) -> None:
             pass
 
 
-# ----------------------------- SDE resolution (on-demand) -----------------------------
+# ------------------------- SDE name resolution (on-demand) -------------------------
 
 def resolve_names_on_demand(
     sde_solarsystems_path: str,
@@ -342,6 +371,10 @@ def resolve_names_on_demand(
     needed_solarsystems: Iterable[int],
     needed_types: Iterable[int],
 ) -> Tuple[Dict[int, str], Dict[int, str]]:
+    """
+    Resuelve únicamente IDs necesarios leyendo los .jsonl.gz del SDE.
+    Evita cargar SDE completo en memoria.
+    """
     need_ss = set(int(x) for x in needed_solarsystems if x is not None)
     need_ty = set(int(x) for x in needed_types if x is not None)
 
@@ -379,7 +412,7 @@ def resolve_names_on_demand(
     return ss_map, ty_map
 
 
-# ----------------------------- token selection -----------------------------
+# ------------------------- token selection (PRIMARY + fallback high->low) -------------------------
 
 def select_access_tokens(primary_char_id: str, json1: str, json2: str) -> List[Tuple[str, str]]:
     def parse(j: str) -> Dict[str, str]:
@@ -405,12 +438,19 @@ def select_access_tokens(primary_char_id: str, json1: str, json2: str) -> List[T
     others.sort(key=lambda x: int(x), reverse=True)
     for cid in others:
         ordered.append((cid, tokens[cid]))
+
     return ordered
 
 
-# ----------------------------- SDE next run -----------------------------
+# ------------------------- SDE next run computation -------------------------
 
 def compute_sde_next_run_epoch(limiter: RateLimiter, sde_url: str) -> Tuple[str, Optional[int]]:
+    """
+    Petición sin etag, sólo HEAD al ZIP.
+    - 200: calcula SDE_NEXT_RUN a partir de Last-Modified hh:mm:ss.
+    - 420: fail + now+5m
+    - 5xx: fail + now+30m
+    """
     st, hdr, _ = http_request(
         limiter,
         "HEAD",
@@ -418,8 +458,10 @@ def compute_sde_next_run_epoch(limiter: RateLimiter, sde_url: str) -> Tuple[str,
         headers={"User-Agent": "landu-eou/eou (EOU structures)"},
         timeout=60,
     )
+
     if st == 200:
-        lm_epoch = parse_http_date_to_epoch(hdr.get("last-modified"))
+        lm = hdr.get("last-modified")
+        lm_epoch = parse_http_date_to_epoch(lm)
         if lm_epoch is None:
             return "err_other", None
 
@@ -442,7 +484,7 @@ def compute_sde_next_run_epoch(limiter: RateLimiter, sde_url: str) -> Tuple[str,
     return "err_other", None
 
 
-# ----------------------------- BigQuery helpers -----------------------------
+# ------------------------- BigQuery helpers (minimizar churn) -------------------------
 
 def bq_table_exists(project_id: str, dataset: str, table: str) -> bool:
     table_ref = f"{dataset}.{table}"
@@ -492,14 +534,19 @@ def bq_load_replace(project_id: str, dataset: str, table: str, ndjson_path: str)
     )
 
 
-# ----------------------------- main -----------------------------
+# ------------------------- main -------------------------
 
 def main() -> int:
+    # Outputs por defecto (para que el workflow pueda finalizar Sheets siempre)
     out_status = "failed"
     out_next = now_epoch() + 1800
     out_write_lm = "false"
     out_lm_epoch: Optional[int] = None
     repo_dirty = False
+
+    # Estado de fases relevantes para la condición strict state update
+    stage_data = SKIPPED
+    stage_bq = SKIPPED
 
     def publish_outputs() -> None:
         gha_set_output("status", out_status)
@@ -509,6 +556,7 @@ def main() -> int:
         gha_set_output("repo_dirty", "true" if repo_dirty else "false")
 
     try:
+        # --- configuración base ---
         project_id = _env("GCP_PROJECT_ID")
         bq_dataset = _env("BQ_DATASET")
         bq_table = _env("BQ_TABLE")
@@ -540,17 +588,24 @@ def main() -> int:
 
         ua = "landu-eou/eou (EOU structures; GitHub Actions)"
 
-        # ---- Phase: SDE_NEXT_RUN
+        # -----------------------------------------------------------------
+        # Fase: SDE_NEXT_RUN
+        # -----------------------------------------------------------------
         kind, sde_next = compute_sde_next_run_epoch(limiter, sde_url)
         if kind != "ok" or sde_next is None:
             out_status = "failed"
-            out_next = now_epoch() + (300 if kind == "err_420" else 1800)
+            if kind == "err_420":
+                out_next = now_epoch() + 300
+            else:
+                out_next = now_epoch() + 1800
             out_write_lm = "false"
             out_lm_epoch = None
             publish_outputs()
             return 1
 
-        # ---- Phase: list structures (If-None-Match from states/structures.json)
+        # -----------------------------------------------------------------
+        # Fase: listado de estructuras (ETag global en states/structures.json)
+        # -----------------------------------------------------------------
         old_state = load_json_file(state_path) or {}
         old_etag_norm = normalize_etag(old_state.get("etag") if isinstance(old_state.get("etag"), str) else None)
 
@@ -599,10 +654,12 @@ def main() -> int:
             publish_outputs()
             return 1
 
-        # ---- Phase: reconcile in memory
+        # -----------------------------------------------------------------
+        # Fase: reconciliación en memoria del cache .jsonl.gz
+        # -----------------------------------------------------------------
         old_records = read_structures_gz(data_path)
-        list_set = set(int(x) for x in structure_list)
 
+        list_set = set(int(x) for x in structure_list)
         temp_records: Dict[int, StructureRecord] = {sid: rec for sid, rec in old_records.items() if sid in list_set}
         for sid in list_set:
             if sid not in temp_records:
@@ -616,7 +673,9 @@ def main() -> int:
                     etag=None,
                 )
 
-        # ---- Phase: enrich per structure (auth + ETag per record, retry budget global)
+        # -----------------------------------------------------------------
+        # Fase: enriquecimiento (authed + ETag por registro + retries globales 401/420)
+        # -----------------------------------------------------------------
         token_idx = 0
 
         def current_token() -> str:
@@ -649,10 +708,11 @@ def main() -> int:
                 st2, hdr2, b2 = http_request(limiter, "GET", url, headers=req_headers, timeout=60)
                 limiter.observe_error_limit_headers(hdr2, soft=err_soft, hard=err_hard)
 
-                # Backoff to protect against bans / error limiting pressure.
+                # 420/429: backoff fuerte (además de la lógica de retry_budget para 420)
                 if st2 in (420, 429):
                     limiter.backoff_on_420_or_429(hdr2)
 
+                # 401: retry global con rotación de token
                 if st2 == 401:
                     if retry_budget <= 0:
                         fatal = True
@@ -663,6 +723,7 @@ def main() -> int:
                     sleep_with_jitter(30, jitter_max=5)
                     continue
 
+                # 420: retry global con backoff
                 if st2 == 420:
                     if retry_budget <= 0:
                         fatal = True
@@ -688,6 +749,7 @@ def main() -> int:
                     tid = obj.get("type_id")
                     rec._solar_system_id = int(ssid) if ssid is not None else None
                     rec._type_id = int(tid) if tid is not None else None
+
                     if rec._solar_system_id is not None:
                         need_ss_ids.append(rec._solar_system_id)
                     if rec._type_id is not None:
@@ -715,7 +777,6 @@ def main() -> int:
                     sleep_with_jitter(5, jitter_max=5)
                     break
 
-                # 429 u otros: mantener registro
                 break
 
             if fatal:
@@ -727,7 +788,9 @@ def main() -> int:
             publish_outputs()
             return 1
 
-        # ---- Phase: resolve names with SDE on-demand
+        # -----------------------------------------------------------------
+        # Fase: resolver nombres SDE (on-demand) y completar stationType/solarSystem
+        # -----------------------------------------------------------------
         ss_map, ty_map = resolve_names_on_demand(
             sde_solarsystems_path=sde_solarsystems_path,
             sde_types_path=sde_types_path,
@@ -743,7 +806,9 @@ def main() -> int:
             r._solar_system_id = None
             r._type_id = None
 
-        # ---- Phase: compute rows for BQ
+        # -----------------------------------------------------------------
+        # Fase: detección de cambios (data + BQ) para evitar trabajo/cuotas
+        # -----------------------------------------------------------------
         def rows_for_bq(records: Dict[int, StructureRecord]) -> List[Dict[str, Any]]:
             rows: List[Dict[str, Any]] = []
             for sid in sorted(records.keys()):
@@ -764,9 +829,6 @@ def main() -> int:
                 )
             return rows
 
-        old_bq_rows = rows_for_bq(old_records)
-        new_bq_rows = rows_for_bq(temp_records)
-
         def hash_rows(rows: List[Dict[str, Any]]) -> str:
             h = hashlib.sha256()
             for row in rows:
@@ -775,12 +837,20 @@ def main() -> int:
                 h.update(b"\n")
             return h.hexdigest()
 
-        data_changed = canonical_hash_records(old_records) != canonical_hash_records(temp_records)
+        old_data_hash = canonical_hash_records(old_records)
+        new_data_hash = canonical_hash_records(temp_records)
+        data_changed = old_data_hash != new_data_hash
+
+        old_bq_rows = rows_for_bq(old_records)
+        new_bq_rows = rows_for_bq(temp_records)
         bq_changed = hash_rows(old_bq_rows) != hash_rows(new_bq_rows)
 
-        # ---- Phase: BigQuery rewrite (solo si corresponde)
-        bq_failed = False
+        # -----------------------------------------------------------------
+        # Fase: BigQuery rewrite (solo si cambió y hay filas válidas)
+        # -----------------------------------------------------------------
+        stage_bq = SKIPPED
         if bq_changed and len(new_bq_rows) > 0:
+            stage_bq = FAILED
             with tempfile.NamedTemporaryFile(
                 "w", encoding="utf-8", delete=False, prefix="eou_structures_", suffix=".jsonl"
             ) as tmpf:
@@ -788,45 +858,56 @@ def main() -> int:
                 for row in new_bq_rows:
                     tmpf.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
                     tmpf.write("\n")
+
             try:
                 if not bq_table_exists(project_id, bq_dataset, bq_table):
                     bq_create_clustered(project_id, bq_dataset, bq_table)
                 bq_load_replace(project_id, bq_dataset, bq_table, ndjson_path)
+                stage_bq = DONE_OK
             except Exception:
-                bq_failed = True
+                stage_bq = FAILED
             finally:
                 try:
                     os.remove(ndjson_path)
                 except Exception:
                     pass
 
-            if bq_failed:
+            if stage_bq == FAILED:
                 out_status = "failed"
                 out_next = now_epoch() + 1800
                 publish_outputs()
                 return 1
 
-        # ---- Phase: write data file (solo si corresponde)
-        data_failed = False
+        # -----------------------------------------------------------------
+        # Fase: escribir data/esi/structures.jsonl.gz (solo si cambió)
+        # -----------------------------------------------------------------
+        stage_data = SKIPPED
         if data_changed:
+            stage_data = FAILED
             try:
                 write_structures_gz(data_path, temp_records)
                 repo_dirty = True
+                stage_data = DONE_OK
             except Exception:
-                data_failed = True
-
-            if data_failed:
+                stage_data = FAILED
                 out_status = "failed"
                 out_next = now_epoch() + 1800
                 publish_outputs()
                 return 1
 
-        # ---- STRICT: update states/structures.json only when it corresponds
+        # -----------------------------------------------------------------
+        # Strict state update: states/structures.json (etag global del listado)
+        # -----------------------------------------------------------------
         etag_changed = bool(new_etag_norm) and (new_etag_norm != old_etag_norm)
-        # SKIPPED is OK because it means “didn't correspond”, not an error.
-        if etag_changed and not data_failed and not bq_failed:
+
+        # STRICT: actualizar sólo si cambió etag y (data/bq no fallaron).
+        # SKIPPED significa "no correspondía reescribir", no es error.
+        if etag_changed and stage_data != FAILED and stage_bq != FAILED:
             try:
-                atomic_write_text(state_path, json.dumps({"etag": str(new_etag_norm)}, ensure_ascii=False, separators=(",", ":")) + "\n")
+                atomic_write_text(
+                    state_path,
+                    json.dumps({"etag": str(new_etag_norm)}, ensure_ascii=False, separators=(",", ":")) + "\n",
+                )
                 repo_dirty = True
             except Exception:
                 out_status = "failed"
@@ -834,7 +915,9 @@ def main() -> int:
                 publish_outputs()
                 return 1
 
-        # ---- Final
+        # -----------------------------------------------------------------
+        # Fase final
+        # -----------------------------------------------------------------
         out_status = "completed"
         out_next = sde_next
         publish_outputs()
