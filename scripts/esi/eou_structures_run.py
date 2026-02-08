@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """EOU · ESI Structures (ESI → GH → BQ)
 
+This script is designed to be run by GitHub Actions.
+
 Fixes included (no logic changes):
-  - Gzip internal filename forced to "structures.jsonl" (not tmp_...).
-  - JSONL key order forced exactly as requested; no sort_keys in output.
-  - ETag normalization for compare/store + robust If-None-Match building.
+  - Print traceback on unexpected exceptions (so exit code 1 is debuggable).
 
 Refs:
-  - gzip filename header: https://docs.python.org/3/library/gzip.html
-  - json sort_keys and ordering: https://docs.python.org/3/library/json.html
-  - ESI ETag best practices: https://developers.eveonline.com/docs/services/esi/best-practices/
+  - auth@v2 exported env when create_credentials_file=true:
+    (CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE, GOOGLE_APPLICATION_CREDENTIALS, etc.)
 """
 
 from __future__ import annotations
@@ -25,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -139,11 +139,6 @@ def atomic_write_text(path: str, text: str) -> None:
 
 
 def normalize_etag(etag: Optional[str]) -> Optional[str]:
-    """Normalize for compare/store:
-    - strip spaces
-    - remove weak prefix W/
-    - remove surrounding quotes
-    """
     if not etag:
         return None
     s = etag.strip()
@@ -156,11 +151,9 @@ def normalize_etag(etag: Optional[str]) -> Optional[str]:
 
 
 def etag_to_if_none_match(stored_etag: Optional[str]) -> Optional[str]:
-    """Build a robust If-None-Match value from stored etag (which may be unquoted)."""
     n = normalize_etag(stored_etag)
     if not n:
         return None
-    # Use strong quoted tag; commonly matches weak ETags via weak comparison in If-None-Match.
     return f"\"{n}\""
 
 
@@ -175,7 +168,6 @@ class StructureRecord:
     etag: Optional[str] = None
 
     def to_json_obj(self) -> Dict[str, Any]:
-        # ORDER REQUIRED BY SPEC (do not change)
         return {
             "stationID": self.stationID,
             "station": self.station,
@@ -216,8 +208,6 @@ def read_structures_gz(path: str) -> Dict[int, StructureRecord]:
 
 
 def canonical_hash_records(records: Dict[int, StructureRecord]) -> str:
-    # Hash must be stable even if field order changes in future,
-    # so keep sort_keys=True for hashing (not for output).
     h = hashlib.sha256()
     for sid in sorted(records.keys()):
         obj = records[sid].to_json_obj()
@@ -228,16 +218,11 @@ def canonical_hash_records(records: Dict[int, StructureRecord]) -> str:
 
 
 def write_structures_gz(path: str, records: Dict[int, StructureRecord]) -> None:
-    """Write gzip with:
-    - internal filename = structures.jsonl
-    - JSON keys in required order
-    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(prefix="tmp_structures_", suffix=".jsonl.gz", dir=os.path.dirname(path))
     os.close(fd)
 
     try:
-        # Use fileobj + filename=... to control gzip header FNAME.
         with open(tmp_path, "wb") as raw:
             with gzip.GzipFile(
                 fileobj=raw,
@@ -247,7 +232,6 @@ def write_structures_gz(path: str, records: Dict[int, StructureRecord]) -> None:
                 filename="structures.jsonl",
             ) as gz:
                 for sid in sorted(records.keys()):
-                    # NO sort_keys here: we want the exact field order.
                     line = json.dumps(
                         records[sid].to_json_obj(),
                         separators=(",", ":"),
@@ -428,9 +412,6 @@ def main() -> int:
 
         ua = "landu-eou/eou (EOU structures; GitHub Actions)"
 
-        # ------------------------------------------------------------
-        # Fase inicio: SDE_NEXT_RUN
-        # ------------------------------------------------------------
         kind, sde_next = compute_sde_next_run_epoch(sde_url)
         if kind != "ok" or sde_next is None:
             out_status = "failed"
@@ -445,9 +426,6 @@ def main() -> int:
             publish_outputs()
             return 1
 
-        # ------------------------------------------------------------
-        # Fase listado de estructuras (ETag global en states/structures.json)
-        # ------------------------------------------------------------
         old_state = load_json_file(state_path) or {}
         old_list_etag_raw = old_state.get("etag")
         old_list_etag_norm = normalize_etag(old_list_etag_raw)
@@ -518,9 +496,6 @@ def main() -> int:
                     etag=None,
                 )
 
-        # ------------------------------------------------------------
-        # Fase enriquecimiento
-        # ------------------------------------------------------------
         solarsystems = load_sde_solarsystems(sde_solarsystems_path)
         types = load_sde_types(sde_types_path)
 
@@ -550,7 +525,6 @@ def main() -> int:
                 "Accept": "application/json",
                 "Authorization": f"Bearer {current_token()}",
             }
-            # Per-record etag: send quoted version if present
             rec_inm = etag_to_if_none_match(rec.etag)
             if rec_inm:
                 req_headers["If-None-Match"] = rec_inm
@@ -600,7 +574,6 @@ def main() -> int:
                     if type_id is not None:
                         rec.stationType = types.get(int(type_id))
 
-                    # store normalized per-record etag
                     rec.etag = normalize_etag(hdr.get("ETag") or hdr.get("etag") or rec.etag) or rec.etag
                     break
 
@@ -631,9 +604,6 @@ def main() -> int:
             publish_outputs()
             return 1
 
-        # ------------------------------------------------------------
-        # Fase volcados (data file + BQ) — en una sola operación cada uno
-        # ------------------------------------------------------------
         old_data_hash = canonical_hash_records(old_records)
         new_data_hash = canonical_hash_records(temp_records)
         data_changed = old_data_hash != new_data_hash
@@ -711,13 +681,9 @@ def main() -> int:
             publish_outputs()
             return 1
 
-        # ------------------------------------------------------------
-        # Update states/structures.json (STRICT condition requested)
-        # ------------------------------------------------------------
         etag_changed = bool(new_list_etag_norm) and (new_list_etag_norm != old_list_etag_norm)
         if etag_changed and data_ok_or_skipped and bq_ok_or_skipped:
             try:
-                # Store normalized form (no W/, no quotes) for stable repo state.
                 atomic_write_text(
                     state_path,
                     json.dumps({"etag": str(new_list_etag_norm)}, ensure_ascii=False, separators=(",", ":")) + "\n",
@@ -729,15 +695,14 @@ def main() -> int:
                 publish_outputs()
                 return 1
 
-        # ------------------------------------------------------------
-        # Fase final
-        # ------------------------------------------------------------
         out_status = "completed"
         out_next = sde_next
         publish_outputs()
         return 0
 
     except Exception:
+        # FIX B: do NOT swallow the real error; print traceback for debugging in Actions log.
+        traceback.print_exc(file=sys.stderr)
         out_status = "failed"
         out_next = now_epoch() + 1800
         publish_outputs()
