@@ -605,3 +605,144 @@ def main() -> int:
                     break
 
                 if st == 403:
+                    rec.station = None
+                    rec.stationType = None
+                    rec.solarSystem = None
+                    rec.dock = None
+                    rec.market = True
+                    rec.etag = normalize_etag(hdr.get("ETag") or hdr.get("etag") or rec.etag) or rec.etag
+                    break
+
+                if st == 404:
+                    temp_records.pop(sid, None)
+                    break
+
+                if st >= 500:
+                    break
+
+                break
+
+            if fatal_unauth:
+                break
+
+        if fatal_unauth:
+            out_status = "failed"
+            out_next = now_epoch() + 300
+            publish_outputs()
+            return 1
+
+        # ------------------------------------------------------------
+        # Fase volcados (data file + BQ) — en una sola operación cada uno
+        # ------------------------------------------------------------
+        old_data_hash = canonical_hash_records(old_records)
+        new_data_hash = canonical_hash_records(temp_records)
+        data_changed = old_data_hash != new_data_hash
+
+        def rows_for_bq(records: Dict[int, StructureRecord]) -> List[Dict[str, Any]]:
+            rows: List[Dict[str, Any]] = []
+            for sid in sorted(records.keys()):
+                r = records[sid]
+                if r.station is None and r.solarSystem is None and r.dock is None:
+                    continue
+                if r.station is None or r.stationType is None or r.solarSystem is None or r.dock is None:
+                    continue
+                rows.append(
+                    {
+                        "stationID": r.stationID,
+                        "station": r.station,
+                        "stationType": r.stationType,
+                        "solarSystem": r.solarSystem,
+                        "dock": bool(r.dock),
+                        "market": bool(r.market),
+                    }
+                )
+            return rows
+
+        old_bq_rows = rows_for_bq(old_records)
+        new_bq_rows = rows_for_bq(temp_records)
+
+        def hash_rows(rows: List[Dict[str, Any]]) -> str:
+            h = hashlib.sha256()
+            for row in rows:
+                line = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                h.update(line.encode("utf-8"))
+                h.update(b"\n")
+            return h.hexdigest()
+
+        bq_changed = hash_rows(old_bq_rows) != hash_rows(new_bq_rows)
+        bq_should_rewrite = bq_changed and len(new_bq_rows) > 0
+
+        bq_ok_or_skipped = True
+        if bq_should_rewrite:
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", delete=False, prefix="eou_structures_", suffix=".jsonl"
+            ) as tmpf:
+                ndjson_path = tmpf.name
+                for row in new_bq_rows:
+                    tmpf.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+                    tmpf.write("\n")
+            try:
+                run_bq_rewrite(project_id, bq_dataset, bq_table, ndjson_path)
+            except Exception:
+                bq_ok_or_skipped = False
+            finally:
+                try:
+                    os.remove(ndjson_path)
+                except Exception:
+                    pass
+
+        if not bq_ok_or_skipped:
+            out_status = "failed"
+            out_next = now_epoch() + 1800
+            publish_outputs()
+            return 1
+
+        data_ok_or_skipped = True
+        if data_changed:
+            try:
+                write_structures_gz(data_path, temp_records)
+                repo_dirty = True
+            except Exception:
+                data_ok_or_skipped = False
+
+        if not data_ok_or_skipped:
+            out_status = "failed"
+            out_next = now_epoch() + 1800
+            publish_outputs()
+            return 1
+
+        # ------------------------------------------------------------
+        # Update states/structures.json (STRICT condition requested)
+        # ------------------------------------------------------------
+        etag_changed = bool(new_list_etag_norm) and (new_list_etag_norm != old_list_etag_norm)
+        if etag_changed and data_ok_or_skipped and bq_ok_or_skipped:
+            try:
+                # Store normalized form (no W/, no quotes) for stable repo state.
+                atomic_write_text(
+                    state_path,
+                    json.dumps({"etag": str(new_list_etag_norm)}, ensure_ascii=False, separators=(",", ":")) + "\n",
+                )
+                repo_dirty = True
+            except Exception:
+                out_status = "failed"
+                out_next = now_epoch() + 1800
+                publish_outputs()
+                return 1
+
+        # ------------------------------------------------------------
+        # Fase final
+        # ------------------------------------------------------------
+        out_status = "completed"
+        out_next = sde_next
+        publish_outputs()
+        return 0
+
+    except Exception:
+        out_status = "failed"
+        out_next = now_epoch() + 1800
+        publish_outputs()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
