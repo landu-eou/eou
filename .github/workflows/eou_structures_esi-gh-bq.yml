@@ -3,17 +3,11 @@ name: ESI Structures (ESI → GH → BQ)
 on:
   workflow_dispatch:
 
-# Permisos mínimos:
-# - actions:read   -> Guard por REST (listar runs)
-# - contents:write -> commit/push de data/esi/structures.jsonl.gz y states/structures.json
-# - id-token:write -> WIF/OIDC hacia Google
 permissions:
   actions: read
   contents: write
   id-token: write
 
-# Candado oficial: evita solapamiento real.
-# Los duplicados/colas “útiles” se cortan con el Guard.
 concurrency:
   group: eou_structures_esi-gh-bq
   cancel-in-progress: false
@@ -166,7 +160,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      # FIX A: setup-gcloud no soporta export_default_credentials (se eliminó)
+      # setup-gcloud@v3 + versión >= 390.0.0 para bq con WIF
       - name: Setup gcloud
         if: steps.guard.outputs.proceed == 'true'
         uses: google-github-actions/setup-gcloud@v3
@@ -175,8 +169,6 @@ jobs:
 
       # =====================================================================
       # 6) LOCK INICIAL
-      #    - status=in_progress
-      #    - next_run (col D) como VALOR numérico (serial Sheets), no string
       # =====================================================================
       - name: Initial lock (in_progress + next_run as value)
         if: steps.guard.outputs.proceed == 'true' && steps.gcp_auth.outcome == 'success'
@@ -208,7 +200,6 @@ jobs:
         id: structures
         if: steps.guard.outputs.proceed == 'true'
         env:
-          # Access tokens (NO imprimir)
           EOU_ACCESS_TOKENS_1: ${{ secrets.EOU_ACCESS_TOKENS_1 }}
           EOU_ACCESS_TOKENS_2: ${{ secrets.EOU_ACCESS_TOKENS_2 }}
         run: |
@@ -252,7 +243,7 @@ jobs:
           exit 1
 
       # =====================================================================
-      # 9) DECISIÓN FINAL PARA SHEETS (incluye override si git push falla)
+      # 9) DECISIÓN FINAL PARA SHEETS
       # =====================================================================
       - name: Compute final decision
         id: final
