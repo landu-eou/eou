@@ -1,19 +1,20 @@
 name: ESI Structures (ESI → GH → BQ)
 
 on:
+  # Disparo externo (cron) vía workflow_dispatch.
+  # No se usa schedule interno.
   workflow_dispatch:
 
-# Permisos mínimos:
-# - actions:read   -> Guard anti-cola por REST API (listar runs del workflow)
-# - contents:write -> Commit/push de data/esi/structures.jsonl.gz y states/structures.json
-# - id-token:write -> OIDC/WIF hacia Google (Sheets + BigQuery)
 permissions:
+  # Guard anti-cola consulta runs por REST API.
   actions: read
+  # Commit/push de data/esi/structures.jsonl.gz y states/structures.json.
   contents: write
+  # WIF/OIDC hacia Google.
   id-token: write
 
-# Candado oficial: evita solapamiento real (un run ejecutando trabajo).
-# La anti-cola se resuelve con el Guard del primer step (los runs extra salen sin hacer trabajo).
+# Candado oficial: evita que dos refresh simultáneos ejecuten trabajo.
+# cancel-in-progress:false => no cancela el run en curso.
 concurrency:
   group: eou_structures_esi-gh-bq
   cancel-in-progress: false
@@ -24,71 +25,112 @@ jobs:
     timeout-minutes: 90
 
     env:
-      # Identidad del workflow (para el Guard)
+      # Identidad del workflow para el guard (anti-cola).
       WORKFLOW_FILE: eou_structures_esi-gh-bq.yml
 
-      # Sheets: el workflow SOLO ESCRIBE (no lee).
+      # -----------------------
+      # Sheets (solo escritura)
+      # -----------------------
+      # Tab 'workflows':
+      # - Col B: status (string)
+      # - Col D: next_run (serial date number UTC)
+      # - Col I: last_modified (serial date number UTC, opcional)
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "8"
       LOCK_TIME: 300
 
+      # -----------------------
       # Google / BigQuery
+      # -----------------------
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       BQ_DATASET: eou
       BQ_TABLE: structures
 
+      # -----------------------
       # Paths en repo
+      # -----------------------
       STATE_ETAG_PATH: states/structures.json
       DATA_STRUCTURES_PATH: data/esi/structures.jsonl.gz
       SDE_SOLARSYSTEMS_PATH: data/sde/solarsystems.jsonl.gz
       SDE_TYPES_PATH: data/sde/types.jsonl.gz
 
+      # -----------------------
       # URLs
+      # -----------------------
       SDE_ZIP_URL: https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip
       ESI_STRUCTURES_LIST_URL: https://esi.evetech.net/universe/structures/?filter=market
       ESI_STRUCTURE_DETAIL_URL_TEMPLATE: https://esi.evetech.net/universe/structures/{structure_id}/
 
-      # Selección de token
+      # -----------------------
+      # Token selection + retries globales 401/420
+      # -----------------------
       PRIMARY_CHAR_ID: "2124070822"
       RETRY_BUDGET: "3"
 
-      # ESI sustainability (controles operativos; no cambian lógica, solo pacing)
+      # -----------------------
+      # ESI sustainability knobs (operacionales)
+      # -----------------------
+      # Default conservador: ~1 rps.
       ESI_MAX_RPM: "60"
+      # Si error-limit remain baja, se endurece el throttling.
       ESI_ERR_REMAIN_SOFT: "20"
       ESI_ERR_REMAIN_HARD: "5"
 
     steps:
-      # -------------------------------------------------------------------
-      # 1) GUARD anti-cola (oficial: REST Actions API).
-      #    - Si ya hay otro run in_progress => salir.
-      #    - Si hay runs queued y este no es el leader (min(run_number)) => salir.
-      #    Nota: Este step NO escribe Sheets, NO toca repo, NO hace ESI/BQ.
-      # -------------------------------------------------------------------
-      - name: Guard (anti-cola)
+      # ------------------------------------------------------------
+      # 1) GUARD (anti-cola)
+      #    - Si hay otro run in_progress: salir sin hacer trabajo.
+      #    - Si hay cola queued y este run NO es leader: salir sin hacer trabajo.
+      #    (Usa REST API oficial de GitHub Actions.)
+      # ------------------------------------------------------------
+      - name: Guard (anti-cola) — exit if another run is active / leader is different
         id: guard
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           THIS_RUN_NUMBER: ${{ github.run_number }}
-        run: bash -euo pipefail -c 'api_base="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs?per_page=20"; inprog_json="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${api_base}&status=in_progress")"; inprog_other="$(printf "%s" "$inprog_json" | jq --arg rid "$RUN_ID" "[.workflow_runs[]? | select(.id != (\$rid|tonumber))] | length")"; if [ "$inprog_other" -gt 0 ]; then echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0; fi; queued_json="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${api_base}&status=queued")"; leader="$(printf "%s" "$queued_json" | jq "[.workflow_runs[]? | .run_number] | (min // empty)")"; if [ -n "$leader" ] && [ "$leader" != "null" ] && [ "$leader" != "$THIS_RUN_NUMBER" ]; then echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0; fi; echo "proceed=true" >> "$GITHUB_OUTPUT"'
+        run: |
+          set -euo pipefail
+          api_base="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs?per_page=20"
+
+          inprog_json="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${api_base}&status=in_progress")"
+          inprog_other="$(echo "$inprog_json" | jq --arg rid "$RUN_ID" '[.workflow_runs[]? | select(.id != ($rid|tonumber))] | length')"
+
+          if [ "${inprog_other}" -gt 0 ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          queued_json="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${api_base}&status=queued")"
+          leader="$(echo "$queued_json" | jq '[.workflow_runs[]? | .run_number] | (min // empty)')"
+
+          if [ -n "${leader}" ] && [ "${leader}" != "null" ] && [ "${leader}" != "${THIS_RUN_NUMBER}" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
 
       - name: Exit if busy
         if: steps.guard.outputs.proceed != 'true'
-        run: bash -euo pipefail -c 'exit 0'
+        run: |
+          # Salida limpia: sin trabajo y sin ruido.
+          exit 0
 
-      # -------------------------------------------------------------------
-      # 2) CHECKOUT + AUTH + TOOLING
-      # -------------------------------------------------------------------
+      # ------------------------------------------------------------
+      # 2) Repo + toolchain
+      # ------------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # OIDC/WIF oficial (sin llaves). Se usa para:
-      # - Google Sheets API (solo escritura)
-      # - BigQuery (bq CLI) dentro del script
+      # ------------------------------------------------------------
+      # 3) Auth Google (WIF/OIDC)
+      #    - Se usa access_token para Sheets y cloud-platform para gcloud/bq.
+      # ------------------------------------------------------------
       - name: Auth to Google (WIF)
         id: gcp_auth
         uses: google-github-actions/auth@v2
@@ -104,60 +146,136 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v3
         with:
-          version: ">= 390.0.0"
+          version: '>= 390.0.0'
 
-      # -------------------------------------------------------------------
-      # 3) LOCK inicial en Sheets (solo escritura):
-      #    - status = in_progress
-      #    - next_run = now + LOCK_TIME (serial numérico Sheets, UTC)
-      # -------------------------------------------------------------------
-      - name: Lock (in_progress + next_run)
+      # ------------------------------------------------------------
+      # 4) LOCK INICIAL en Sheets (solo escritura)
+      #    status = in_progress
+      #    next_run = now + LOCK_TIME (serial date number UTC)
+      # ------------------------------------------------------------
+      - name: Lock (in_progress + next_run as value)
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
-        run: bash -euo pipefail -c 'row="${SHEETS_WORKFLOW_ROW}"; epoch="$(date -u -d "+${LOCK_TIME} seconds" +%s)"; serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"; payload="$(jq -cn --arg tab "$SHEET_TAB" --arg row "$row" --arg status "in_progress" --argjson serial "$serial" "{valueInputOption:\"RAW\",data:[{range:(\$tab+\"!B\"+\$row+\":B\"+\$row),values:[[ \$status ]]},{range:(\$tab+\"!D\"+\$row+\":D\"+\$row),values:[[ \$serial ]]}]}")"; curl -fsSL -X POST -H "Authorization: Bearer ${ACCESS_TOKEN}" -H "Content-Type: application/json" "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" -d "$payload"'
+        run: |
+          set -euo pipefail
+          row="${SHEETS_WORKFLOW_ROW}"
+          epoch="$(date -u -d "+${LOCK_TIME} seconds" +%s)"
+          serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
+          payload="$(jq -cn --arg tab "$SHEET_TAB" --arg row "$row" --arg status "in_progress" --argjson serial "$serial" '{
+            valueInputOption:"RAW",
+            data:[
+              {range:($tab+"!B"+$row+":B"+$row), values:[[ $status ]]},
+              {range:($tab+"!D"+$row+":D"+$row), values:[[ $serial ]]}
+            ]
+          }')"
+          curl -fsSL -X POST -H "Authorization: Bearer ${ACCESS_TOKEN}" -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" -d "$payload"
 
-      # -------------------------------------------------------------------
-      # 4) PIPELINE principal:
-      #    - Calcula SDE_NEXT_RUN (HEAD al ZIP, sin etag)
-      #    - Lista structures (ETag global del states/structures.json)
-      #    - Reconciliación en memoria del .jsonl.gz
-      #    - Enriquecimiento por estructura (authed, ETag por registro, retries globales 401/420)
-      #    - Volcados: data gz + BigQuery (solo si corresponde)
-      #    - Actualiza states/structures.json SOLO si corresponde (etag cambió + data/bq OK o SKIPPED por “no correspondía”)
-      #    Outputs -> $GITHUB_OUTPUT para el step Finalize.
-      # -------------------------------------------------------------------
+      # ------------------------------------------------------------
+      # 5) PIPELINE (ESI → GH files → BQ)
+      #    - Implementado en Python (inputs por env vars).
+      #    - El script publica outputs para Finalize Sheets:
+      #      status, next_run_epoch, write_last_modified, last_modified_epoch, repo_dirty
+      # ------------------------------------------------------------
       - name: Run structures pipeline
         id: structures
         env:
           EOU_ACCESS_TOKENS_1: ${{ secrets.EOU_ACCESS_TOKENS_1 }}
           EOU_ACCESS_TOKENS_2: ${{ secrets.EOU_ACCESS_TOKENS_2 }}
-        run: bash -euo pipefail -c 'python scripts/esi/eou_structures_run.py'
+        run: |
+          set -euo pipefail
+          python scripts/esi/eou_structures_run.py
 
-      # -------------------------------------------------------------------
-      # 5) Persistencia en repo (si el script marcó repo_dirty).
-      #    Importante: si hay cambios pero el push falla (carrera con otros workflows),
-      #    el step Finalize marcará failed + next_run=now+30min para no reportar "completed" sin persistir.
-      # -------------------------------------------------------------------
+      # ------------------------------------------------------------
+      # 6) Commit/push (solo si el script cambió repo)
+      #    - Si falla, Finalize marcará failed y next_run=+30m.
+      # ------------------------------------------------------------
       - name: Commit & push (only if repo_dirty)
         id: git_push
         if: steps.structures.outputs.repo_dirty == 'true'
         continue-on-error: true
-        run: bash -euo pipefail -c 'git config user.name "github-actions[bot]"; git config user.email "41898282+github-actions[bot]@users.noreply.github.com"; git add "${DATA_STRUCTURES_PATH}" "${STATE_ETAG_PATH}" || true; if git diff --cached --quiet; then echo "pushed=true" >> "$GITHUB_OUTPUT"; exit 0; fi; git commit -m "EOU: update structures" -m "Workflow: ${WORKFLOW_FILE}" -m "UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"; for i in 1 2 3; do git pull --rebase || true; if git push; then echo "pushed=true" >> "$GITHUB_OUTPUT"; exit 0; fi; sleep $((12 + RANDOM % 18)); done; echo "pushed=false" >> "$GITHUB_OUTPUT"; exit 1'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${DATA_STRUCTURES_PATH}" "${STATE_ETAG_PATH}" || true
+          if git diff --cached --quiet; then
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "EOU: update structures" -m "Workflow: ${WORKFLOW_FILE}" -m "UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          for i in 1 2 3; do
+            git pull --rebase || true
+            if git push; then
+              echo "pushed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep $((12 + RANDOM % 18))
+          done
+          echo "pushed=false" >> "$GITHUB_OUTPUT"
+          exit 1
 
-      # -------------------------------------------------------------------
-      # 6) FINALIZE Sheets (solo escritura):
-      #    - status (B)
-      #    - next_run (D) como serial numérico UTC
-      #    - last_modified (I) solo si el script indica write_last_modified=true y hay epoch.
-      #    Además: si faltan outputs o el push falló => failed + next_run=now+30min.
-      # -------------------------------------------------------------------
+      # ------------------------------------------------------------
+      # 7) FINALIZE en Sheets (solo escritura)
+      #    - Si el script no publicó outputs: failed + 30m.
+      #    - Si git_push falló: failed + 30m.
+      #    - last_modified solo se escribe si write_last_modified=true.
+      # ------------------------------------------------------------
       - name: Finalize Sheets (status + next_run [+ last_modified])
         if: always()
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
-        run: bash -euo pipefail -c 'row="${SHEETS_WORKFLOW_ROW}"; status="${{ steps.structures.outputs.status }}"; next_epoch="${{ steps.structures.outputs.next_run_epoch }}"; write_lm="${{ steps.structures.outputs.write_last_modified }}"; lm_epoch="${{ steps.structures.outputs.last_modified_epoch }}"; if [ -z "$status" ] || [ -z "$next_epoch" ]; then status="failed"; next_epoch="$(date -u -d "+30 minutes" +%s)"; write_lm="false"; lm_epoch=""; fi; if [ "${{ steps.git_push.outcome }}" = "failure" ]; then status="failed"; next_epoch="$(date -u -d "+30 minutes" +%s)"; fi; next_serial="$(awk "BEGIN { printf \"%.10f\", (${next_epoch}/86400) + 25569 }")"; if [ "$write_lm" = "true" ] && [ -n "$lm_epoch" ]; then lm_serial="$(awk "BEGIN { printf \"%.10f\", (${lm_epoch}/86400) + 25569 }")"; payload="$(jq -cn --arg tab "$SHEET_TAB" --arg row "$row" --arg status "$status" --argjson nexts "$next_serial" --argjson lms "$lm_serial" "{valueInputOption:\"RAW\",data:[{range:(\$tab+\"!B\"+\$row+\":B\"+\$row),values:[[ \$status ]]},{range:(\$tab+\"!D\"+\$row+\":D\"+\$row),values:[[ \$nexts ]]},{range:(\$tab+\"!I\"+\$row+\":I\"+\$row),values:[[ \$lms ]]}]}")"; else payload="$(jq -cn --arg tab "$SHEET_TAB" --arg row "$row" --arg status "$status" --argjson nexts "$next_serial" "{valueInputOption:\"RAW\",data:[{range:(\$tab+\"!B\"+\$row+\":B\"+\$row),values:[[ \$status ]]},{range:(\$tab+\"!D\"+\$row+\":D\"+\$row),values:[[ \$nexts ]]}]}")"; fi; curl -fsSL -X POST -H "Authorization: Bearer ${ACCESS_TOKEN}" -H "Content-Type: application/json" "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" -d "$payload"; if [ "$status" = "failed" ]; then exit 1; fi'
+        run: |
+          set -euo pipefail
+          row="${SHEETS_WORKFLOW_ROW}"
+
+          status="${{ steps.structures.outputs.status }}"
+          next_epoch="${{ steps.structures.outputs.next_run_epoch }}"
+          write_lm="${{ steps.structures.outputs.write_last_modified }}"
+          lm_epoch="${{ steps.structures.outputs.last_modified_epoch }}"
+
+          if [ -z "${status}" ] || [ -z "${next_epoch}" ]; then
+            status="failed"
+            next_epoch="$(date -u -d "+30 minutes" +%s)"
+            write_lm="false"
+            lm_epoch=""
+          fi
+
+          if [ "${{ steps.git_push.outcome }}" = "failure" ]; then
+            status="failed"
+            next_epoch="$(date -u -d "+30 minutes" +%s)"
+          fi
+
+          next_serial="$(awk "BEGIN { printf \"%.10f\", (${next_epoch}/86400) + 25569 }")"
+
+          if [ "${write_lm}" = "true" ] && [ -n "${lm_epoch}" ]; then
+            lm_serial="$(awk "BEGIN { printf \"%.10f\", (${lm_epoch}/86400) + 25569 }")"
+            payload="$(jq -cn --arg tab "$SHEET_TAB" --arg row "$row" --arg status "$status" --argjson nexts "$next_serial" --argjson lms "$lm_serial" '{
+              valueInputOption:"RAW",
+              data:[
+                {range:($tab+"!B"+$row+":B"+$row), values:[[ $status ]]},
+                {range:($tab+"!D"+$row+":D"+$row), values:[[ $nexts ]]},
+                {range:($tab+"!I"+$row+":I"+$row), values:[[ $lms ]]}
+              ]
+            }')"
+          else
+            payload="$(jq -cn --arg tab "$SHEET_TAB" --arg row "$row" --arg status "$status" --argjson nexts "$next_serial" '{
+              valueInputOption:"RAW",
+              data:[
+                {range:($tab+"!B"+$row+":B"+$row), values:[[ $status ]]},
+                {range:($tab+"!D"+$row+":D"+$row), values:[[ $nexts ]]}
+              ]
+            }')"
+          fi
+
+          curl -fsSL -X POST -H "Authorization: Bearer ${ACCESS_TOKEN}" -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" -d "$payload"
+
+          if [ "${status}" = "failed" ]; then
+            exit 1
+          fi
