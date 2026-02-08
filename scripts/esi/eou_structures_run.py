@@ -1,37 +1,4 @@
 #!/usr/bin/env python3
-"""
-EOU · ESI Structures (ESI → GH → BQ)
-
-Contrato (inputs por env vars):
-  - GCP_PROJECT_ID, BQ_DATASET, BQ_TABLE
-  - STATE_ETAG_PATH, DATA_STRUCTURES_PATH
-  - SDE_SOLARSYSTEMS_PATH, SDE_TYPES_PATH
-  - SDE_ZIP_URL
-  - ESI_STRUCTURES_LIST_URL
-  - ESI_STRUCTURE_DETAIL_URL_TEMPLATE
-  - PRIMARY_CHAR_ID
-  - RETRY_BUDGET
-  - EOU_ACCESS_TOKENS_1, EOU_ACCESS_TOKENS_2 (JSON {char_id: access_token})
-  - ESI_BASE_RPM, ESI_MIN_RPM, ESI_SOFT_REMAIN  (pacing operacional)
-
-Outputs (a $GITHUB_OUTPUT) — MISMO CONTRATO:
-  - status: completed|failed
-  - next_run_epoch: int
-  - write_last_modified: true|false
-  - last_modified_epoch: int|"" (optional)
-  - repo_dirty: true|false
-
-Observabilidad:
-  - Escribe un informe en $GITHUB_STEP_SUMMARY (sin artifacts).
-  - Mantiene estados internos explícitos por etapa:
-      SKIPPED_BY_DESIGN | DONE_OK | FAILED
-
-Sostenibilidad ESI:
-  - Rate limiter: máximo N req/min (BASE_RPM), mínimo MIN_RPM.
-  - Pausa dinámica por X-ESI-Error-Limit-Remain/Reset y degradación de RPM.
-  - Objetivo operacional: evitar 420 (error limiting). (ESI best practices) :contentReference[oaicite:6]{index=6}
-"""
-
 from __future__ import annotations
 
 import dataclasses
@@ -49,16 +16,15 @@ import traceback
 import urllib.error
 import urllib.request
 from collections import Counter
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 UTC = timezone.utc
 
-STAGE_SKIPPED = "SKIPPED_BY_DESIGN"
-STAGE_OK = "DONE_OK"
-STAGE_FAILED = "FAILED"
 
+# ---------------------------
+# Small utilities
+# ---------------------------
 
 def _env(name: str, default: Optional[str] = None) -> str:
     v = os.getenv(name)
@@ -69,16 +35,21 @@ def _env(name: str, default: Optional[str] = None) -> str:
     return v
 
 
+def now_epoch() -> int:
+    return int(datetime.now(tz=UTC).timestamp())
+
+
 def gha_set_output(key: str, value: str) -> None:
     path = os.getenv("GITHUB_OUTPUT")
     if not path:
+        print(f"::notice::{key}={value}")
         return
     value = value.replace("\n", " ").replace("\r", " ")
     with open(path, "a", encoding="utf-8") as f:
         f.write(f"{key}={value}\n")
 
 
-def write_step_summary(md: str) -> None:
+def summary_append(md: str) -> None:
     path = os.getenv("GITHUB_STEP_SUMMARY")
     if not path:
         return
@@ -86,10 +57,6 @@ def write_step_summary(md: str) -> None:
         f.write(md)
         if not md.endswith("\n"):
             f.write("\n")
-
-
-def now_epoch() -> int:
-    return int(datetime.now(tz=UTC).timestamp())
 
 
 def parse_http_date_to_epoch(http_date: Optional[str]) -> Optional[int]:
@@ -104,36 +71,22 @@ def parse_http_date_to_epoch(http_date: Optional[str]) -> Optional[int]:
         return None
 
 
-def sleep_with_jitter(seconds: float, jitter_max: float = 1.5) -> None:
+def sleep_ms(ms: int) -> None:
+    if ms <= 0:
+        return
+    time.sleep(ms / 1000.0)
+
+
+def sleep_with_jitter(seconds: int, jitter_max: int = 3) -> None:
     if seconds <= 0:
         return
-    j = random.SystemRandom().random() * jitter_max
-    time.sleep(seconds + j)
+    jitter = random.SystemRandom().randint(0, jitter_max)
+    time.sleep(seconds + jitter)
 
 
-def http_request(
-    method: str,
-    url: str,
-    headers: Optional[Dict[str, str]] = None,
-    timeout: int = 60,
-) -> Tuple[int, Dict[str, str], bytes]:
-    req = urllib.request.Request(url=url, method=method)
-    for k, v in (headers or {}).items():
-        req.add_header(k, v)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            status = int(getattr(resp, "status", resp.getcode()))
-            hdrs = {k.lower(): v for k, v in resp.headers.items()}  # case-insensitive
-            body = resp.read() if method != "HEAD" else b""
-            return status, hdrs, body
-    except urllib.error.HTTPError as e:
-        hdrs = {k.lower(): v for k, v in e.headers.items()} if e.headers else {}
-        body = e.read() if method != "HEAD" else b""
-        return int(e.code), hdrs, body
-    except Exception as e:
-        # Network/timeout -> treat as 503-like
-        return 503, {}, (str(e).encode("utf-8")[:200])
-
+# ---------------------------
+# ETag handling
+# ---------------------------
 
 def normalize_etag(etag: Optional[str]) -> Optional[str]:
     if not etag:
@@ -154,95 +107,142 @@ def etag_to_if_none_match(stored_etag: Optional[str]) -> Optional[str]:
     return f"\"{n}\""
 
 
-@dataclass
-class RateLimiter:
-    """Simple pacing: enforce minimum interval + dynamic slowdowns."""
-    base_rpm: int
-    min_rpm: int
-    soft_remain: int
+# ---------------------------
+# Rate limiter (operational change)
+# ---------------------------
 
-    current_rpm: int = 60
-    _min_interval: float = 1.0
-    _next_allowed: float = 0.0
-    min_remain_seen: Optional[int] = None
-    last_reset_seen: Optional[int] = None
-    degraded: bool = False
+@dataclasses.dataclass
+class EsiRatePolicy:
+    max_rpm: int
+    min_sleep_ms: int
+    burst: int
+    soft_err_remain: int
+    hard_err_remain: int
 
-    def __post_init__(self) -> None:
-        self.current_rpm = max(self.min_rpm, self.base_rpm)
-        self._min_interval = 60.0 / max(1, self.current_rpm)
-        self._next_allowed = time.monotonic()
 
-    def _set_rpm(self, rpm: int) -> None:
-        rpm = max(self.min_rpm, min(self.base_rpm, rpm))
-        if rpm != self.current_rpm:
-            self.current_rpm = rpm
-            self._min_interval = 60.0 / max(1, self.current_rpm)
+class TokenBucket:
+    """Simple token bucket limiter:
+    - capacity = burst
+    - refill rate = max_rpm / 60 tokens per second
+    """
+    def __init__(self, max_rpm: int, burst: int) -> None:
+        self.max_rpm = max(1, max_rpm)
+        self.capacity = max(1, burst)
+        self.tokens = float(self.capacity)
+        self.updated = time.monotonic()
 
-    def pre_request(self) -> None:
+    def _refill(self) -> None:
         now = time.monotonic()
-        if now < self._next_allowed:
-            time.sleep(self._next_allowed - now)
-        # reserve the next slot
-        self._next_allowed = time.monotonic() + self._min_interval
+        dt = now - self.updated
+        self.updated = now
+        refill_per_sec = self.max_rpm / 60.0
+        self.tokens = min(self.capacity, self.tokens + dt * refill_per_sec)
 
-    def observe_headers(self, headers: Dict[str, str], was_error: bool) -> None:
-        # ESI error limit headers (case-insensitive) :contentReference[oaicite:7]{index=7}
-        remain_s = headers.get("x-esi-error-limit-remain")
-        reset_s = headers.get("x-esi-error-limit-reset")
+    def acquire(self) -> None:
+        while True:
+            self._refill()
+            if self.tokens >= 1.0:
+                self.tokens -= 1.0
+                return
+            # Sleep a bit and retry
+            sleep_ms(250)
 
-        remain = None
-        reset = None
+
+class EsiLimiter:
+    def __init__(self, policy: EsiRatePolicy) -> None:
+        self.policy = policy
+        self.bucket = TokenBucket(policy.max_rpm, policy.burst)
+        self.min_err_remain_seen: Optional[int] = None
+        self.last_err_reset_seen: Optional[int] = None
+        self.dynamic_slowdown_ms: int = 0
+
+    def before_request(self) -> None:
+        self.bucket.acquire()
+        # Always apply a small base delay to avoid tight loops (smoother traffic)
+        sleep_ms(self.policy.min_sleep_ms + self.dynamic_slowdown_ms)
+
+    def observe_headers(self, headers_lc: Dict[str, str]) -> None:
+        remain_s = headers_lc.get("x-esi-error-limit-remain")
+        reset_s = headers_lc.get("x-esi-error-limit-reset")
         try:
-            if remain_s is not None:
-                remain = int(remain_s)
-                self.min_remain_seen = remain if self.min_remain_seen is None else min(self.min_remain_seen, remain)
-            if reset_s is not None:
-                reset = int(reset_s)
-                self.last_reset_seen = reset
+            remain = int(remain_s) if remain_s is not None else None
+            reset = int(reset_s) if reset_s is not None else None
         except Exception:
             remain = None
             reset = None
 
-        # Si bajamos de soft_remain, degradamos rpm hacia min_rpm gradualmente.
-        if remain is not None and remain < self.soft_remain:
-            self.degraded = True
-            # cuanto más bajo el remain, más frenamos
-            # e.g. remain 14 -> rpm 50; remain 5 -> rpm 25; remain 0 -> rpm 20
-            target = int(self.min_rpm + (self.base_rpm - self.min_rpm) * (max(0, remain) / max(1, self.soft_remain)))
-            self._set_rpm(max(self.min_rpm, target))
+        if remain is not None:
+            if self.min_err_remain_seen is None or remain < self.min_err_remain_seen:
+                self.min_err_remain_seen = remain
 
-        # Si la respuesta fue error (4xx/5xx), es señal de riesgo: baja un poco.
-        if was_error:
-            self.degraded = True
-            self._set_rpm(max(self.min_rpm, int(self.current_rpm * 0.85)))
+            # Soft slowdown to avoid approaching 420:
+            # if remain <= soft threshold, increase per-request delay.
+            if remain <= self.policy.soft_err_remain:
+                # ramp up delay as remain approaches hard threshold
+                # remain=soft -> +200ms, remain=hard -> +1200ms (approx)
+                span = max(1, self.policy.soft_err_remain - self.policy.hard_err_remain)
+                x = max(0, self.policy.soft_err_remain - remain)
+                extra = int(200 + (1000 * (x / span)))
+                self.dynamic_slowdown_ms = min(2000, extra)
 
-        # Si estamos peligrosamente cerca (remain < 5), pausa hasta reset.
-        if remain is not None and reset is not None and remain < 5 and reset > 0:
-            # backoff fuerte para evitar 420
-            sleep_with_jitter(reset + 1, jitter_max=3.0)
+            # Hard protection: if remain <= hard threshold, sleep until reset
+            if remain <= self.policy.hard_err_remain and reset and reset > 0:
+                self.last_err_reset_seen = reset
+                sleep_with_jitter(reset + 1, jitter_max=5)
+                # After reset, clear slowdown a bit
+                self.dynamic_slowdown_ms = min(self.dynamic_slowdown_ms, 300)
 
-    def observe_420(self) -> None:
-        # 420 => ya estamos limitados; backoff aún más fuerte
-        self.degraded = True
-        self._set_rpm(self.min_rpm)
+        if reset is not None:
+            self.last_err_reset_seen = reset
 
+
+# ---------------------------
+# HTTP
+# ---------------------------
+
+def http_request(
+    method: str,
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: int = 60,
+) -> Tuple[int, Dict[str, str], bytes]:
+    req = urllib.request.Request(url=url, method=method)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = int(getattr(resp, "status", resp.getcode()))
+            hdrs = {k.lower(): v for k, v in resp.headers.items()}  # case-insensitive safe
+            body = resp.read() if method != "HEAD" else b""
+            return status, hdrs, body
+    except urllib.error.HTTPError as e:
+        hdrs = {k.lower(): v for k, v in e.headers.items()} if e.headers else {}
+        body = e.read() if method != "HEAD" else b""
+        return int(e.code), hdrs, body
+    except Exception as e:
+        return 503, {}, (str(e).encode("utf-8")[:200])
+
+
+# ---------------------------
+# Data model
+# ---------------------------
 
 @dataclasses.dataclass
 class StructureRecord:
     stationID: int
     station: Optional[str] = None
-    stationType: Optional[str] = None
-    solarSystem: Optional[str] = None
+    stationType: Optional[str] = None      # resolved name (SDE type)
+    solarSystem: Optional[str] = None      # resolved name (SDE system)
     dock: Optional[bool] = None
     market: bool = True
     etag: Optional[str] = None
 
-    # internos (no se serializan)
-    _typeID: Optional[int] = None
-    _solarSystemID: Optional[int] = None
+    # internal (not exported)
+    _type_id: Optional[int] = None
+    _solar_system_id: Optional[int] = None
 
     def to_json_obj(self) -> Dict[str, Any]:
+        # Keep key order per spec (json.dumps preserves insertion order)
         return {
             "stationID": self.stationID,
             "station": self.station,
@@ -266,52 +266,9 @@ class StructureRecord:
         )
 
 
-def read_structures_gz(path: str) -> Dict[int, StructureRecord]:
-    records: Dict[int, StructureRecord] = {}
-    try:
-        with gzip.open(path, "rt", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                obj = json.loads(line)
-                rec = StructureRecord.from_json_obj(obj)
-                records[rec.stationID] = rec
-    except FileNotFoundError:
-        return {}
-    return records
-
-
-def canonical_hash_records(records: Dict[int, StructureRecord]) -> str:
-    h = hashlib.sha256()
-    for sid in sorted(records.keys()):
-        line = json.dumps(records[sid].to_json_obj(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        h.update(line.encode("utf-8"))
-        h.update(b"\n")
-    return h.hexdigest()
-
-
-def write_structures_gz(path: str, records: Dict[int, StructureRecord]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(prefix="tmp_structures_", suffix=".jsonl.gz", dir=os.path.dirname(path))
-    os.close(fd)
-    try:
-        with open(tmp_path, "wb") as raw:
-            with gzip.GzipFile(
-                fileobj=raw, mode="wb", compresslevel=9, mtime=0, filename="structures.jsonl"
-            ) as gz:
-                for sid in sorted(records.keys()):
-                    line = json.dumps(records[sid].to_json_obj(), separators=(",", ":"), ensure_ascii=False)
-                    gz.write(line.encode("utf-8"))
-                    gz.write(b"\n")
-        os.replace(tmp_path, path)
-    finally:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except Exception:
-            pass
-
+# ---------------------------
+# Repo IO
+# ---------------------------
 
 def load_json_file(path: str) -> Optional[Dict[str, Any]]:
     try:
@@ -337,6 +294,101 @@ def atomic_write_text(path: str, text: str) -> None:
         except Exception:
             pass
 
+
+def read_structures_gz(path: str) -> Dict[int, StructureRecord]:
+    out: Dict[int, StructureRecord] = {}
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                rec = StructureRecord.from_json_obj(obj)
+                out[rec.stationID] = rec
+    except FileNotFoundError:
+        return {}
+    return out
+
+
+def canonical_hash_records(records: Dict[int, StructureRecord]) -> str:
+    h = hashlib.sha256()
+    for sid in sorted(records.keys()):
+        line = json.dumps(records[sid].to_json_obj(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        h.update(line.encode("utf-8"))
+        h.update(b"\n")
+    return h.hexdigest()
+
+
+def write_structures_gz(path: str, records: Dict[int, StructureRecord]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix="tmp_structures_", suffix=".jsonl.gz", dir=os.path.dirname(path))
+    os.close(fd)
+    try:
+        with open(tmp_path, "wb") as raw:
+            with gzip.GzipFile(
+                fileobj=raw,
+                mode="wb",
+                compresslevel=9,
+                mtime=0,
+                filename="structures.jsonl",
+            ) as gz:
+                for sid in sorted(records.keys()):
+                    line = json.dumps(records[sid].to_json_obj(), separators=(",", ":"), ensure_ascii=False)
+                    gz.write(line.encode("utf-8"))
+                    gz.write(b"\n")
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+# ---------------------------
+# SDE on-demand loaders
+# ---------------------------
+
+def load_sde_solarsystems_subset(path: str, needed: Set[int]) -> Dict[int, str]:
+    if not needed:
+        return {}
+    out: Dict[int, str] = {}
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            sid = int(obj["solarSystemID"])
+            if sid in needed:
+                out[sid] = str(obj["solarSystem"])
+                if len(out) == len(needed):
+                    break
+    return out
+
+
+def load_sde_types_subset(path: str, needed: Set[int]) -> Dict[int, str]:
+    if not needed:
+        return {}
+    out: Dict[int, str] = {}
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            tid = int(obj["typeID"])
+            if tid in needed:
+                out[tid] = str(obj["type"])
+                if len(out) == len(needed):
+                    break
+    return out
+
+
+# ---------------------------
+# Token selection
+# ---------------------------
 
 def select_access_tokens(primary_char_id: str, json1: str, json2: str) -> List[Tuple[str, str]]:
     def parse(j: str) -> Dict[str, str]:
@@ -365,90 +417,98 @@ def select_access_tokens(primary_char_id: str, json1: str, json2: str) -> List[T
     return ordered
 
 
+# ---------------------------
+# SDE next run
+# ---------------------------
+
 def compute_sde_next_run_epoch(sde_url: str) -> Tuple[str, Optional[int]]:
+    # Request without ETag as requested
     status, headers, _ = http_request("HEAD", sde_url, headers={"User-Agent": "landu-eou/eou (EOU structures)"})
     if status == 200:
         lm = headers.get("last-modified")
         lm_epoch = parse_http_date_to_epoch(lm)
         if lm_epoch is None:
-            return "err_other", None
-        lm_dt = datetime.fromtimestamp(lm_epoch, tz=UTC)
+            return "FAILED", None
 
+        lm_dt = datetime.fromtimestamp(lm_epoch, tz=UTC)
         t = lm_dt.timetz().replace(tzinfo=UTC)
         now_dt = datetime.now(tz=UTC)
+
         candidate = now_dt.replace(hour=t.hour, minute=t.minute, second=t.second, microsecond=0)
         if candidate <= now_dt:
             candidate = candidate + timedelta(days=1)
 
         jitter = random.SystemRandom().randint(300, 900)
         next_dt = candidate + timedelta(seconds=1800 + jitter)
-        return "ok", int(next_dt.timestamp())
+        return "DONE_OK", int(next_dt.timestamp())
 
     if status == 420:
-        return "err_420", None
+        return "FAILED_420", None
     if status >= 500:
-        return "err_5xx", None
-    return "err_other", None
+        return "FAILED_5XX", None
+    return "FAILED", None
 
 
-def stream_sde_map_on_demand(gz_path: str, key_field: str, val_field: str, wanted: Iterable[int]) -> Dict[int, str]:
-    wanted_set = set(int(x) for x in wanted)
-    if not wanted_set:
-        return {}
-    out: Dict[int, str] = {}
-    with gzip.open(gz_path, "rt", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            k = int(obj[key_field])
-            if k in wanted_set:
-                out[k] = str(obj[val_field])
-                if len(out) == len(wanted_set):
-                    break
-    return out
-
+# ---------------------------
+# BigQuery rewrite (keep behaviour)
+# ---------------------------
 
 def run_bq_rewrite(project_id: str, dataset: str, table: str, ndjson_path: str) -> None:
     table_ref = f"{dataset}.{table}"
     schema = "stationID:INTEGER,station:STRING,stationType:STRING,solarSystem:STRING,dock:BOOLEAN,market:BOOLEAN"
 
-    subprocess.run(["bq", f"--project_id={project_id}", "rm", "-f", "-t", table_ref], check=False)
+    subprocess.run(
+        ["bq", f"--project_id={project_id}", "rm", "-f", "-t", table_ref],
+        check=False,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+    )
     subprocess.run(
         ["bq", f"--project_id={project_id}", "mk", "-t", f"--schema={schema}", "--clustering_fields=solarSystem", table_ref],
         check=True,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
     )
     subprocess.run(
         ["bq", f"--project_id={project_id}", "load", "--source_format=NEWLINE_DELIMITED_JSON", table_ref, ndjson_path],
         check=True,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
     )
 
 
+# ---------------------------
+# Main
+# ---------------------------
+
 def main() -> int:
-    # Outputs requeridos por workflow (mismo contrato)
+    # Workflow outputs contract (must exist)
     out_status = "failed"
     out_next = now_epoch() + 1800
     out_write_lm = "false"
     out_lm_epoch: Optional[int] = None
     repo_dirty = False
 
-    # Estados internos explícitos
-    stage_data = STAGE_SKIPPED
-    stage_bq = STAGE_SKIPPED
-    stage_state = STAGE_SKIPPED
+    # Explicit stage states requested
+    stage = {
+        "SDE_NEXT_RUN": "SKIPPED_BY_DESIGN",
+        "LIST": "SKIPPED_BY_DESIGN",
+        "ENRICH": "SKIPPED_BY_DESIGN",
+        "DATA_WRITE": "SKIPPED_BY_DESIGN",
+        "BQ_WRITE": "SKIPPED_BY_DESIGN",
+        "STATE_ETAG_WRITE": "SKIPPED_BY_DESIGN",
+    }
 
-    # Métricas
-    t0 = time.monotonic()
-    phase_time: Dict[str, float] = {}
-    list_status = None
-    list_etag_old = None
-    list_etag_new = None
-    list_count = 0
-    detail_codes = Counter()
-    retries_401 = 0
-    retries_420 = 0
-    token_rotations = 0
+    metrics = Counter()
+    timings: Dict[str, float] = {}
+
+    def t0(name: str) -> None:
+        timings[name] = time.monotonic()
+
+    def t1(name: str) -> float:
+        if name not in timings:
+            return 0.0
+        return max(0.0, time.monotonic() - timings[name])
 
     def publish_outputs() -> None:
         gha_set_output("status", out_status)
@@ -457,7 +517,57 @@ def main() -> int:
         gha_set_output("last_modified_epoch", "" if out_lm_epoch is None else str(out_lm_epoch))
         gha_set_output("repo_dirty", "true" if repo_dirty else "false")
 
+    def render_summary(extra_error: Optional[str] = None) -> None:
+        summary_append("# ESI Structures — Run Summary")
+        summary_append(f"- UTC: `{datetime.now(tz=UTC).isoformat(timespec='seconds')}`")
+        summary_append("")
+        summary_append("## Stage states")
+        for k in ["SDE_NEXT_RUN", "LIST", "ENRICH", "DATA_WRITE", "BQ_WRITE", "STATE_ETAG_WRITE"]:
+            summary_append(f"- **{k}**: `{stage[k]}`")
+
+        summary_append("")
+        summary_append("## Key outcomes")
+        summary_append(f"- Final status: **{out_status}**")
+        summary_append(f"- Next run (epoch): `{out_next}`")
+        if out_lm_epoch is not None:
+            summary_append(f"- Last-Modified (epoch): `{out_lm_epoch}`")
+
+        summary_append("")
+        summary_append("## Metrics")
+        # Common counters
+        keys = [
+            "list_http_200", "list_http_304", "list_http_420", "list_http_5xx",
+            "detail_http_200", "detail_http_304", "detail_http_401", "detail_http_403",
+            "detail_http_404", "detail_http_420", "detail_http_5xx",
+            "retry_used_401", "retry_used_420",
+            "structures_in_list", "structures_seen",
+            "data_changed", "bq_changed", "bq_rows_written",
+        ]
+        for k in keys:
+            if k in metrics:
+                summary_append(f"- `{k}`: {metrics[k]}")
+
+        summary_append("")
+        summary_append("## ESI sustainability signals")
+        min_rem = limiter.min_err_remain_seen
+        last_reset = limiter.last_err_reset_seen
+        summary_append(f"- Min `X-ESI-Error-Limit-Remain` seen: `{min_rem}`")
+        summary_append(f"- Last `X-ESI-Error-Limit-Reset` seen: `{last_reset}`")
+        summary_append(f"- Dynamic slowdown ms: `{limiter.dynamic_slowdown_ms}`")
+        summary_append(f"- Policy max_rpm: `{policy.max_rpm}`, burst: `{policy.burst}`, min_sleep_ms: `{policy.min_sleep_ms}`")
+
+        summary_append("")
+        summary_append("## Timings (seconds)")
+        for k in ["SDE", "LIST", "ENRICH", "SDE_LOOKUP", "DATA_WRITE", "BQ_WRITE"]:
+            summary_append(f"- `{k}`: {t1(k):.2f}")
+
+        if extra_error:
+            summary_append("")
+            summary_append("## Error")
+            summary_append(f"- `{extra_error}`")
+
     try:
+        # Read env
         project_id = _env("GCP_PROJECT_ID")
         bq_dataset = _env("BQ_DATASET")
         bq_table = _env("BQ_TABLE")
@@ -470,182 +580,206 @@ def main() -> int:
         sde_url = _env("SDE_ZIP_URL")
         list_url = _env("ESI_STRUCTURES_LIST_URL")
         detail_tpl = _env("ESI_STRUCTURE_DETAIL_URL_TEMPLATE")
+
         primary_char_id = _env("PRIMARY_CHAR_ID")
         retry_budget = int(_env("RETRY_BUDGET"))
 
-        base_rpm = int(_env("ESI_BASE_RPM", "60"))
-        min_rpm = int(_env("ESI_MIN_RPM", "20"))
-        soft_remain = int(_env("ESI_SOFT_REMAIN", "15"))
-        limiter = RateLimiter(base_rpm=base_rpm, min_rpm=min_rpm, soft_remain=soft_remain)
+        policy = EsiRatePolicy(
+            max_rpm=int(_env("ESI_MAX_RPM", "60")),
+            min_sleep_ms=int(_env("ESI_MIN_SLEEP_MS", "150")),
+            burst=int(_env("ESI_BURST", "5")),
+            soft_err_remain=int(_env("ESI_SOFT_ERR_REMAIN", "15")),
+            hard_err_remain=int(_env("ESI_HARD_ERR_REMAIN", "5")),
+        )
+        global limiter
+        limiter = EsiLimiter(policy)
 
         tokens = select_access_tokens(primary_char_id, _env("EOU_ACCESS_TOKENS_1"), _env("EOU_ACCESS_TOKENS_2"))
         if not tokens:
             out_status = "failed"
             out_next = now_epoch() + 1800
+            stage["SDE_NEXT_RUN"] = "FAILED"
             publish_outputs()
+            render_summary("No access tokens available.")
             return 1
 
         ua = "landu-eou/eou (EOU structures; GitHub Actions)"
 
-        # ---- Fase inicio: SDE_NEXT_RUN
-        p = time.monotonic()
+        # ---------------------------
+        # Phase: SDE_NEXT_RUN
+        # ---------------------------
+        t0("SDE")
         kind, sde_next = compute_sde_next_run_epoch(sde_url)
-        phase_time["SDE_HEAD"] = time.monotonic() - p
-
-        if kind != "ok" or sde_next is None:
+        if kind == "DONE_OK" and sde_next is not None:
+            stage["SDE_NEXT_RUN"] = "DONE_OK"
+        else:
+            stage["SDE_NEXT_RUN"] = "FAILED"
             out_status = "failed"
-            out_next = now_epoch() + (300 if kind == "err_420" else 1800)
+            if kind == "FAILED_420":
+                out_next = now_epoch() + 300
+            elif kind == "FAILED_5XX":
+                out_next = now_epoch() + 1800
+            else:
+                out_next = now_epoch() + 1800
             out_write_lm = "false"
             out_lm_epoch = None
             publish_outputs()
+            render_summary(f"SDE head request failed: {kind}")
             return 1
 
-        # ---- Listado de estructuras (ETag global)
-        p = time.monotonic()
+        # ---------------------------
+        # Phase: LIST structures (If-None-Match from states/structures.json)
+        # ---------------------------
+        t0("LIST")
         old_state = load_json_file(state_path) or {}
-        list_etag_old = normalize_etag(old_state.get("etag") if isinstance(old_state.get("etag"), str) else None)
+        old_etag_norm = normalize_etag(old_state.get("etag") if isinstance(old_state.get("etag"), str) else None)
 
-        headers = {"User-Agent": ua, "Accept": "application/json"}
-        inm = etag_to_if_none_match(list_etag_old)
+        list_headers = {"User-Agent": ua, "Accept": "application/json"}
+        inm = etag_to_if_none_match(old_state.get("etag") if isinstance(old_state.get("etag"), str) else None)
         if inm:
-            headers["If-None-Match"] = inm
+            list_headers["If-None-Match"] = inm
 
-        limiter.pre_request()
-        st, hdr, body = http_request("GET", list_url, headers=headers, timeout=120)
-        list_status = st
-
-        is_error = st >= 400
-        limiter.observe_headers(hdr, was_error=is_error)
+        limiter.before_request()
+        st, hdr, body = http_request("GET", list_url, headers=list_headers, timeout=120)
+        limiter.observe_headers(hdr)
 
         lm = hdr.get("last-modified")
         out_lm_epoch = parse_http_date_to_epoch(lm)
         out_write_lm = "true" if out_lm_epoch is not None else "false"
 
         if st == 304:
+            stage["LIST"] = "DONE_OK"
+            metrics["list_http_304"] += 1
             out_status = "completed"
-            out_next = sde_next
-            phase_time["LIST"] = time.monotonic() - p
+            out_next = int(sde_next)
             publish_outputs()
-            _write_summary(phase_time, limiter, list_status, list_count, detail_codes, retries_401, retries_420,
-                           token_rotations, stage_data, stage_bq, stage_state, list_etag_old, list_etag_new)
+            render_summary()
             return 0
 
-        if st == 420:
-            limiter.observe_420()
+        if st == 200:
+            metrics["list_http_200"] += 1
+        elif st == 420:
+            metrics["list_http_420"] += 1
+            stage["LIST"] = "FAILED"
             out_status = "failed"
             out_next = now_epoch() + 300
-            phase_time["LIST"] = time.monotonic() - p
             publish_outputs()
-            _write_summary(phase_time, limiter, list_status, list_count, detail_codes, retries_401, retries_420,
-                           token_rotations, stage_data, stage_bq, stage_state, list_etag_old, list_etag_new)
+            render_summary("List returned 420.")
             return 1
-
-        if st >= 500:
+        elif st >= 500:
+            metrics["list_http_5xx"] += 1
+            stage["LIST"] = "FAILED"
             out_status = "failed"
             out_next = now_epoch() + 1800
-            phase_time["LIST"] = time.monotonic() - p
             publish_outputs()
-            _write_summary(phase_time, limiter, list_status, list_count, detail_codes, retries_401, retries_420,
-                           token_rotations, stage_data, stage_bq, stage_state, list_etag_old, list_etag_new)
+            render_summary("List returned 5xx.")
             return 1
-
-        if st != 200:
+        else:
+            stage["LIST"] = "FAILED"
             out_status = "failed"
             out_next = now_epoch() + 1800
-            phase_time["LIST"] = time.monotonic() - p
             publish_outputs()
-            _write_summary(phase_time, limiter, list_status, list_count, detail_codes, retries_401, retries_420,
-                           token_rotations, stage_data, stage_bq, stage_state, list_etag_old, list_etag_new)
+            render_summary(f"List returned unexpected status {st}.")
             return 1
 
-        list_etag_new = normalize_etag(hdr.get("etag"))
+        stage["LIST"] = "DONE_OK"
+        new_list_etag_norm = normalize_etag(hdr.get("etag"))
         try:
             structure_list: List[int] = json.loads(body.decode("utf-8"))
         except Exception:
+            stage["LIST"] = "FAILED"
             out_status = "failed"
             out_next = now_epoch() + 1800
-            phase_time["LIST"] = time.monotonic() - p
             publish_outputs()
-            _write_summary(phase_time, limiter, list_status, list_count, detail_codes, retries_401, retries_420,
-                           token_rotations, stage_data, stage_bq, stage_state, list_etag_old, list_etag_new)
+            render_summary("Failed to parse list JSON.")
             return 1
 
-        list_count = len(structure_list)
-        phase_time["LIST"] = time.monotonic() - p
+        metrics["structures_in_list"] = len(structure_list)
 
-        # ---- Reconciliación en memoria
-        p = time.monotonic()
+        # ---------------------------
+        # Phase: reconcile in-memory
+        # ---------------------------
         old_records = read_structures_gz(data_path)
         list_set = set(int(x) for x in structure_list)
 
         temp_records: Dict[int, StructureRecord] = {sid: rec for sid, rec in old_records.items() if sid in list_set}
         for sid in list_set:
             if sid not in temp_records:
-                temp_records[sid] = StructureRecord(stationID=sid, market=True)
+                temp_records[sid] = StructureRecord(
+                    stationID=sid, station=None, stationType=None, solarSystem=None, dock=None, market=True, etag=None
+                )
 
-        phase_time["RECONCILE"] = time.monotonic() - p
+        # ---------------------------
+        # Phase: ENRICH details with global retry budget 401/420
+        # ---------------------------
+        t0("ENRICH")
+        stage["ENRICH"] = "DONE_OK"
 
-        # ---- Enriquecimiento (con pacing)
-        p = time.monotonic()
         token_idx = 0
 
         def current_token() -> str:
             nonlocal token_idx
-            if token_idx >= len(tokens):
-                token_idx = len(tokens) - 1
+            token_idx = min(token_idx, len(tokens) - 1)
             return tokens[token_idx][1]
 
         def rotate_token() -> None:
-            nonlocal token_idx, token_rotations
+            nonlocal token_idx
             if token_idx + 1 < len(tokens):
                 token_idx += 1
-                token_rotations += 1
 
+        needed_type_ids: Set[int] = set()
+        needed_system_ids: Set[int] = set()
         fatal = False
 
-        for sid in sorted(temp_records.keys()):
+        for sid in sorted(list(temp_records.keys())):
+            metrics["structures_seen"] += 1
             rec = temp_records.get(sid)
             if rec is None:
                 continue
 
             url = detail_tpl.format(structure_id=sid)
-            h = {"User-Agent": ua, "Accept": "application/json", "Authorization": f"Bearer {current_token()}"}
-            inm2 = etag_to_if_none_match(rec.etag)
-            if inm2:
-                h["If-None-Match"] = inm2
+            req_headers = {
+                "User-Agent": ua,
+                "Accept": "application/json",
+                "Authorization": f"Bearer {current_token()}",
+            }
+            rec_inm = etag_to_if_none_match(rec.etag)
+            if rec_inm:
+                req_headers["If-None-Match"] = rec_inm
 
             while True:
-                limiter.pre_request()
-                st2, hdr2, b2 = http_request("GET", url, headers=h, timeout=60)
-
-                detail_codes[st2] += 1
-                limiter.observe_headers(hdr2, was_error=(st2 >= 400))
+                limiter.before_request()
+                st2, hdr2, b2 = http_request("GET", url, headers=req_headers, timeout=60)
+                limiter.observe_headers(hdr2)
 
                 if st2 == 401:
+                    metrics["detail_http_401"] += 1
                     if retry_budget <= 0:
                         fatal = True
                         break
                     retry_budget -= 1
-                    retries_401 += 1
+                    metrics["retry_used_401"] += 1
                     rotate_token()
-                    h["Authorization"] = f"Bearer {current_token()}"
-                    sleep_with_jitter(30, jitter_max=3.0)
+                    req_headers["Authorization"] = f"Bearer {current_token()}"
+                    sleep_with_jitter(30, jitter_max=5)
                     continue
 
                 if st2 == 420:
-                    limiter.observe_420()
+                    metrics["detail_http_420"] += 1
                     if retry_budget <= 0:
                         fatal = True
                         break
                     retry_budget -= 1
-                    retries_420 += 1
-                    sleep_with_jitter(45, jitter_max=5.0)  # más conservador
+                    metrics["retry_used_420"] += 1
+                    sleep_with_jitter(30, jitter_max=5)
                     continue
 
                 if st2 == 304:
+                    metrics["detail_http_304"] += 1
                     break
 
                 if st2 == 200:
+                    metrics["detail_http_200"] += 1
                     try:
                         obj = json.loads(b2.decode("utf-8"))
                     except Exception:
@@ -655,74 +789,83 @@ def main() -> int:
                     rec.market = True
                     rec.dock = True
 
-                    # Guardamos IDs; resolveremos nombres on-demand después
                     ssid = obj.get("solar_system_id")
                     tid = obj.get("type_id")
-                    rec._solarSystemID = int(ssid) if ssid is not None else rec._solarSystemID
-                    rec._typeID = int(tid) if tid is not None else rec._typeID
+                    if ssid is not None:
+                        rec._solar_system_id = int(ssid)
+                        needed_system_ids.add(int(ssid))
+                    if tid is not None:
+                        rec._type_id = int(tid)
+                        needed_type_ids.add(int(tid))
 
                     rec.etag = normalize_etag(hdr2.get("etag") or rec.etag) or rec.etag
                     break
 
                 if st2 == 403:
+                    metrics["detail_http_403"] += 1
                     rec.station = None
                     rec.stationType = None
                     rec.solarSystem = None
                     rec.dock = None
                     rec.market = True
+                    rec._type_id = None
+                    rec._solar_system_id = None
                     rec.etag = normalize_etag(hdr2.get("etag") or rec.etag) or rec.etag
                     break
 
                 if st2 == 404:
+                    metrics["detail_http_404"] += 1
                     temp_records.pop(sid, None)
                     break
 
-                # 5xx => mantener registro actual para este run
+                if st2 >= 500:
+                    metrics["detail_http_5xx"] += 1
+                    # keep record as-is for this run
+                    break
+
+                # other statuses: keep record
                 break
 
             if fatal:
+                stage["ENRICH"] = "FAILED"
                 break
-
-        phase_time["DETAILS"] = time.monotonic() - p
 
         if fatal:
             out_status = "failed"
             out_next = now_epoch() + 300
             publish_outputs()
-            _write_summary(phase_time, limiter, list_status, list_count, detail_codes, retries_401, retries_420,
-                           token_rotations, stage_data, stage_bq, stage_state, list_etag_old, list_etag_new)
+            render_summary("Fatal: retry budget exhausted due to 401/420.")
             return 1
 
-        # ---- Resolver nombres on-demand (SDE)
-        p = time.monotonic()
-        needed_ss = {r._solarSystemID for r in temp_records.values() if r._solarSystemID is not None and not r.solarSystem}
-        needed_ty = {r._typeID for r in temp_records.values() if r._typeID is not None and not r.stationType}
+        # ---------------------------
+        # Phase: SDE lookups on-demand (types + solarsystems)
+        # ---------------------------
+        t0("SDE_LOOKUP")
+        sol_map = load_sde_solarsystems_subset(sde_solarsystems_path, needed_system_ids)
+        type_map = load_sde_types_subset(sde_types_path, needed_type_ids)
 
-        ss_map = stream_sde_map_on_demand(sde_solarsystems_path, "solarSystemID", "solarSystem", needed_ss)
-        ty_map = stream_sde_map_on_demand(sde_types_path, "typeID", "type", needed_ty)
+        # Fill resolved names (only for records that have IDs)
+        for rec in temp_records.values():
+            if rec._solar_system_id is not None and rec.solarSystem is None:
+                rec.solarSystem = sol_map.get(rec._solar_system_id)
+            if rec._type_id is not None and rec.stationType is None:
+                rec.stationType = type_map.get(rec._type_id)
 
-        for r in temp_records.values():
-            if r._solarSystemID is not None and not r.solarSystem:
-                r.solarSystem = ss_map.get(r._solarSystemID)
-            if r._typeID is not None and not r.stationType:
-                r.stationType = ty_map.get(r._typeID)
-
-        phase_time["SDE_RESOLVE"] = time.monotonic() - p
-
-        # ---- Volcados: data + BQ
-        p = time.monotonic()
+        # ---------------------------
+        # Phase: DATA + BQ decisions (same behaviour)
+        # ---------------------------
         old_data_hash = canonical_hash_records(old_records)
         new_data_hash = canonical_hash_records(temp_records)
         data_changed = old_data_hash != new_data_hash
+        metrics["data_changed"] = 1 if data_changed else 0
 
         def rows_for_bq(records: Dict[int, StructureRecord]) -> List[Dict[str, Any]]:
             rows: List[Dict[str, Any]] = []
             for sid in sorted(records.keys()):
                 r = records[sid]
-                # regla: solo volcamos si hay info real
+                # keep rule: only export if some fields not null and the "complete" rule holds
                 if r.station is None and r.solarSystem is None and r.dock is None:
                     continue
-                # tabla exige not null en esas columnas
                 if r.station is None or r.stationType is None or r.solarSystem is None or r.dock is None:
                     continue
                 rows.append(
@@ -737,170 +880,109 @@ def main() -> int:
                 )
             return rows
 
-        old_bq = rows_for_bq(old_records)
-        new_bq = rows_for_bq(temp_records)
+        old_bq_rows = rows_for_bq(old_records)
+        new_bq_rows = rows_for_bq(temp_records)
 
         def hash_rows(rows: List[Dict[str, Any]]) -> str:
             h = hashlib.sha256()
             for row in rows:
-                h.update(json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+                line = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                h.update(line.encode("utf-8"))
                 h.update(b"\n")
             return h.hexdigest()
 
-        bq_changed = hash_rows(old_bq) != hash_rows(new_bq)
-        bq_should_rewrite = bq_changed and len(new_bq) > 0
+        bq_changed = hash_rows(old_bq_rows) != hash_rows(new_bq_rows)
+        metrics["bq_changed"] = 1 if bq_changed else 0
 
-        # BQ
+        bq_should_rewrite = bq_changed and len(new_bq_rows) > 0
+
+        # BQ write
+        t0("BQ_WRITE")
         if bq_should_rewrite:
-            stage_bq = STAGE_FAILED
+            stage["BQ_WRITE"] = "DONE_OK"
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, prefix="eou_structures_", suffix=".jsonl") as tmpf:
                 ndjson_path = tmpf.name
-                for row in new_bq:
+                for row in new_bq_rows:
                     tmpf.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
                     tmpf.write("\n")
             try:
                 run_bq_rewrite(project_id, bq_dataset, bq_table, ndjson_path)
-                stage_bq = STAGE_OK
+                metrics["bq_rows_written"] = len(new_bq_rows)
+            except Exception:
+                stage["BQ_WRITE"] = "FAILED"
             finally:
                 try:
                     os.remove(ndjson_path)
                 except Exception:
                     pass
         else:
-            stage_bq = STAGE_SKIPPED
+            stage["BQ_WRITE"] = "SKIPPED_BY_DESIGN"
 
-        if stage_bq == STAGE_FAILED:
+        if stage["BQ_WRITE"] == "FAILED":
             out_status = "failed"
             out_next = now_epoch() + 1800
             publish_outputs()
-            phase_time["DUMPS"] = time.monotonic() - p
-            _write_summary(phase_time, limiter, list_status, list_count, detail_codes, retries_401, retries_420,
-                           token_rotations, stage_data, stage_bq, stage_state, list_etag_old, list_etag_new)
+            render_summary("BigQuery rewrite failed.")
             return 1
 
-        # DATA
+        # Data write
+        t0("DATA_WRITE")
         if data_changed:
-            stage_data = STAGE_FAILED
             try:
                 write_structures_gz(data_path, temp_records)
                 repo_dirty = True
-                stage_data = STAGE_OK
+                stage["DATA_WRITE"] = "DONE_OK"
             except Exception:
-                stage_data = STAGE_FAILED
+                stage["DATA_WRITE"] = "FAILED"
         else:
-            stage_data = STAGE_SKIPPED
+            stage["DATA_WRITE"] = "SKIPPED_BY_DESIGN"
 
-        if stage_data == STAGE_FAILED:
+        if stage["DATA_WRITE"] == "FAILED":
             out_status = "failed"
             out_next = now_epoch() + 1800
             publish_outputs()
-            phase_time["DUMPS"] = time.monotonic() - p
-            _write_summary(phase_time, limiter, list_status, list_count, detail_codes, retries_401, retries_420,
-                           token_rotations, stage_data, stage_bq, stage_state, list_etag_old, list_etag_new)
+            render_summary("Data file write failed.")
             return 1
 
-        # ---- Update states/structures.json (STRICT):
-        # etag cambió AND (data no FAILED) AND (bq no FAILED)
-        etag_changed = bool(list_etag_new) and (list_etag_new != list_etag_old)
-        if etag_changed and stage_data != STAGE_FAILED and stage_bq != STAGE_FAILED:
-            stage_state = STAGE_FAILED
+        # Update state etag STRICT:
+        # - etag changed
+        # - DATA_WRITE != FAILED (DONE_OK or SKIPPED_BY_DESIGN)
+        # - BQ_WRITE != FAILED (DONE_OK or SKIPPED_BY_DESIGN)
+        etag_changed = bool(new_list_etag_norm) and (new_list_etag_norm != old_etag_norm)
+        if etag_changed and stage["DATA_WRITE"] != "FAILED" and stage["BQ_WRITE"] != "FAILED":
             try:
-                atomic_write_text(state_path, json.dumps({"etag": str(list_etag_new)}, ensure_ascii=False, separators=(",", ":")) + "\n")
+                atomic_write_text(state_path, json.dumps({"etag": str(new_list_etag_norm)}, separators=(",", ":")) + "\n")
                 repo_dirty = True
-                stage_state = STAGE_OK
+                stage["STATE_ETAG_WRITE"] = "DONE_OK"
             except Exception:
-                stage_state = STAGE_FAILED
+                stage["STATE_ETAG_WRITE"] = "FAILED"
         else:
-            stage_state = STAGE_SKIPPED
+            stage["STATE_ETAG_WRITE"] = "SKIPPED_BY_DESIGN"
 
-        if stage_state == STAGE_FAILED:
+        if stage["STATE_ETAG_WRITE"] == "FAILED":
             out_status = "failed"
             out_next = now_epoch() + 1800
             publish_outputs()
-            phase_time["DUMPS"] = time.monotonic() - p
-            _write_summary(phase_time, limiter, list_status, list_count, detail_codes, retries_401, retries_420,
-                           token_rotations, stage_data, stage_bq, stage_state, list_etag_old, list_etag_new)
+            render_summary("Failed to update states/structures.json.")
             return 1
 
-        phase_time["DUMPS"] = time.monotonic() - p
-
-        # ---- Final OK
+        # Final
         out_status = "completed"
-        out_next = sde_next
+        out_next = int(sde_next)
         publish_outputs()
-        _write_summary(phase_time, limiter, list_status, list_count, detail_codes, retries_401, retries_420,
-                       token_rotations, stage_data, stage_bq, stage_state, list_etag_old, list_etag_new)
+        render_summary()
         return 0
 
-    except Exception:
+    except Exception as e:
         traceback.print_exc()
         out_status = "failed"
         out_next = now_epoch() + 1800
         publish_outputs()
-        # best-effort summary
         try:
-            _write_summary(phase_time, None, list_status, list_count, detail_codes, retries_401, retries_420,
-                           token_rotations, stage_data, stage_bq, stage_state, list_etag_old, list_etag_new)
+            render_summary(f"Unhandled exception: {type(e).__name__}")
         except Exception:
             pass
         return 1
-
-
-def _write_summary(
-    phase_time: Dict[str, float],
-    limiter: Optional[RateLimiter],
-    list_status: Optional[int],
-    list_count: int,
-    detail_codes: Counter,
-    retries_401: int,
-    retries_420: int,
-    token_rotations: int,
-    stage_data: str,
-    stage_bq: str,
-    stage_state: str,
-    etag_old: Optional[str],
-    etag_new: Optional[str],
-) -> None:
-    # Job summaries oficiales: escribir markdown a $GITHUB_STEP_SUMMARY :contentReference[oaicite:8]{index=8}
-    lines: List[str] = []
-    lines.append("## ESI Structures · Run Summary\n")
-
-    lines.append("### Outcome\n")
-    lines.append(f"- List status: `{list_status}`\n")
-    lines.append(f"- Data stage: `{stage_data}`\n")
-    lines.append(f"- BQ stage: `{stage_bq}`\n")
-    lines.append(f"- State(etag) stage: `{stage_state}`\n")
-
-    lines.append("\n### ETag (list)\n")
-    lines.append(f"- Old: `{etag_old}`\n")
-    lines.append(f"- New: `{etag_new}`\n")
-
-    lines.append("\n### Counts\n")
-    lines.append(f"- Structures in list: **{list_count}**\n")
-    if detail_codes:
-        top = sorted(detail_codes.items(), key=lambda kv: (-kv[1], kv[0]))
-        lines.append("- Detail HTTP codes:\n")
-        for code, n in top:
-            lines.append(f"  - `{code}`: {n}\n")
-    lines.append(f"- Retries used: 401={retries_401}, 420={retries_420}\n")
-    lines.append(f"- Token rotations: {token_rotations}\n")
-
-    lines.append("\n### Pacing (operational)\n")
-    if limiter is None:
-        lines.append("- (no limiter info)\n")
-    else:
-        lines.append(f"- Base RPM: {limiter.base_rpm}, Min RPM: {limiter.min_rpm}, Soft remain: {limiter.soft_remain}\n")
-        lines.append(f"- Current RPM: **{limiter.current_rpm}** (degraded={limiter.degraded})\n")
-        lines.append(f"- Min remain seen: {limiter.min_remain_seen}\n")
-        lines.append(f"- Last reset seen (s): {limiter.last_reset_seen}\n")
-        lines.append("\n> Policy: enforce min interval = 60/RPM; if `X-ESI-Error-Limit-Remain` drops, slow down and/or sleep until reset to avoid 420.\n")
-
-    lines.append("\n### Timings (s)\n")
-    for k in ["SDE_HEAD", "LIST", "RECONCILE", "DETAILS", "SDE_RESOLVE", "DUMPS"]:
-        if k in phase_time:
-            lines.append(f"- {k}: {phase_time[k]:.2f}\n")
-
-    write_step_summary("".join(lines))
 
 
 if __name__ == "__main__":
