@@ -13,7 +13,7 @@ permissions:
   id-token: write
 
 # Candado oficial: evita solapamiento real.
-# Los duplicados/colas "útiles" se cortan con el Guard (abajo).
+# Los duplicados/colas “útiles” se cortan con el Guard.
 concurrency:
   group: eou_structures_esi-gh-bq
   cancel-in-progress: false
@@ -21,48 +21,48 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 90
 
     env:
       # =====================================================================
-      # 0) CONFIGURACIÓN (CAMBIAS ESTO POR WORKFLOW)
+      # 0) CONFIG
       # =====================================================================
-
-      # --- Identidad del workflow ---
       WORKFLOW_FILE: eou_structures_esi-gh-bq.yml
 
-      # --- Google Sheets (estado compartido) ---
+      # Sheets (tabla de control)
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "8"
 
-      # --- Locking / planificación ---
+      # Locking
       LOCK_TIME: 300 # segundos
 
-      # --- BigQuery (Sandbox) ---
+      # Google / BigQuery
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       BQ_DATASET: eou
       BQ_TABLE: structures
 
-      # --- URLs ---
-      SDE_URL: https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip
-      STRUCTURES_URL: https://esi.evetech.net/universe/structures/?filter=market
+      # Paths (repo)
+      STATE_ETAG_PATH: states/structures.json
+      DATA_STRUCTURES_PATH: data/esi/structures.jsonl.gz
+      SDE_SOLARSYSTEMS_PATH: data/sde/solarsystems.jsonl.gz
+      SDE_TYPES_PATH: data/sde/types.jsonl.gz
 
-      # --- Paths (repo) ---
-      STATE_FILE: states/structures.json
-      DATA_FILE: data/esi/structures.jsonl.gz
-      TYPES_FILE: data/sde/types.jsonl.gz
-      SOLARSYSTEMS_FILE: data/sde/solarsystems.jsonl.gz
-      SCRIPT_FILE: scripts/esi/eou_structures_run.py
+      # URLs
+      SDE_ZIP_URL: https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip
+      ESI_STRUCTURES_LIST_URL: https://esi.evetech.net/universe/structures/?filter=market
+      ESI_STRUCTURE_DETAIL_URL_TEMPLATE: https://esi.evetech.net/universe/structures/{structure_id}/
+
+      # Auth token selection
+      PRIMARY_CHAR_ID: "2124070822"
+
+      # Retries globales para 401/420
+      RETRY_BUDGET: "3"
 
     steps:
       # =====================================================================
-      # 1) GUARD (COMÚN) — decide si este run debe trabajar o salir (busy/cola)
-      #    Reglas:
-      #    - Si al crearse este run existía otro run anterior aún vivo => este run estaba en cola => salir sin trabajo.
-      #    - Si existe un líder (min run_number en queued/in_progress) distinto a este => salir sin trabajo.
+      # 1) GUARD — decide si este run debe trabajar o salir (busy)
       # =====================================================================
-
       - name: Guard - compute decision
         id: guard_calc
         env:
@@ -125,21 +125,21 @@ jobs:
         run: |
           echo "proceed=$(cat /tmp/proceed)" >> "$GITHUB_OUTPUT"
 
-      - name: Exit if skipped (busy/queued)
+      # =====================================================================
+      # 2) BUSY EXIT — si no procede, salir sin tocar nada
+      # =====================================================================
+      - name: Exit if skipped (busy)
         if: steps.guard.outputs.proceed != 'true'
         run: |
-          echo "Skipped due to overlapping/queued run"
+          echo "Skipped due to overlapping run"
           exit 0
 
       # =====================================================================
-      # 2) CHECKOUT + AUTH GOOGLE (WIF/OIDC) — sin claves
+      # 3) AUTH GOOGLE — WIF/OIDC (sin claves)
       # =====================================================================
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Auth to Google (WIF)
         id: gcp_auth
+        if: steps.guard.outputs.proceed == 'true'
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -150,20 +150,35 @@ jobs:
             https://www.googleapis.com/auth/cloud-platform
 
       # =====================================================================
-      # 3) LOCK INICIAL (Sheets)
+      # 4) CHECKOUT + TOOLING
+      # =====================================================================
+      - name: Checkout
+        if: steps.guard.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        if: steps.guard.outputs.proceed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup gcloud
+        if: steps.guard.outputs.proceed == 'true'
+        uses: google-github-actions/setup-gcloud@v2
+
+      # =====================================================================
+      # 5) LOCK INICIAL
       #    - status=in_progress
       #    - next_run (col D) como VALOR numérico (serial Sheets), no string
       # =====================================================================
-
       - name: Initial lock (in_progress + next_run as value)
-        id: lock
+        if: steps.guard.outputs.proceed == 'true' && steps.gcp_auth.outcome == 'success'
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
 
-          # serial = epoch_seconds/86400 + 25569  (origen 1899-12-30)
           epoch="$(date -u -d "+${LOCK_TIME} seconds" +%s)"
           serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
 
@@ -180,352 +195,128 @@ jobs:
             }"
 
       # =====================================================================
-      # 4) Fase inicio: obtener SDE_NEXT_RUN (sin etag)
-      #    - 200  -> continúa y calcula SDE_NEXT_RUN
-      #    - 420  -> failed, next_run=now+5m
-      #    - 5xx  -> failed, next_run=now+30m (sin tocar last_modified)
+      # 6) OBJETIVO — ESI → (GH files) → BQ
       # =====================================================================
-
-      - name: Compute SDE_NEXT_RUN (from SDE Last-Modified)
-        id: sde
-        run: |
-          set -euo pipefail
-
-          hdr="${RUNNER_TEMP}/sde_headers.txt"
-          code="$(curl -sS -o /dev/null -D "$hdr" -w "%{http_code}" "${SDE_URL}")"
-
-          now_plus() {
-            local seconds="$1"
-            local epoch
-            epoch="$(date -u -d "+${seconds} seconds" +%s)"
-            awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }"
-          }
-
-          if [ "$code" = "200" ]; then
-            lm="$(grep -i '^last-modified:' "$hdr" | head -n1 | sed -E 's/^[Ll]ast-[Mm]odified:[ ]*//; s/\r$//')"
-            if [ -z "${lm}" ]; then
-              # Sin Last-Modified: fallo corto conservador
-              echo "halt=true" >> "$GITHUB_OUTPUT"
-              echo "final_status=failed" >> "$GITHUB_OUTPUT"
-              echo "final_next_serial=$(now_plus 300)" >> "$GITHUB_OUTPUT"
-              echo "sde_next_serial=" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-
-            hhmmss="$(date -u -d "$lm" +%H:%M:%S)"
-            now_epoch="$(date -u +%s)"
-            today="$(date -u +%Y-%m-%d)"
-            target_epoch="$(date -u -d "${today} ${hhmmss}" +%s)"
-
-            if [ "$target_epoch" -le "$now_epoch" ]; then
-              target_epoch="$(date -u -d "tomorrow ${hhmmss}" +%s)"
-            fi
-
-            rand=$((300 + RANDOM % 601)) # 300..900
-            sde_next_epoch=$((target_epoch + 1800 + rand))
-            sde_next_serial="$(awk "BEGIN { printf \"%.10f\", (${sde_next_epoch}/86400) + 25569 }")"
-
-            echo "halt=false" >> "$GITHUB_OUTPUT"
-            echo "sde_next_serial=${sde_next_serial}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ "$code" = "420" ]; then
-            echo "halt=true" >> "$GITHUB_OUTPUT"
-            echo "final_status=failed" >> "$GITHUB_OUTPUT"
-            echo "final_next_serial=$(now_plus 300)" >> "$GITHUB_OUTPUT"
-            echo "sde_next_serial=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ "$code" -ge 500 ] 2>/dev/null; then
-            echo "halt=true" >> "$GITHUB_OUTPUT"
-            echo "final_status=failed" >> "$GITHUB_OUTPUT"
-            echo "final_next_serial=$(now_plus 1800)" >> "$GITHUB_OUTPUT"
-            echo "sde_next_serial=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Otros códigos: fallo corto (conservador)
-          echo "halt=true" >> "$GITHUB_OUTPUT"
-          echo "final_status=failed" >> "$GITHUB_OUTPUT"
-          echo "final_next_serial=$(now_plus 300)" >> "$GITHUB_OUTPUT"
-          echo "sde_next_serial=" >> "$GITHUB_OUTPUT"
-
-      # =====================================================================
-      # 5) Fase de listado de estructuras (etag en states/structures.json)
-      #    - 200  -> continúa
-      #    - 304  -> completed, next_run=SDE_NEXT_RUN, last_modified=header
-      #    - 420  -> failed, next_run=now+5m, last_modified=header
-      #    - 5xx  -> failed, next_run=now+30m, last_modified=header (si existe)
-      # =====================================================================
-
-      - name: List structures (If-None-Match from state etag)
-        id: struct_list
-        if: steps.sde.outputs.halt != 'true'
-        run: |
-          set -euo pipefail
-
-          out_json="${RUNNER_TEMP}/structure_list.json"
-          hdr="${RUNNER_TEMP}/structures_headers.txt"
-
-          prior_etag=""
-          if [ -f "${STATE_FILE}" ]; then
-            prior_etag="$(jq -r '.etag // empty' "${STATE_FILE}" || true)"
-          fi
-
-          if [ -n "${prior_etag}" ]; then
-            if [[ "${prior_etag}" == \"*\" ]]; then
-              inm="${prior_etag}"
-            else
-              inm="\"${prior_etag}\""
-            fi
-            code="$(curl -sS -o "${out_json}" -D "${hdr}" -w "%{http_code}" \
-              -H "Accept: application/json" \
-              -H "User-Agent: landu-eou/eou (GitHub Actions; ESI Structures)" \
-              -H "If-None-Match: ${inm}" \
-              "${STRUCTURES_URL}")"
-          else
-            code="$(curl -sS -o "${out_json}" -D "${hdr}" -w "%{http_code}" \
-              -H "Accept: application/json" \
-              -H "User-Agent: landu-eou/eou (GitHub Actions; ESI Structures)" \
-              "${STRUCTURES_URL}")"
-          fi
-
-          to_serial_from_http_date() {
-            local http_date="$1"
-            if [ -z "${http_date}" ]; then
-              echo ""
-              return 0
-            fi
-            local epoch
-            epoch="$(date -u -d "${http_date}" +%s 2>/dev/null || true)"
-            if [ -z "${epoch}" ]; then
-              echo ""
-              return 0
-            fi
-            awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }"
-          }
-
-          now_plus() {
-            local seconds="$1"
-            local epoch
-            epoch="$(date -u -d "+${seconds} seconds" +%s)"
-            awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }"
-          }
-
-          lm="$(grep -i '^last-modified:' "${hdr}" | head -n1 | sed -E 's/^[Ll]ast-[Mm]odified:[ ]*//; s/\r$//')"
-          lm_serial="$(to_serial_from_http_date "${lm}")"
-
-          new_etag="$(grep -i '^etag:' "${hdr}" | head -n1 | sed -E 's/^[Ee][Tt][Aa][Gg]:[ ]*//; s/\r$//')"
-          new_etag_clean="${new_etag%\"}"
-          new_etag_clean="${new_etag_clean#\"}"
-
-          echo "last_modified_serial=${lm_serial}" >> "$GITHUB_OUTPUT"
-          echo "prior_etag=${prior_etag}" >> "$GITHUB_OUTPUT"
-          echo "new_etag=${new_etag_clean}" >> "$GITHUB_OUTPUT"
-          echo "list_path=${out_json}" >> "$GITHUB_OUTPUT"
-
-          if [ "$code" = "304" ]; then
-            echo "halt=true" >> "$GITHUB_OUTPUT"
-            echo "final_status=completed" >> "$GITHUB_OUTPUT"
-            echo "final_next_serial=${{ steps.sde.outputs.sde_next_serial }}" >> "$GITHUB_OUTPUT"
-            echo "write_last_modified=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ "$code" = "200" ]; then
-            echo "halt=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ "$code" = "420" ]; then
-            echo "halt=true" >> "$GITHUB_OUTPUT"
-            echo "final_status=failed" >> "$GITHUB_OUTPUT"
-            echo "final_next_serial=$(now_plus 300)" >> "$GITHUB_OUTPUT"
-            echo "write_last_modified=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ "$code" -ge 500 ] 2>/dev/null; then
-            echo "halt=true" >> "$GITHUB_OUTPUT"
-            echo "final_status=failed" >> "$GITHUB_OUTPUT"
-            echo "final_next_serial=$(now_plus 1800)" >> "$GITHUB_OUTPUT"
-            echo "write_last_modified=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "halt=true" >> "$GITHUB_OUTPUT"
-          echo "final_status=failed" >> "$GITHUB_OUTPUT"
-          echo "final_next_serial=$(now_plus 300)" >> "$GITHUB_OUTPUT"
-          echo "write_last_modified=true" >> "$GITHUB_OUTPUT"
-
-      # =====================================================================
-      # 6) Fases: reconciliación + enriquecimiento + volcados (script)
-      # =====================================================================
-
-      - name: Setup Python
-        if: steps.struct_list.outputs.halt != 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python deps (minimal)
-        if: steps.struct_list.outputs.halt != 'true'
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install requests google-cloud-bigquery
-
-      - name: Setup gcloud (only when needed)
-        if: steps.struct_list.outputs.halt != 'true'
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Run structures objective (ESI → gzip JSONL → BQ)
-        id: run_structures
-        if: steps.struct_list.outputs.halt != 'true'
+      - name: Run structures pipeline
+        id: structures
+        if: steps.guard.outputs.proceed == 'true'
         env:
-          # Tokens de ESI (solo lectura)
+          # Access tokens (NO imprimir)
           EOU_ACCESS_TOKENS_1: ${{ secrets.EOU_ACCESS_TOKENS_1 }}
           EOU_ACCESS_TOKENS_2: ${{ secrets.EOU_ACCESS_TOKENS_2 }}
-
-          # Inputs
-          STRUCTURE_LIST_JSON: ${{ steps.struct_list.outputs.list_path }}
-          STRUCTURES_LIST_ETAG: ${{ steps.struct_list.outputs.new_etag }}
-          PRIOR_LIST_ETAG: ${{ steps.struct_list.outputs.prior_etag }}
-
-          # Paths
-          STATE_FILE: ${{ env.STATE_FILE }}
-          DATA_FILE: ${{ env.DATA_FILE }}
-          TYPES_FILE: ${{ env.TYPES_FILE }}
-          SOLARSYSTEMS_FILE: ${{ env.SOLARSYSTEMS_FILE }}
-
-          # BQ
-          GCP_PROJECT_ID: ${{ env.GCP_PROJECT_ID }}
-          BQ_DATASET: ${{ env.BQ_DATASET }}
-          BQ_TABLE: ${{ env.BQ_TABLE }}
-
-          # ESI
-          ESI_USER_AGENT: landu-eou/eou (GitHub Actions; ESI Structures)
         run: |
           set -euo pipefail
-          python "${SCRIPT_FILE}"
+          python scripts/esi/eou_structures_run.py
 
-      - name: Commit & push changes (data/state)
-        if: steps.run_structures.outcome == 'success'
+      # =====================================================================
+      # 7) COMMIT/PUSH — solo si hubo cambios y la fase objetivo fue OK
+      # =====================================================================
+      - name: Commit and push changes
+        id: git_push
+        if: steps.guard.outputs.proceed == 'true' && steps.structures.outcome == 'success' && steps.structures.outputs.repo_dirty == 'true'
+        continue-on-error: true
         run: |
           set -euo pipefail
-          if git diff --quiet; then
-            echo "No changes to commit."
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "${DATA_STRUCTURES_PATH}" "${STATE_ETAG_PATH}" || true
+
+          if git diff --cached --quiet; then
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${DATA_FILE}" "${STATE_FILE}"
-          git commit -m "EOU: update structures data/state"
-          git push
+
+          git commit -m "EOU: update structures" \
+            -m "Workflow: ${WORKFLOW_FILE}" \
+            -m "UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          for i in 1 2 3; do
+            # Evita fallo por cambios concurrentes de otros workflows
+            git pull --rebase || true
+            if git push; then
+              echo "pushed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep $((15 + RANDOM % 20))
+          done
+
+          echo "pushed=false" >> "$GITHUB_OUTPUT"
+          exit 1
 
       # =====================================================================
-      # 7) FINALIZE (Sheets) — status + next_run + last_modified (si aplica)
-      #    - No lee Sheets: solo batchUpdate
+      # 8) DECISIÓN FINAL PARA SHEETS (incluye override si git push falla)
       # =====================================================================
-
-      - name: Finalize (write status/next_run/last_modified)
-        if: always()
-        env:
-          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
-          ROW: ${{ env.SHEETS_WORKFLOW_ROW }}
-
-          SDE_HALT: ${{ steps.sde.outputs.halt }}
-          SDE_FINAL_STATUS: ${{ steps.sde.outputs.final_status }}
-          SDE_FINAL_NEXT_SERIAL: ${{ steps.sde.outputs.final_next_serial }}
-          SDE_NEXT_SERIAL: ${{ steps.sde.outputs.sde_next_serial }}
-
-          LIST_HALT: ${{ steps.struct_list.outputs.halt }}
-          LIST_FINAL_STATUS: ${{ steps.struct_list.outputs.final_status }}
-          LIST_FINAL_NEXT_SERIAL: ${{ steps.struct_list.outputs.final_next_serial }}
-          LIST_LASTMOD_SERIAL: ${{ steps.struct_list.outputs.last_modified_serial }}
-          LIST_WRITE_LASTMOD: ${{ steps.struct_list.outputs.write_last_modified }}
-
-          SCRIPT_OUTCOME: ${{ steps.run_structures.outcome }}
+      - name: Compute final decision
+        id: final
+        if: always() && steps.guard.outputs.proceed == 'true'
         run: |
           set -euo pipefail
 
-          now_plus() {
-            local seconds="$1"
-            local epoch
-            epoch="$(date -u -d "+${seconds} seconds" +%s)"
-            awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }"
-          }
+          # Base: outputs del script
+          status="${{ steps.structures.outputs.status }}"
+          next_epoch="${{ steps.structures.outputs.next_run_epoch }}"
+          lm_epoch="${{ steps.structures.outputs.last_modified_epoch }}"
+          write_lm="${{ steps.structures.outputs.write_last_modified }}"
 
-          final_status=""
-          final_next_serial=""
-          final_lastmod_serial=""
-          write_lastmod="false"
-
-          if [ "${SDE_HALT}" = "true" ]; then
-            final_status="${SDE_FINAL_STATUS:-failed}"
-            final_next_serial="${SDE_FINAL_NEXT_SERIAL:-$(now_plus 300)}"
-            write_lastmod="false"
-          elif [ "${LIST_HALT}" = "true" ]; then
-            final_status="${LIST_FINAL_STATUS:-failed}"
-            final_next_serial="${LIST_FINAL_NEXT_SERIAL:-$(now_plus 300)}"
-            final_lastmod_serial="${LIST_LASTMOD_SERIAL:-}"
-            write_lastmod="${LIST_WRITE_LASTMOD:-false}"
-          else
-            final_lastmod_serial="${LIST_LASTMOD_SERIAL:-}"
-            if [ "${SCRIPT_OUTCOME}" = "success" ]; then
-              final_status="completed"
-              final_next_serial="${SDE_NEXT_SERIAL}"
-            else
-              final_status="failed"
-              final_next_serial="$(now_plus 300)"
-            fi
-            if [ -n "${final_lastmod_serial}" ]; then
-              write_lastmod="true"
-            else
-              write_lastmod="false"
-            fi
+          # Si el script no llegó a publicar outputs, defaultea a failed + 30m
+          if [ -z "$status" ] || [ -z "$next_epoch" ]; then
+            status="failed"
+            next_epoch="$(date -u -d "+30 minutes" +%s)"
+            write_lm="false"
+            lm_epoch=""
           fi
 
-          if [ -n "${final_next_serial}" ]; then
-            next_json="${final_next_serial}"
-          else
-            next_json="$(now_plus 300)"
+          # Override si hubo que hacer push y falló (evita marcar completed sin persistencia)
+          if [ "${{ steps.git_push.outcome }}" = "failure" ]; then
+            status="failed"
+            next_epoch="$(date -u -d "+30 minutes" +%s)"
           fi
 
-          if [ "${write_lastmod}" = "true" ] && [ -n "${final_lastmod_serial}" ]; then
-            payload="$(jq -n \
-              --arg tab "${SHEET_TAB}" \
-              --arg row "${ROW}" \
-              --arg status "${final_status}" \
-              --argjson next "${next_json}" \
-              --argjson lm "${final_lastmod_serial}" \
-              '{
-                valueInputOption:"RAW",
-                data:[
-                  {range:($tab+"!B"+$row+":B"+$row), values:[[ $status ]]},
-                  {range:($tab+"!D"+$row+":D"+$row), values:[[ $next ]]},
-                  {range:($tab+"!I"+$row+":I"+$row), values:[[ $lm ]]}
-                ]
-              }')"
-          else
-            payload="$(jq -n \
-              --arg tab "${SHEET_TAB}" \
-              --arg row "${ROW}" \
-              --arg status "${final_status}" \
-              --argjson next "${next_json}" \
-              '{
-                valueInputOption:"RAW",
-                data:[
-                  {range:($tab+"!B"+$row+":B"+$row), values:[[ $status ]]},
-                  {range:($tab+"!D"+$row+":D"+$row), values:[[ $next ]]}
-                ]
-              }')"
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          echo "next_run_epoch=${next_epoch}" >> "$GITHUB_OUTPUT"
+          echo "write_last_modified=${write_lm}" >> "$GITHUB_OUTPUT"
+          echo "last_modified_epoch=${lm_epoch}" >> "$GITHUB_OUTPUT"
+
+      # =====================================================================
+      # 9) FINALIZE — escribe status/next_run/last_modified en Sheets (sin leer)
+      # =====================================================================
+      - name: Finalize (status + next_run [+ last_modified])
+        if: always() && steps.guard.outputs.proceed == 'true' && steps.gcp_auth.outcome == 'success'
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          row="${SHEETS_WORKFLOW_ROW}"
+
+          status="${{ steps.final.outputs.status }}"
+          next_epoch="${{ steps.final.outputs.next_run_epoch }}"
+          write_lm="${{ steps.final.outputs.write_last_modified }}"
+          lm_epoch="${{ steps.final.outputs.last_modified_epoch }}"
+
+          next_serial="$(awk "BEGIN { printf \"%.10f\", (${next_epoch}/86400) + 25569 }")"
+
+          data='[
+            {"range":"'"${SHEET_TAB}!B${row}:B${row}"'","values":[["'"${status}"'"]]},
+            {"range":"'"${SHEET_TAB}!D${row}:D${row}"'","values":[['"${next_serial}"']]}
+          ]'
+
+          if [ "$write_lm" = "true" ] && [ -n "$lm_epoch" ]; then
+            lm_serial="$(awk "BEGIN { printf \"%.10f\", (${lm_epoch}/86400) + 25569 }")"
+            data="${data%]} , {\"range\":\"${SHEET_TAB}!I${row}:I${row}\",\"values\":[[${lm_serial}]]}]"
           fi
 
           curl -fsSL -X POST \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
             "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
-            -d "${payload}"
+            -d "{\"valueInputOption\":\"RAW\",\"data\":${data}}"
+
+      # =====================================================================
+      # 10) FALLA EL JOB SI EL RESULTADO FINAL ES failed
+      # =====================================================================
+      - name: Fail job if final status is failed
+        if: always() && steps.guard.outputs.proceed == 'true' && steps.final.outputs.status == 'failed'
+        run: |
+          exit 1
