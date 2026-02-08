@@ -2,19 +2,18 @@
 """
 EOU · ESI Structures runner
 
-Interfaz (env vars) esperada por el YAML:
-- STRUCTURE_LIST_JSON (puede venir vacío en tu caso)
-- STRUCTURES_URL
-- STATE_FILE, DATA_FILE, TYPES_FILE, SOLARSYSTEMS_FILE
-- STRUCTURES_LIST_ETAG, PRIOR_LIST_ETAG (pueden venir vacíos)
-- EOU_ACCESS_TOKENS_1, EOU_ACCESS_TOKENS_2
-- GCP_PROJECT_ID, BQ_DATASET, BQ_TABLE
-- ESI_USER_AGENT
+- Interfaz por env vars (workflow YAML):
+  STRUCTURE_LIST_JSON (puede venir vacío)
+  STRUCTURES_URL
+  STATE_FILE, DATA_FILE, TYPES_FILE, SOLARSYSTEMS_FILE
+  STRUCTURES_LIST_ETAG, PRIOR_LIST_ETAG (pueden venir vacíos)
+  EOU_ACCESS_TOKENS_1, EOU_ACCESS_TOKENS_2
+  GCP_PROJECT_ID, BQ_DATASET, BQ_TABLE
+  ESI_USER_AGENT
 
-Corrección aplicada (sin cambiar el resto de la lógica):
-- Si falta STRUCTURE_LIST_JSON y no existe el archivo listado en el runner, el script
-  obtiene el listado directamente de STRUCTURES_URL usando If-None-Match desde STATE_FILE.
-  Maneja 200/304 y falla en 420/5xx/otros.
+Correcciones aplicadas (sin cambiar lógica funcional):
+- Si no existe STRUCTURE_LIST_JSON ni fichero intermedio, obtiene el listado directo de STRUCTURES_URL con If-None-Match (etag de state).
+- Observabilidad extra en el tramo de 401/420: muestra char_id usado, rotaciones, headers relevantes.
 """
 
 from __future__ import annotations
@@ -141,6 +140,12 @@ def _select_access_tokens() -> List[Tuple[int, str]]:
         if cid == PRIMARY_CHAR_ID:
             continue
         ordered.append((cid, combined[cid]))
+
+    # Log seguro: solo IDs, no tokens
+    ids = [cid for cid, _ in ordered]
+    print(f"[auth] Available ESI access tokens for character IDs (priority order): {ids}")
+    if PRIMARY_CHAR_ID not in ids:
+        print(f"[auth] WARNING: primary character id {PRIMARY_CHAR_ID} token not present.")
 
     return ordered
 
@@ -275,14 +280,21 @@ class EsiClient:
     def _current_token(self) -> Tuple[int, str]:
         return self.tokens[self._token_index]
 
-    def _rotate_token(self) -> None:
+    def _rotate_token(self) -> bool:
         if len(self.tokens) <= 1:
-            return
+            return False
         self._token_index = (self._token_index + 1) % len(self.tokens)
+        return True
 
     def get_structure(
-        self, structure_id: int, if_none_match_etag: Optional[str]
+        self,
+        structure_id: int,
+        if_none_match_etag: Optional[str],
+        progress: Optional[str] = None,
     ) -> Tuple[int, Optional[Dict[str, Any]], Optional[str], EsiErrorLimit]:
+        """
+        Returns: (status_code, json_or_none, etag_new_or_none, error_limit_headers)
+        """
         url = STRUCTURE_DETAIL_URL.format(structure_id=structure_id)
 
         attempt = 0
@@ -290,36 +302,55 @@ class EsiClient:
             attempt += 1
             self._throttle()
 
-            _char_id, token = self._current_token()
+            char_id, token = self._current_token()
             headers = {"Authorization": f"Bearer {token}"}
             inm = _etag_header_value(if_none_match_etag)
             if inm:
                 headers["If-None-Match"] = inm
 
+            # Log de request (sin token)
+            pfx = f"[esi]{' '+progress if progress else ''}"
+            print(f"{pfx} GET structure {structure_id} using char_id={char_id} attempt={attempt} inm={'yes' if inm else 'no'}")
+
             r = self.s.get(url, headers=headers, timeout=(5, 30))
             limit = _parse_error_limit(r.headers)
             etag_new = _normalize_etag(r.headers.get("ETag"))
+
+            # Log respuesta básica
+            www = r.headers.get("WWW-Authenticate")
+            if r.status_code in (401, 420) or r.status_code >= 500:
+                print(
+                    f"{pfx} status={r.status_code} "
+                    f"error_limit(remain={limit.remain}, reset={limit.reset}) "
+                    f"{'WWW-Authenticate='+www if www else ''}"
+                )
 
             if r.status_code >= 400:
                 _sleep_for_error_limit(limit)
 
             if r.status_code in (401, 420):
                 if self.retry_budget_401_420 <= 0:
+                    # Más detalle antes de lanzar
+                    ids = [cid for cid, _ in self.tokens]
                     raise RuntimeError(
-                        f"Retry budget exhausted for 401/420 (last status={r.status_code})"
+                        f"Retry budget exhausted for 401/420 (last status={r.status_code}). "
+                        f"structure_id={structure_id}, last_char_id={char_id}, tokens_available={ids}"
                     )
+
                 self.retry_budget_401_420 -= 1
 
                 sleep_secs = 30
                 if r.status_code == 420 and limit.reset is not None and limit.reset > sleep_secs:
                     sleep_secs = min(limit.reset + 1, ERROR_LIMIT_SLEEP_CAP_SECS)
 
+                rotated = False
                 if r.status_code == 401:
-                    self._rotate_token()
+                    rotated = self._rotate_token()
 
                 print(
-                    f"[esi] {r.status_code} on structure {structure_id} (attempt={attempt}). "
-                    f"Sleeping {sleep_secs}s. Remaining retry_budget={self.retry_budget_401_420}"
+                    f"{pfx} retrying after {sleep_secs}s; "
+                    f"retry_budget_remaining={self.retry_budget_401_420}; "
+                    f"rotated_token={'yes' if rotated else 'no'}"
                 )
                 time.sleep(sleep_secs)
                 continue
@@ -334,14 +365,11 @@ class EsiClient:
 
 
 def _try_find_list_file_from_env_or_common_paths() -> Optional[str]:
-    # 1) env var value (may be empty)
     v = _env_optional("STRUCTURE_LIST_JSON")
     if v and Path(v).exists():
         return v
 
-    # 2) common derived locations
     candidates: List[str] = []
-
     rt = _env_optional("RUNNER_TEMP")
     if rt:
         candidates.append(str(Path(rt) / "structure_list.json"))
@@ -350,7 +378,6 @@ def _try_find_list_file_from_env_or_common_paths() -> Optional[str]:
     if ws:
         ws_p = Path(ws)
         candidates.append(str(ws_p / "structure_list.json"))
-        # typical: /home/runner/work/<repo>/<repo> -> /home/runner/work/_temp
         try:
             work_root = ws_p.parents[1]
             candidates.append(str(work_root / "_temp" / "structure_list.json"))
@@ -358,22 +385,13 @@ def _try_find_list_file_from_env_or_common_paths() -> Optional[str]:
             pass
 
     candidates.append("/tmp/structure_list.json")
-
     for c in candidates:
         if c and Path(c).exists():
             return c
-
     return None
 
 
 def _fetch_structure_list_fallback(structures_url: str, state_file: str, user_agent: str) -> Tuple[List[int], Optional[str]]:
-    """
-    Fallback only when no structure_list.json is available:
-    - Uses If-None-Match from states/structures.json if present
-    - 200 => returns list + new_etag
-    - 304 => returns empty list + None (caller should exit cleanly)
-    - otherwise raises
-    """
     prior_etag = None
     if Path(state_file).exists():
         try:
@@ -388,6 +406,7 @@ def _fetch_structure_list_fallback(structures_url: str, state_file: str, user_ag
     if inm:
         headers["If-None-Match"] = inm
 
+    print(f"[fallback] Fetching structures list directly (inm={'yes' if inm else 'no'})")
     r = requests.get(structures_url, headers=headers, timeout=(5, 60))
     new_etag = _normalize_etag(r.headers.get("ETag"))
     limit = _parse_error_limit(r.headers)
@@ -405,13 +424,13 @@ def _fetch_structure_list_fallback(structures_url: str, state_file: str, user_ag
             raise RuntimeError("[fallback] 200 but invalid JSON for structures list")
         if not isinstance(data, list):
             raise RuntimeError("[fallback] structures list JSON is not a list")
+        print(f"[fallback] structures list 200 OK; count={len(data)} etag={'present' if new_etag else 'missing'}")
         return [int(x) for x in data], new_etag
 
     if r.status_code == 420:
         raise RuntimeError("[fallback] structures list returned 420 (error limited)")
     if r.status_code >= 500:
         raise RuntimeError(f"[fallback] structures list returned {r.status_code} (server error)")
-
     raise RuntimeError(f"[fallback] structures list returned unexpected status {r.status_code}")
 
 
@@ -428,34 +447,31 @@ def main() -> int:
 
     user_agent = os.getenv("ESI_USER_AGENT", "landu-eou/eou (GitHub Actions; ESI Structures)")
 
-    # These may be empty in your logs; keep as optional.
     prior_list_etag = _normalize_etag(_env_optional("PRIOR_LIST_ETAG"))
     new_list_etag = _normalize_etag(_env_optional("STRUCTURES_LIST_ETAG"))
 
-    # 1) Obtain structure_list:
+    # 1) Structure list
     list_file = _try_find_list_file_from_env_or_common_paths()
     if list_file:
+        print(f"[list] Using structure list file: {list_file}")
         structure_ids_raw = _read_json_file(list_file)
         if not isinstance(structure_ids_raw, list):
             raise RuntimeError("STRUCTURE_LIST_JSON is not a JSON list")
         structure_ids = [int(x) for x in structure_ids_raw]
     else:
-        # Fallback: fetch list directly (only because the intermediate file/env isn't available)
         structure_ids, fetched_etag = _fetch_structure_list_fallback(structures_url, state_file, user_agent)
-        # If 304, exit cleanly; equivalent to workflow early exit.
         if not structure_ids and fetched_etag is None:
             return 0
-        # If YAML didn’t pass list etag, we can use the fetched one for strict state update logic.
         if not new_list_etag and fetched_etag:
             new_list_etag = fetched_etag
 
-    desired_ids = set(structure_ids)
-
     # 2) Load existing records
     records = _read_gz_jsonl(data_file)
+    desired_ids = set(structure_ids)
+
     data_changed = False
 
-    # 3) Reconciliación (delete missing, add new)
+    # 3) Reconciliación
     for sid in list(records.keys()):
         if sid not in desired_ids:
             del records[sid]
@@ -478,23 +494,28 @@ def main() -> int:
                 records[sid]["market"] = True
                 data_changed = True
 
-    # 4) Load solar systems y prepara type-id pending
+    # 4) Load maps
     solar_map = _load_solarsystems_map(solarsystems_file)
     pending_type_ids: Dict[int, int] = {}
 
-    # 5) Enriquecimiento por estructura
+    # 5) Enriquecimiento
     tokens = _select_access_tokens()
     esi = EsiClient(tokens=tokens, user_agent=user_agent)
 
     sorted_ids = sorted(records.keys())
-    print(f"[run] structures in list: {len(sorted_ids)} (existing file had {len(records)})")
+    total = len(sorted_ids)
+    print(f"[run] structures in list: {total} (existing file had {len(records)})")
 
-    for sid in sorted_ids:
+    for idx, sid in enumerate(sorted_ids, start=1):
+        if idx == 1 or idx % 10 == 0 or idx == total:
+            print(f"[progress] enriching {idx}/{total} (retry_budget_remaining={esi.retry_budget_401_420})")
+
         rec = records.get(sid)
         if rec is None:
             continue
 
-        status, payload, etag_new, _limit = esi.get_structure(sid, rec.get("etag"))
+        progress = f"{idx}/{total}"
+        status, payload, etag_new, _limit = esi.get_structure(sid, rec.get("etag"), progress=progress)
 
         if status == 304:
             continue
@@ -568,7 +589,7 @@ def main() -> int:
             rec["stationType"] = station_type
             data_changed = True
 
-    # 7) Preparar volcado a BQ (solo filas completas)
+    # 7) Preparar volcado BQ
     rows_to_load: List[Dict[str, Any]] = []
     if data_changed:
         for rec in records.values():
@@ -591,7 +612,7 @@ def main() -> int:
 
     bq_should_write = bool(data_changed and len(rows_to_load) > 0)
 
-    # 8) Volcados (de golpe):
+    # 8) Volcados
     data_tmp_path: Optional[str] = None
     if data_changed:
         dst = Path(data_file)
@@ -622,12 +643,7 @@ def main() -> int:
     else:
         print("[data] No changes; data file not rewritten.")
 
-    # 9) Actualizar states/structures.json SOLO si:
-    #    - etag cambió
-    #    - data OK (reescrito o no reescrito porque correspondía)
-    #    - bq OK (reescrito o no reescrito porque correspondía)
-    #
-    # Si new_list_etag sigue vacío, no tocamos state (estricto).
+    # 9) Update state etag (estricto)
     if new_list_etag and new_list_etag != prior_list_etag:
         state_payload = json.dumps({"etag": new_list_etag}, ensure_ascii=False, separators=(",", ":")) + "\n"
         _write_text_atomic(state_file, state_payload)
