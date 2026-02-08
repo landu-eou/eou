@@ -1,662 +1,741 @@
 #!/usr/bin/env python3
-"""
-EOU · ESI Structures runner
+"""EOU · ESI Structures (ESI → GH → BQ)
 
-- Interfaz por env vars (workflow YAML):
-  STRUCTURE_LIST_JSON (puede venir vacío)
-  STRUCTURES_URL
-  STATE_FILE, DATA_FILE, TYPES_FILE, SOLARSYSTEMS_FILE
-  STRUCTURES_LIST_ETAG, PRIOR_LIST_ETAG (pueden venir vacíos)
-  EOU_ACCESS_TOKENS_1, EOU_ACCESS_TOKENS_2
-  GCP_PROJECT_ID, BQ_DATASET, BQ_TABLE
-  ESI_USER_AGENT
+This script is designed to be run by GitHub Actions.
 
-Correcciones aplicadas (sin cambiar lógica funcional):
-- Si no existe STRUCTURE_LIST_JSON ni fichero intermedio, obtiene el listado directo de STRUCTURES_URL con If-None-Match (etag de state).
-- Observabilidad extra en el tramo de 401/420: muestra char_id usado, rotaciones, headers relevantes.
+Contract (inputs via env vars):
+  Required:
+    - GCP_PROJECT_ID
+    - BQ_DATASET
+    - BQ_TABLE
+    - STATE_ETAG_PATH
+    - DATA_STRUCTURES_PATH
+    - SDE_SOLARSYSTEMS_PATH
+    - SDE_TYPES_PATH
+    - SDE_ZIP_URL
+    - ESI_STRUCTURES_LIST_URL
+    - ESI_STRUCTURE_DETAIL_URL_TEMPLATE
+    - PRIMARY_CHAR_ID
+    - RETRY_BUDGET
+    - EOU_ACCESS_TOKENS_1 (JSON {char_id: access_token, ...})
+    - EOU_ACCESS_TOKENS_2 (JSON {char_id: access_token, ...})
+
+Outputs (to $GITHUB_OUTPUT):
+  - status: completed|failed
+  - next_run_epoch: int (UTC epoch seconds)
+  - write_last_modified: true|false
+  - last_modified_epoch: int (UTC epoch seconds, optional)
+  - repo_dirty: true|false
+
+Exit code:
+  - 0 if status==completed
+  - 1 if status==failed
 """
 
 from __future__ import annotations
 
+import dataclasses
+import email.utils
 import gzip
+import hashlib
 import json
 import os
+import random
+import subprocess
 import sys
+import tempfile
 import time
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-
-import requests
-from google.cloud import bigquery
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 
-PRIMARY_CHAR_ID = 2124070822
-
-ESI_BASE = "https://esi.evetech.net"
-STRUCTURE_DETAIL_URL = ESI_BASE + "/universe/structures/{structure_id}/"
-
-MIN_REQUEST_INTERVAL_SECS = 0.05
-ERROR_LIMIT_SLEEP_CAP_SECS = 180
+UTC = timezone.utc
 
 
-@dataclass
-class EsiErrorLimit:
-    remain: Optional[int]
-    reset: Optional[int]
-
-
-def _env_required(name: str) -> str:
+def _env(name: str, default: Optional[str] = None) -> str:
     v = os.getenv(name)
-    if not v:
-        raise RuntimeError(f"Missing required env var: {name}")
+    if v is None:
+        if default is None:
+            raise KeyError(f"Missing required env var: {name}")
+        return default
     return v
 
 
-def _env_optional(name: str) -> Optional[str]:
-    v = os.getenv(name)
-    if v is None:
-        return None
-    v = v.strip()
-    return v if v else None
-
-
-def _env_json_dict(name: str) -> Dict[str, Any]:
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return {}
-    try:
-        obj = json.loads(raw)
-        if not isinstance(obj, dict):
-            raise ValueError("not a dict")
-        return obj
-    except Exception as e:
-        raise RuntimeError(f"Invalid JSON in env var {name}: {e}") from e
-
-
-def _normalize_etag(etag: Optional[str]) -> Optional[str]:
-    if not etag:
-        return None
-    t = etag.strip()
-    if t.startswith("W/"):
-        t = t[2:].strip()
-    if len(t) >= 2 and t[0] == '"' and t[-1] == '"':
-        t = t[1:-1]
-    return t or None
-
-
-def _etag_header_value(etag: Optional[str]) -> Optional[str]:
-    t = _normalize_etag(etag)
-    if not t:
-        return None
-    return f'"{t}"'
-
-
-def _parse_error_limit(headers: requests.structures.CaseInsensitiveDict) -> EsiErrorLimit:
-    remain = headers.get("X-ESI-Error-Limit-Remain")
-    reset = headers.get("X-ESI-Error-Limit-Reset")
-    try:
-        remain_i = int(remain) if remain is not None else None
-    except Exception:
-        remain_i = None
-    try:
-        reset_i = int(reset) if reset is not None else None
-    except Exception:
-        reset_i = None
-    return EsiErrorLimit(remain=remain_i, reset=reset_i)
-
-
-def _sleep_for_error_limit(limit: EsiErrorLimit) -> None:
-    if limit.remain is None or limit.reset is None:
+def gha_set_output(key: str, value: str) -> None:
+    path = os.getenv("GITHUB_OUTPUT")
+    if not path:
+        # Local/dev: just print
+        print(f"::notice::{key}={value}")
         return
-    if limit.remain <= 1 and limit.reset > 0:
-        secs = min(limit.reset + 1, ERROR_LIMIT_SLEEP_CAP_SECS)
-        print(f"[esi] Error-limit low (remain={limit.remain}). Sleeping {secs}s (reset={limit.reset})")
-        time.sleep(secs)
+    # Outputs must be single-line
+    value = value.replace("\n", " ").replace("\r", " ")
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(f"{key}={value}\n")
 
 
-def _select_access_tokens() -> List[Tuple[int, str]]:
-    m1 = _env_json_dict("EOU_ACCESS_TOKENS_1")
-    m2 = _env_json_dict("EOU_ACCESS_TOKENS_2")
-
-    combined: Dict[int, str] = {}
-    for m in (m1, m2):
-        for k, v in m.items():
-            try:
-                cid = int(k)
-            except Exception:
-                continue
-            if isinstance(v, str) and v.strip():
-                combined[cid] = v.strip()
-
-    if not combined:
-        raise RuntimeError("No access tokens found in EOU_ACCESS_TOKENS_1/2")
-
-    ordered: List[Tuple[int, str]] = []
-    if PRIMARY_CHAR_ID in combined:
-        ordered.append((PRIMARY_CHAR_ID, combined[PRIMARY_CHAR_ID]))
-
-    for cid in sorted(combined.keys(), reverse=True):
-        if cid == PRIMARY_CHAR_ID:
-            continue
-        ordered.append((cid, combined[cid]))
-
-    # Log seguro: solo IDs, no tokens
-    ids = [cid for cid, _ in ordered]
-    print(f"[auth] Available ESI access tokens for character IDs (priority order): {ids}")
-    if PRIMARY_CHAR_ID not in ids:
-        print(f"[auth] WARNING: primary character id {PRIMARY_CHAR_ID} token not present.")
-
-    return ordered
+def parse_http_date_to_epoch(http_date: Optional[str]) -> Optional[int]:
+    if not http_date:
+        return None
+    try:
+        dt = email.utils.parsedate_to_datetime(http_date)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return int(dt.astimezone(UTC).timestamp())
+    except Exception:
+        return None
 
 
-def _read_json_file(path: str) -> Any:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+def now_epoch() -> int:
+    return int(datetime.now(tz=UTC).timestamp())
 
 
-def _read_gz_jsonl(path: str) -> Dict[int, Dict[str, Any]]:
-    records: Dict[int, Dict[str, Any]] = {}
-    p = Path(path)
-    if not p.exists():
-        return records
+def sleep_with_jitter(seconds: int, jitter_max: int = 3) -> None:
+    if seconds <= 0:
+        return
+    jitter = random.SystemRandom().randint(0, jitter_max)
+    time.sleep(seconds + jitter)
 
-    with gzip.open(p, "rt", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            sid = int(obj["stationID"])
-            obj["etag"] = _normalize_etag(obj.get("etag"))
-            records[sid] = obj
+
+def http_request(
+    method: str,
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: int = 60,
+) -> Tuple[int, Dict[str, str], bytes]:
+    req = urllib.request.Request(url=url, method=method)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = int(getattr(resp, "status", resp.getcode()))
+            hdrs = {k: v for k, v in resp.headers.items()}
+            body = resp.read() if method != "HEAD" else b""
+            return status, hdrs, body
+    except urllib.error.HTTPError as e:
+        hdrs = {k: v for k, v in e.headers.items()} if e.headers else {}
+        body = e.read() if method != "HEAD" else b""
+        return int(e.code), hdrs, body
+    except Exception as e:
+        # Network/timeout -> treat as 503-like
+        return 503, {}, (str(e).encode("utf-8")[:200])
+
+
+def maybe_throttle_on_error_limit(headers: Dict[str, str]) -> None:
+    # Best-practice: respect X-ESI-Error-Limit-* headers to avoid bans.
+    remain = headers.get("X-ESI-Error-Limit-Remain") or headers.get("x-esi-error-limit-remain")
+    reset = headers.get("X-ESI-Error-Limit-Reset") or headers.get("x-esi-error-limit-reset")
+    try:
+        if remain is None or reset is None:
+            return
+        remain_i = int(remain)
+        reset_i = int(reset)
+        # If we're close to the limit, stop hammering.
+        if remain_i < 5 and reset_i > 0:
+            sleep_with_jitter(reset_i + 1, jitter_max=5)
+    except Exception:
+        return
+
+
+def load_json_file(path: str) -> Optional[Dict[str, Any]]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+def atomic_write_text(path: str, text: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="tmp_", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
+
+@dataclasses.dataclass
+class StructureRecord:
+    stationID: int
+    station: Optional[str] = None
+    stationType: Optional[str] = None
+    solarSystem: Optional[str] = None
+    dock: Optional[bool] = None
+    market: bool = True
+    etag: Optional[str] = None
+
+    def to_json_obj(self) -> Dict[str, Any]:
+        return {
+            "stationID": self.stationID,
+            "station": self.station,
+            "stationType": self.stationType,
+            "solarSystem": self.solarSystem,
+            "dock": self.dock,
+            "market": self.market,
+            "etag": self.etag,
+        }
+
+    @staticmethod
+    def from_json_obj(obj: Dict[str, Any]) -> "StructureRecord":
+        return StructureRecord(
+            stationID=int(obj["stationID"]),
+            station=obj.get("station"),
+            stationType=obj.get("stationType"),
+            solarSystem=obj.get("solarSystem"),
+            dock=obj.get("dock"),
+            market=bool(obj.get("market", True)),
+            etag=obj.get("etag"),
+        )
+
+
+def read_structures_gz(path: str) -> Dict[int, StructureRecord]:
+    records: Dict[int, StructureRecord] = {}
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                rec = StructureRecord.from_json_obj(obj)
+                records[rec.stationID] = rec
+    except FileNotFoundError:
+        return {}
     return records
 
 
-def _write_text_atomic(path: str, content: str) -> None:
-    dst = Path(path)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_suffix(dst.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    tmp.replace(dst)
+def canonical_hash_records(records: Dict[int, StructureRecord]) -> str:
+    h = hashlib.sha256()
+    for sid in sorted(records.keys()):
+        obj = records[sid].to_json_obj()
+        line = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        h.update(line.encode("utf-8"))
+        h.update(b"\n")
+    return h.hexdigest()
 
 
-def _update_fields(record: Dict[str, Any], updates: Dict[str, Any]) -> bool:
-    changed = False
-    for k, v in updates.items():
-        if record.get(k) != v:
-            record[k] = v
-            changed = True
-    return changed
+def write_structures_gz(path: str, records: Dict[int, StructureRecord]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="tmp_structures_", suffix=".jsonl.gz", dir=os.path.dirname(path))
+    os.close(fd)
+    try:
+        with gzip.GzipFile(filename=tmp, mode="wb", compresslevel=9, mtime=0) as gz:
+            for sid in sorted(records.keys()):
+                line = json.dumps(
+                    records[sid].to_json_obj(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                gz.write(line.encode("utf-8"))
+                gz.write(b"\n")
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
 
 
-def _load_solarsystems_map(solarsystems_gz: str) -> Dict[int, str]:
-    m: Dict[int, str] = {}
-    with gzip.open(solarsystems_gz, "rt", encoding="utf-8") as f:
+def load_sde_solarsystems(path: str) -> Dict[int, str]:
+    mapping: Dict[int, str] = {}
+    with gzip.open(path, "rt", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             obj = json.loads(line)
             sid = int(obj["solarSystemID"])
-            name = obj.get("solarSystem")
-            if isinstance(name, str):
-                m[sid] = name
-    return m
+            mapping[sid] = str(obj["solarSystem"])
+    return mapping
 
 
-def _load_types_subset(types_gz: str, needed_type_ids: Iterable[int]) -> Dict[int, str]:
-    need = set(needed_type_ids)
-    if not need:
-        return {}
-    out: Dict[int, str] = {}
-    with gzip.open(types_gz, "rt", encoding="utf-8") as f:
+def load_sde_types(path: str) -> Dict[int, str]:
+    mapping: Dict[int, str] = {}
+    with gzip.open(path, "rt", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             obj = json.loads(line)
             tid = int(obj["typeID"])
-            if tid in need:
-                tname = obj.get("type")
-                if isinstance(tname, str):
-                    out[tid] = tname
-                if len(out) == len(need):
-                    break
-    return out
+            mapping[tid] = str(obj["type"])
+    return mapping
 
 
-def _bq_rewrite_table_and_load(project_id: str, dataset: str, table: str, ndjson_path: str) -> None:
-    client = bigquery.Client(project=project_id)
-    table_id = f"{project_id}.{dataset}.{table}"
+def select_access_tokens(primary_char_id: str, json1: str, json2: str) -> List[Tuple[str, str]]:
+    def parse(j: str) -> Dict[str, str]:
+        if not j:
+            return {}
+        try:
+            obj = json.loads(j)
+            if isinstance(obj, dict):
+                return {str(k): str(v) for k, v in obj.items() if v}
+        except Exception:
+            return {}
+        return {}
 
-    client.delete_table(table_id, not_found_ok=True)
+    tokens: Dict[str, str] = {}
+    tokens.update(parse(json1))
+    tokens.update(parse(json2))
 
-    schema = [
-        bigquery.SchemaField("stationID", "INTEGER", mode="REQUIRED"),
-        bigquery.SchemaField("station", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("stationType", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("solarSystem", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("dock", "BOOLEAN", mode="REQUIRED"),
-        bigquery.SchemaField("market", "BOOLEAN", mode="REQUIRED"),
-    ]
-    t = bigquery.Table(table_id, schema=schema)
-    t.clustering_fields = ["solarSystem"]
-    client.create_table(t)
+    ordered: List[Tuple[str, str]] = []
+    if primary_char_id in tokens:
+        ordered.append((primary_char_id, tokens[primary_char_id]))
 
-    job_config = bigquery.LoadJobConfig(
-        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+    others = [cid for cid in tokens.keys() if cid != primary_char_id]
+    # highest id -> lowest id
+    others.sort(key=lambda x: int(x), reverse=True)
+    for cid in others:
+        ordered.append((cid, tokens[cid]))
+    return ordered
+
+
+def compute_sde_next_run_epoch(sde_url: str) -> Tuple[str, Optional[int]]:
+    """Returns (kind, epoch).
+
+    kind:
+      - ok
+      - err_420
+      - err_5xx
+      - err_other
+    """
+    status, headers, _ = http_request("HEAD", sde_url, headers={"User-Agent": "landu-eou/eou (EOU structures)"})
+    maybe_throttle_on_error_limit(headers)
+
+    if status == 200:
+        lm = headers.get("Last-Modified") or headers.get("last-modified")
+        lm_epoch = parse_http_date_to_epoch(lm)
+        if lm_epoch is None:
+            return "err_other", None
+        lm_dt = datetime.fromtimestamp(lm_epoch, tz=UTC)
+
+        # Extract hh:mm:ss, then schedule next occurrence of that time (UTC)
+        t = lm_dt.timetz().replace(tzinfo=UTC)
+        now_dt = datetime.now(tz=UTC)
+        candidate = now_dt.replace(hour=t.hour, minute=t.minute, second=t.second, microsecond=0)
+        if candidate <= now_dt:
+            candidate = candidate + timedelta(days=1)
+
+        jitter = random.SystemRandom().randint(300, 900)
+        next_dt = candidate + timedelta(seconds=1800 + jitter)
+        return "ok", int(next_dt.timestamp())
+
+    if status == 420:
+        return "err_420", None
+    if status >= 500:
+        return "err_5xx", None
+    return "err_other", None
+
+
+def run_bq_rewrite(project_id: str, dataset: str, table: str, ndjson_path: str) -> None:
+    table_ref = f"{dataset}.{table}"
+    schema = "stationID:INTEGER,station:STRING,stationType:STRING,solarSystem:STRING,dock:BOOLEAN,market:BOOLEAN"
+
+    # 1) Drop (ignore if missing)
+    subprocess.run(
+        ["bq", f"--project_id={project_id}", "rm", "-f", "-t", table_ref],
+        check=False,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
     )
 
-    with open(ndjson_path, "rb") as f:
-        job = client.load_table_from_file(f, table_id, job_config=job_config)
-    job.result()
+    # 2) Create clustered table
+    subprocess.run(
+        [
+            "bq",
+            f"--project_id={project_id}",
+            "mk",
+            "-t",
+            f"--schema={schema}",
+            "--clustering_fields=solarSystem",
+            table_ref,
+        ],
+        check=True,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+    )
 
-
-class EsiClient:
-    def __init__(self, tokens: List[Tuple[int, str]], user_agent: str):
-        self.tokens = tokens
-        self.ua = user_agent
-        self.s = requests.Session()
-        self.s.headers.update(
-            {
-                "Accept": "application/json",
-                "Accept-Language": "en",
-                "User-Agent": self.ua,
-            }
-        )
-        self._token_index = 0
-        self._last_request_ts = 0.0
-        self.retry_budget_401_420 = 3
-
-    def _throttle(self) -> None:
-        now = time.time()
-        dt = now - self._last_request_ts
-        if dt < MIN_REQUEST_INTERVAL_SECS:
-            time.sleep(MIN_REQUEST_INTERVAL_SECS - dt)
-        self._last_request_ts = time.time()
-
-    def _current_token(self) -> Tuple[int, str]:
-        return self.tokens[self._token_index]
-
-    def _rotate_token(self) -> bool:
-        if len(self.tokens) <= 1:
-            return False
-        self._token_index = (self._token_index + 1) % len(self.tokens)
-        return True
-
-    def get_structure(
-        self,
-        structure_id: int,
-        if_none_match_etag: Optional[str],
-        progress: Optional[str] = None,
-    ) -> Tuple[int, Optional[Dict[str, Any]], Optional[str], EsiErrorLimit]:
-        """
-        Returns: (status_code, json_or_none, etag_new_or_none, error_limit_headers)
-        """
-        url = STRUCTURE_DETAIL_URL.format(structure_id=structure_id)
-
-        attempt = 0
-        while True:
-            attempt += 1
-            self._throttle()
-
-            char_id, token = self._current_token()
-            headers = {"Authorization": f"Bearer {token}"}
-            inm = _etag_header_value(if_none_match_etag)
-            if inm:
-                headers["If-None-Match"] = inm
-
-            # Log de request (sin token)
-            pfx = f"[esi]{' '+progress if progress else ''}"
-            print(f"{pfx} GET structure {structure_id} using char_id={char_id} attempt={attempt} inm={'yes' if inm else 'no'}")
-
-            r = self.s.get(url, headers=headers, timeout=(5, 30))
-            limit = _parse_error_limit(r.headers)
-            etag_new = _normalize_etag(r.headers.get("ETag"))
-
-            # Log respuesta básica
-            www = r.headers.get("WWW-Authenticate")
-            if r.status_code in (401, 420) or r.status_code >= 500:
-                print(
-                    f"{pfx} status={r.status_code} "
-                    f"error_limit(remain={limit.remain}, reset={limit.reset}) "
-                    f"{'WWW-Authenticate='+www if www else ''}"
-                )
-
-            if r.status_code >= 400:
-                _sleep_for_error_limit(limit)
-
-            if r.status_code in (401, 420):
-                if self.retry_budget_401_420 <= 0:
-                    # Más detalle antes de lanzar
-                    ids = [cid for cid, _ in self.tokens]
-                    raise RuntimeError(
-                        f"Retry budget exhausted for 401/420 (last status={r.status_code}). "
-                        f"structure_id={structure_id}, last_char_id={char_id}, tokens_available={ids}"
-                    )
-
-                self.retry_budget_401_420 -= 1
-
-                sleep_secs = 30
-                if r.status_code == 420 and limit.reset is not None and limit.reset > sleep_secs:
-                    sleep_secs = min(limit.reset + 1, ERROR_LIMIT_SLEEP_CAP_SECS)
-
-                rotated = False
-                if r.status_code == 401:
-                    rotated = self._rotate_token()
-
-                print(
-                    f"{pfx} retrying after {sleep_secs}s; "
-                    f"retry_budget_remaining={self.retry_budget_401_420}; "
-                    f"rotated_token={'yes' if rotated else 'no'}"
-                )
-                time.sleep(sleep_secs)
-                continue
-
-            if r.status_code == 200:
-                try:
-                    return r.status_code, r.json(), etag_new, limit
-                except Exception:
-                    raise RuntimeError(f"Invalid JSON in 200 response for structure {structure_id}")
-
-            return r.status_code, None, etag_new, limit
-
-
-def _try_find_list_file_from_env_or_common_paths() -> Optional[str]:
-    v = _env_optional("STRUCTURE_LIST_JSON")
-    if v and Path(v).exists():
-        return v
-
-    candidates: List[str] = []
-    rt = _env_optional("RUNNER_TEMP")
-    if rt:
-        candidates.append(str(Path(rt) / "structure_list.json"))
-
-    ws = _env_optional("GITHUB_WORKSPACE")
-    if ws:
-        ws_p = Path(ws)
-        candidates.append(str(ws_p / "structure_list.json"))
-        try:
-            work_root = ws_p.parents[1]
-            candidates.append(str(work_root / "_temp" / "structure_list.json"))
-        except Exception:
-            pass
-
-    candidates.append("/tmp/structure_list.json")
-    for c in candidates:
-        if c and Path(c).exists():
-            return c
-    return None
-
-
-def _fetch_structure_list_fallback(structures_url: str, state_file: str, user_agent: str) -> Tuple[List[int], Optional[str]]:
-    prior_etag = None
-    if Path(state_file).exists():
-        try:
-            obj = _read_json_file(state_file)
-            if isinstance(obj, dict):
-                prior_etag = _normalize_etag(obj.get("etag"))
-        except Exception:
-            prior_etag = None
-
-    headers = {"Accept": "application/json", "User-Agent": user_agent}
-    inm = _etag_header_value(prior_etag)
-    if inm:
-        headers["If-None-Match"] = inm
-
-    print(f"[fallback] Fetching structures list directly (inm={'yes' if inm else 'no'})")
-    r = requests.get(structures_url, headers=headers, timeout=(5, 60))
-    new_etag = _normalize_etag(r.headers.get("ETag"))
-    limit = _parse_error_limit(r.headers)
-    if r.status_code >= 400:
-        _sleep_for_error_limit(limit)
-
-    if r.status_code == 304:
-        print("[fallback] structures list 304 Not Modified; exiting without work.")
-        return [], None
-
-    if r.status_code == 200:
-        try:
-            data = r.json()
-        except Exception:
-            raise RuntimeError("[fallback] 200 but invalid JSON for structures list")
-        if not isinstance(data, list):
-            raise RuntimeError("[fallback] structures list JSON is not a list")
-        print(f"[fallback] structures list 200 OK; count={len(data)} etag={'present' if new_etag else 'missing'}")
-        return [int(x) for x in data], new_etag
-
-    if r.status_code == 420:
-        raise RuntimeError("[fallback] structures list returned 420 (error limited)")
-    if r.status_code >= 500:
-        raise RuntimeError(f"[fallback] structures list returned {r.status_code} (server error)")
-    raise RuntimeError(f"[fallback] structures list returned unexpected status {r.status_code}")
+    # 3) Load in one shot
+    subprocess.run(
+        [
+            "bq",
+            f"--project_id={project_id}",
+            "load",
+            "--source_format=NEWLINE_DELIMITED_JSON",
+            table_ref,
+            ndjson_path,
+        ],
+        check=True,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+    )
 
 
 def main() -> int:
-    structures_url = _env_required("STRUCTURES_URL")
-    state_file = _env_required("STATE_FILE")
-    data_file = _env_required("DATA_FILE")
-    types_file = _env_required("TYPES_FILE")
-    solarsystems_file = _env_required("SOLARSYSTEMS_FILE")
+    # Defaults for outputs (so Finalize can always run)
+    out_status = "failed"
+    out_next = now_epoch() + 1800
+    out_write_lm = "false"
+    out_lm_epoch: Optional[int] = None
+    repo_dirty = False
 
-    project_id = _env_required("GCP_PROJECT_ID")
-    bq_dataset = _env_required("BQ_DATASET")
-    bq_table = _env_required("BQ_TABLE")
+    def publish_outputs() -> None:
+        gha_set_output("status", out_status)
+        gha_set_output("next_run_epoch", str(out_next))
+        gha_set_output("write_last_modified", out_write_lm)
+        gha_set_output("last_modified_epoch", "" if out_lm_epoch is None else str(out_lm_epoch))
+        gha_set_output("repo_dirty", "true" if repo_dirty else "false")
 
-    user_agent = os.getenv("ESI_USER_AGENT", "landu-eou/eou (GitHub Actions; ESI Structures)")
+    try:
+        project_id = _env("GCP_PROJECT_ID")
+        bq_dataset = _env("BQ_DATASET")
+        bq_table = _env("BQ_TABLE")
 
-    prior_list_etag = _normalize_etag(_env_optional("PRIOR_LIST_ETAG"))
-    new_list_etag = _normalize_etag(_env_optional("STRUCTURES_LIST_ETAG"))
+        state_path = _env("STATE_ETAG_PATH")
+        data_path = _env("DATA_STRUCTURES_PATH")
+        sde_solarsystems_path = _env("SDE_SOLARSYSTEMS_PATH")
+        sde_types_path = _env("SDE_TYPES_PATH")
 
-    # 1) Structure list
-    list_file = _try_find_list_file_from_env_or_common_paths()
-    if list_file:
-        print(f"[list] Using structure list file: {list_file}")
-        structure_ids_raw = _read_json_file(list_file)
-        if not isinstance(structure_ids_raw, list):
-            raise RuntimeError("STRUCTURE_LIST_JSON is not a JSON list")
-        structure_ids = [int(x) for x in structure_ids_raw]
-    else:
-        structure_ids, fetched_etag = _fetch_structure_list_fallback(structures_url, state_file, user_agent)
-        if not structure_ids and fetched_etag is None:
-            return 0
-        if not new_list_etag and fetched_etag:
-            new_list_etag = fetched_etag
+        sde_url = _env("SDE_ZIP_URL")
+        list_url = _env("ESI_STRUCTURES_LIST_URL")
+        detail_tpl = _env("ESI_STRUCTURE_DETAIL_URL_TEMPLATE")
+        primary_char_id = _env("PRIMARY_CHAR_ID")
+        retry_budget = int(_env("RETRY_BUDGET"))
 
-    # 2) Load existing records
-    records = _read_gz_jsonl(data_file)
-    desired_ids = set(structure_ids)
+        tokens_1 = _env("EOU_ACCESS_TOKENS_1")
+        tokens_2 = _env("EOU_ACCESS_TOKENS_2")
+        tokens = select_access_tokens(primary_char_id, tokens_1, tokens_2)
+        if not tokens:
+            # Can't auth; treat as failed (cooldown 30m)
+            out_status = "failed"
+            out_next = now_epoch() + 1800
+            publish_outputs()
+            return 1
 
-    data_changed = False
+        ua = "landu-eou/eou (EOU structures; GitHub Actions)"
 
-    # 3) Reconciliación
-    for sid in list(records.keys()):
-        if sid not in desired_ids:
-            del records[sid]
-            data_changed = True
+        # ------------------------------------------------------------
+        # Fase inicio: SDE_NEXT_RUN
+        # ------------------------------------------------------------
+        kind, sde_next = compute_sde_next_run_epoch(sde_url)
+        if kind != "ok" or sde_next is None:
+            out_status = "failed"
+            if kind == "err_420":
+                out_next = now_epoch() + 300
+            elif kind == "err_5xx":
+                out_next = now_epoch() + 1800
+            else:
+                out_next = now_epoch() + 1800
+            # "Mantener registro actual" -> no last_modified write for SDE failures
+            out_write_lm = "false"
+            out_lm_epoch = None
+            publish_outputs()
+            return 1
 
-    for sid in desired_ids:
-        if sid not in records:
-            records[sid] = {
-                "stationID": sid,
-                "station": None,
-                "stationType": None,
-                "solarSystem": None,
-                "dock": None,
-                "market": True,
-                "etag": None,
-            }
-            data_changed = True
-        else:
-            if records[sid].get("market") is not True:
-                records[sid]["market"] = True
-                data_changed = True
+        # ------------------------------------------------------------
+        # Fase listado de estructuras (ETag global en states/structures.json)
+        # ------------------------------------------------------------
+        old_state = load_json_file(state_path) or {}
+        old_list_etag = old_state.get("etag")
 
-    # 4) Load maps
-    solar_map = _load_solarsystems_map(solarsystems_file)
-    pending_type_ids: Dict[int, int] = {}
+        list_headers = {
+            "User-Agent": ua,
+            "Accept": "application/json",
+        }
+        if isinstance(old_list_etag, str) and old_list_etag:
+            list_headers["If-None-Match"] = old_list_etag
 
-    # 5) Enriquecimiento
-    tokens = _select_access_tokens()
-    esi = EsiClient(tokens=tokens, user_agent=user_agent)
+        status, headers, body = http_request("GET", list_url, headers=list_headers, timeout=120)
+        maybe_throttle_on_error_limit(headers)
 
-    sorted_ids = sorted(records.keys())
-    total = len(sorted_ids)
-    print(f"[run] structures in list: {total} (existing file had {len(records)})")
-
-    for idx, sid in enumerate(sorted_ids, start=1):
-        if idx == 1 or idx % 10 == 0 or idx == total:
-            print(f"[progress] enriching {idx}/{total} (retry_budget_remaining={esi.retry_budget_401_420})")
-
-        rec = records.get(sid)
-        if rec is None:
-            continue
-
-        progress = f"{idx}/{total}"
-        status, payload, etag_new, _limit = esi.get_structure(sid, rec.get("etag"), progress=progress)
+        list_last_modified = headers.get("Last-Modified") or headers.get("last-modified")
+        out_lm_epoch = parse_http_date_to_epoch(list_last_modified)
+        out_write_lm = "true" if out_lm_epoch is not None else "false"
 
         if status == 304:
-            continue
+            out_status = "completed"
+            out_next = sde_next
+            publish_outputs()
+            return 0
 
-        if status == 200 and payload is not None:
-            name = payload.get("name")
-            solar_system_id = payload.get("solar_system_id")
-            type_id = payload.get("type_id")
-
-            dock = True
-
-            solar_name = None
-            if isinstance(solar_system_id, int) or (
-                isinstance(solar_system_id, str) and solar_system_id.isdigit()
-            ):
-                solar_name = solar_map.get(int(solar_system_id))
-
-            updates = {
-                "station": name if isinstance(name, str) else None,
-                "solarSystem": solar_name,
-                "dock": dock,
-                "market": True,
-                "etag": etag_new if etag_new is not None else rec.get("etag"),
-            }
-            if _update_fields(rec, updates):
-                data_changed = True
-
-            if type_id is not None:
-                try:
-                    pending_type_ids[sid] = int(type_id)
-                except Exception:
-                    pending_type_ids[sid] = -1
-            else:
-                pending_type_ids[sid] = -1
-
-            continue
-
-        if status == 403:
-            updates = {
-                "station": None,
-                "stationType": None,
-                "solarSystem": None,
-                "dock": None,
-                "market": True,
-                "etag": etag_new if etag_new is not None else rec.get("etag"),
-            }
-            if _update_fields(rec, updates):
-                data_changed = True
-            continue
-
-        if status == 404:
-            del records[sid]
-            data_changed = True
-            continue
+        if status == 420:
+            out_status = "failed"
+            out_next = now_epoch() + 300
+            publish_outputs()
+            return 1
 
         if status >= 500:
-            continue
+            out_status = "failed"
+            out_next = now_epoch() + 1800
+            publish_outputs()
+            return 1
 
-        continue
+        if status != 200:
+            out_status = "failed"
+            out_next = now_epoch() + 1800
+            publish_outputs()
+            return 1
 
-    # 6) Resolver stationType
-    needed_type_ids = [tid for tid in pending_type_ids.values() if tid and tid > 0]
-    type_map = _load_types_subset(types_file, needed_type_ids)
+        new_list_etag = headers.get("ETag") or headers.get("etag")
+        try:
+            structure_list: List[int] = json.loads(body.decode("utf-8"))
+        except Exception:
+            out_status = "failed"
+            out_next = now_epoch() + 1800
+            publish_outputs()
+            return 1
 
-    for sid, type_id in pending_type_ids.items():
-        rec = records.get(sid)
-        if rec is None:
-            continue
-        station_type = type_map.get(type_id)
-        if rec.get("stationType") != station_type:
-            rec["stationType"] = station_type
-            data_changed = True
+        # Load local cache (gz)
+        old_records = read_structures_gz(data_path)
 
-    # 7) Preparar volcado BQ
-    rows_to_load: List[Dict[str, Any]] = []
-    if data_changed:
-        for rec in records.values():
-            if (
-                rec.get("station") is not None
-                and rec.get("stationType") is not None
-                and rec.get("solarSystem") is not None
-                and rec.get("dock") is not None
-            ):
-                rows_to_load.append(
-                    {
-                        "stationID": int(rec["stationID"]),
-                        "station": rec["station"],
-                        "stationType": rec["stationType"],
-                        "solarSystem": rec["solarSystem"],
-                        "dock": bool(rec["dock"]),
-                        "market": bool(rec.get("market", True)),
-                    }
+        # Reconcile list -> temp_records
+        list_set = set(int(x) for x in structure_list)
+        temp_records: Dict[int, StructureRecord] = {sid: rec for sid, rec in old_records.items() if sid in list_set}
+        for sid in list_set:
+            if sid not in temp_records:
+                temp_records[sid] = StructureRecord(
+                    stationID=sid,
+                    station=None,
+                    stationType=None,
+                    solarSystem=None,
+                    dock=None,
+                    market=True,
+                    etag=None,
                 )
 
-    bq_should_write = bool(data_changed and len(rows_to_load) > 0)
+        # ------------------------------------------------------------
+        # Fase enriquecimiento
+        # ------------------------------------------------------------
+        solarsystems = load_sde_solarsystems(sde_solarsystems_path)
+        types = load_sde_types(sde_types_path)
 
-    # 8) Volcados
-    data_tmp_path: Optional[str] = None
-    if data_changed:
-        dst = Path(data_file)
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        data_tmp_path = str(dst.with_suffix(dst.suffix + ".tmpbuild"))
-        with gzip.open(data_tmp_path, "wt", encoding="utf-8", newline="\n") as f:
+        token_idx = 0
+
+        def current_token() -> str:
+            nonlocal token_idx
+            if token_idx >= len(tokens):
+                token_idx = len(tokens) - 1
+            return tokens[token_idx][1]
+
+        def rotate_token() -> None:
+            nonlocal token_idx
+            if token_idx + 1 < len(tokens):
+                token_idx += 1
+
+        fatal_unauth = False
+
+        for sid in sorted(temp_records.keys()):
+            rec = temp_records.get(sid)
+            if rec is None:
+                continue
+
+            url = detail_tpl.format(structure_id=sid)
+            req_headers = {
+                "User-Agent": ua,
+                "Accept": "application/json",
+                "Authorization": f"Bearer {current_token()}",
+            }
+            if rec.etag:
+                req_headers["If-None-Match"] = rec.etag
+
+            while True:
+                st, hdr, b = http_request("GET", url, headers=req_headers, timeout=60)
+                maybe_throttle_on_error_limit(hdr)
+
+                # Global retry budget for 401/420
+                if st == 401:
+                    if retry_budget <= 0:
+                        fatal_unauth = True
+                        break
+                    retry_budget -= 1
+                    rotate_token()
+                    req_headers["Authorization"] = f"Bearer {current_token()}"
+                    sleep_with_jitter(30, jitter_max=5)
+                    continue
+
+                if st == 420:
+                    if retry_budget <= 0:
+                        fatal_unauth = True
+                        break
+                    retry_budget -= 1
+                    sleep_with_jitter(30, jitter_max=5)
+                    continue
+
+                if st == 304:
+                    break
+
+                if st == 200:
+                    try:
+                        obj = json.loads(b.decode("utf-8"))
+                    except Exception:
+                        break
+
+                    name = obj.get("name")
+                    solar_system_id = obj.get("solar_system_id")
+                    type_id = obj.get("type_id")
+
+                    rec.station = str(name) if name is not None else rec.station
+                    rec.market = True
+                    rec.dock = True
+
+                    if solar_system_id is not None:
+                        rec.solarSystem = solarsystems.get(int(solar_system_id))
+
+                    if type_id is not None:
+                        rec.stationType = types.get(int(type_id))
+
+                    rec.etag = hdr.get("ETag") or hdr.get("etag") or rec.etag
+                    break
+
+                if st == 403:
+                    rec.station = None
+                    rec.stationType = None
+                    rec.solarSystem = None
+                    rec.dock = None
+                    rec.market = True
+                    rec.etag = hdr.get("ETag") or hdr.get("etag") or rec.etag
+                    break
+
+                if st == 404:
+                    temp_records.pop(sid, None)
+                    break
+
+                if st >= 500:
+                    break
+
+                break
+
+            if fatal_unauth:
+                break
+
+        if fatal_unauth:
+            out_status = "failed"
+            out_next = now_epoch() + 300
+            publish_outputs()
+            return 1
+
+        # ------------------------------------------------------------
+        # Fase volcados (data file + BQ) — en una sola operación cada uno
+        # ------------------------------------------------------------
+        old_data_hash = canonical_hash_records(old_records)
+        new_data_hash = canonical_hash_records(temp_records)
+        data_changed = old_data_hash != new_data_hash
+
+        def rows_for_bq(records: Dict[int, StructureRecord]) -> List[Dict[str, Any]]:
+            rows: List[Dict[str, Any]] = []
             for sid in sorted(records.keys()):
-                obj = records[sid]
-                clean = {k: v for k, v in obj.items() if not k.startswith("_")}
-                f.write(json.dumps(clean, ensure_ascii=False, separators=(",", ":")) + "\n")
+                r = records[sid]
+                if r.station is None and r.solarSystem is None and r.dock is None:
+                    continue
+                if r.station is None or r.stationType is None or r.solarSystem is None or r.dock is None:
+                    continue
+                rows.append(
+                    {
+                        "stationID": r.stationID,
+                        "station": r.station,
+                        "stationType": r.stationType,
+                        "solarSystem": r.solarSystem,
+                        "dock": bool(r.dock),
+                        "market": bool(r.market),
+                    }
+                )
+            return rows
 
-    ndjson_root = _env_optional("RUNNER_TEMP") or _env_optional("GITHUB_WORKSPACE") or "/tmp"
-    ndjson_tmp: Optional[str] = None
+        old_bq_rows = rows_for_bq(old_records)
+        new_bq_rows = rows_for_bq(temp_records)
 
-    if bq_should_write:
-        ndjson_tmp = str(Path(ndjson_root) / "eou_structures_bq.ndjson")
-        with open(ndjson_tmp, "w", encoding="utf-8", newline="\n") as f:
-            for row in rows_to_load:
-                f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+        def hash_rows(rows: List[Dict[str, Any]]) -> str:
+            h = hashlib.sha256()
+            for row in rows:
+                line = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                h.update(line.encode("utf-8"))
+                h.update(b"\n")
+            return h.hexdigest()
 
-        print(f"[bq] Rewriting {project_id}.{bq_dataset}.{bq_table} with {len(rows_to_load)} rows...")
-        _bq_rewrite_table_and_load(project_id, bq_dataset, bq_table, ndjson_tmp)
-        print("[bq] OK")
+        bq_changed = hash_rows(old_bq_rows) != hash_rows(new_bq_rows)
+        bq_should_rewrite = bq_changed and len(new_bq_rows) > 0
 
-    if data_changed and data_tmp_path:
-        Path(data_tmp_path).replace(Path(data_file))
-        print(f"[data] Updated {data_file} ({len(records)} records).")
-    else:
-        print("[data] No changes; data file not rewritten.")
+        bq_ok_or_skipped = True
+        if bq_should_rewrite:
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", delete=False, prefix="eou_structures_", suffix=".jsonl"
+            ) as tmpf:
+                ndjson_path = tmpf.name
+                for row in new_bq_rows:
+                    tmpf.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+                    tmpf.write("\n")
+            try:
+                run_bq_rewrite(project_id, bq_dataset, bq_table, ndjson_path)
+            except Exception:
+                bq_ok_or_skipped = False
+            finally:
+                try:
+                    os.remove(ndjson_path)
+                except Exception:
+                    pass
 
-    # 9) Update state etag (estricto)
-    if new_list_etag and new_list_etag != prior_list_etag:
-        state_payload = json.dumps({"etag": new_list_etag}, ensure_ascii=False, separators=(",", ":")) + "\n"
-        _write_text_atomic(state_file, state_payload)
-        print(f"[state] Updated list etag in {state_file}: {prior_list_etag} -> {new_list_etag}")
-    else:
-        print("[state] List etag unchanged (or missing); state not updated.")
+        if not bq_ok_or_skipped:
+            # No tocar repo si BQ falla
+            out_status = "failed"
+            out_next = now_epoch() + 1800
+            publish_outputs()
+            return 1
 
-    return 0
+        data_ok_or_skipped = True
+        if data_changed:
+            try:
+                write_structures_gz(data_path, temp_records)
+                repo_dirty = True
+            except Exception:
+                data_ok_or_skipped = False
+
+        if not data_ok_or_skipped:
+            out_status = "failed"
+            out_next = now_epoch() + 1800
+            publish_outputs()
+            return 1
+
+        # ------------------------------------------------------------
+        # Update states/structures.json (STRICT condition requested)
+        # ------------------------------------------------------------
+        etag_changed = bool(new_list_etag) and (str(new_list_etag) != str(old_list_etag))
+        if etag_changed and data_ok_or_skipped and bq_ok_or_skipped:
+            try:
+                atomic_write_text(
+                    state_path, json.dumps({"etag": str(new_list_etag)}, ensure_ascii=False, indent=2) + "\n"
+                )
+                repo_dirty = True
+            except Exception:
+                out_status = "failed"
+                out_next = now_epoch() + 1800
+                publish_outputs()
+                return 1
+
+        # ------------------------------------------------------------
+        # Fase final
+        # ------------------------------------------------------------
+        out_status = "completed"
+        out_next = sde_next
+        publish_outputs()
+        return 0
+
+    except Exception:
+        out_status = "failed"
+        out_next = now_epoch() + 1800
+        publish_outputs()
+        return 1
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as e:
-        print(f"[fatal] {e}", file=sys.stderr)
-        raise
+    sys.exit(main())
