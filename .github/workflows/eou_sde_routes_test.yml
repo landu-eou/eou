@@ -30,9 +30,9 @@ jobs:
         run: |
           python -u scripts/build_sde_routes_to_jita.py
 
-      - name: Commit changes (if any)
+      - name: Commit & push (safe)
         run: |
-          set -e
+          set -euo pipefail
 
           TARGET="data/test/SDEroutes.jsonl.gz"
 
@@ -48,6 +48,28 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # Añadir y commitear
           git add -- "$TARGET"
           git commit -m "test: rebuild SDEroutes to Jita (safer penalty=100)"
-          git push
+
+          # Sincronizar con remoto y reintentar push (evita non-fast-forward)
+          # Reintentos por si hay carreras con otros workflows.
+          for i in 1 2 3; do
+            echo "Sync attempt $i/3"
+
+            # Trae cambios remotos y rehace tu commit encima
+            git fetch origin main
+            git rebase origin/main
+
+            # Intentar push
+            if git push origin HEAD:main; then
+              echo "Push OK"
+              exit 0
+            fi
+
+            echo "Push failed, retrying after short delay..."
+            sleep $((i * 2))
+          done
+
+          echo "Push failed after retries."
+          exit 1
