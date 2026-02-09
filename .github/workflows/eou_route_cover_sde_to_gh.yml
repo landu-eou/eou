@@ -1,4 +1,4 @@
-name: TEST Route Cover (SDE → GH)
+name: Route Cover (SDE -> GH)
 
 on:
   workflow_dispatch:
@@ -18,21 +18,25 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Necesario para poder hacer git fetch/rebase de forma fiable
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Build route cover from SDE
+      # El script hace checkpoints (commit+push) cada 3 minutos del mejor resultado.
+      - name: Build route cover from SDE (with 3-min checkpoints)
         run: |
           python -u route_test/build_route_cover.py
 
-      - name: Commit & push if changed
+      # Fallback final: por si el último checkpoint no alcanzó a pushear
+      - name: Final sync push if changed (rebase + retry)
         run: |
-          set -e
+          set -euo pipefail
 
-          # Solo cambios dentro de route_test/
           if [ -z "$(git status --porcelain -- route_test/)" ]; then
             echo "No changes."
             exit 0
@@ -42,5 +46,27 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add -- route_test/route.jsonl route_test/route_names.json route_test/route.meta.json
-          git commit -m "route_test: rebuild stargate cover route"
-          git push
+
+          if git diff --cached --quiet; then
+            echo "No staged changes."
+            exit 0
+          fi
+
+          git commit -m "route_test: final checkpoint"
+
+          git fetch origin main
+          git rebase origin/main
+
+          for i in 1 2 3 4 5; do
+            if git push origin HEAD:main; then
+              echo "Pushed successfully."
+              exit 0
+            fi
+            echo "Push failed (attempt $i). Retrying after rebase..."
+            git fetch origin main
+            git rebase origin/main
+            sleep $((i * 2))
+          done
+
+          echo "Failed to push after retries."
+          exit 1
