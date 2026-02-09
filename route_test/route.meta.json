@@ -1,9 +1,9 @@
 {
-  "generated_at_utc": "2026-02-09T23:03:40.463200+00:00",
+  "generated_at_utc": "2026-02-09T23:03:49.491136+00:00",
   "jita_id": 30000142,
   "reachable_systems_count": 5175,
   "unique_systems_in_route": 5175,
-  "route_length": 13505,
+  "route_length": 13385,
   "heuristic": "greedy_k_candidates_lookahead + random_restarts + 3min checkpoints",
   "params": {
     "search_budget_seconds": 1080,
@@ -16,11 +16,11 @@
     "max_restarts": 100000
   },
   "runs": {
-    "attempted": 1,
-    "completed": 1,
-    "best_seed": 6824595947281722023,
-    "checkpoints_done": 1,
-    "last_push_ok": null
+    "attempted": 8,
+    "completed": 8,
+    "best_seed": 6824595947281722030,
+    "checkpoints_done": 2,
+    "last_push_ok": true
   },
   "inputs": {
     "solarsystems": {
@@ -33,7 +33,7 @@
     }
   },
   "timing": {
-    "elapsed_seconds": 2.335,
-    "deadline_in_seconds": 1077.665
+    "elapsed_seconds": 11.363,
+    "deadline_in_seconds": 1068.637
   }
 }
