@@ -5,8 +5,9 @@ import gzip
 import hashlib
 import json
 import os
+from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Optional, Set, Tuple
 
 
 # Inputs (en el repo)
@@ -74,7 +75,6 @@ def build_system_maps() -> Tuple[Dict[int, str], Dict[str, int]]:
             continue
         nm = nm.strip()
         id_to_name[sid] = nm
-        # Si hay colisiones (no debería), mantenemos el primero de forma determinista
         name_to_id.setdefault(nm, sid)
 
     if not id_to_name:
@@ -90,7 +90,7 @@ def parse_gate_endpoints(obj: Dict[str, Any]) -> Optional[Tuple[str, str]]:
     y/o
     {"stargate":"Arnatele → Junsoraert", ...}
 
-    Preferimos stargateGroup (↔) por ser más “canónico” y bidireccional.
+    Preferimos stargateGroup (↔) por ser bidireccional y más estable.
     """
     g = obj.get("stargateGroup")
     if isinstance(g, str) and "↔" in g:
@@ -104,17 +104,15 @@ def parse_gate_endpoints(obj: Dict[str, Any]) -> Optional[Tuple[str, str]]:
         if len(parts) == 2 and parts[0] and parts[1]:
             return parts[0], parts[1]
 
-    # Fallback: si hubiera formatos raros, no inferimos.
     return None
 
 
 def build_adjacency(name_to_id: Dict[str, int]) -> Dict[int, Set[int]]:
     """
-    Construye adjacencia NO-dirigida para permitir backtracking del DFS-walk.
+    Grafo no-dirigido (permite backtracking y representa stargates ↔).
     """
     adj: Dict[int, Set[int]] = {}
     skipped_unknown = 0
-    parsed_edges = 0
 
     for obj in iter_jsonl_gz(STARGATES_GZ):
         endpoints = parse_gate_endpoints(obj)
@@ -130,15 +128,12 @@ def build_adjacency(name_to_id: Dict[str, int]) -> Dict[int, Set[int]]:
 
         adj.setdefault(a, set()).add(b)
         adj.setdefault(b, set()).add(a)
-        parsed_edges += 1
 
     if not adj:
         raise RuntimeError(
-            "No se construyeron aristas de stargates (adj vacío). "
-            "Revisa el parseo de stargates.jsonl.gz."
+            "No se construyeron aristas de stargates (adj vacío). Revisa parseo de stargates.jsonl.gz."
         )
 
-    # Sanity: parsed_edges puede ser menor si hay duplicados (normal)
     return adj
 
 
@@ -146,7 +141,6 @@ def find_jita_id(name_to_id: Dict[str, int]) -> int:
     jita = name_to_id.get("Jita")
     if jita is not None:
         return jita
-    # fallback case-insensitive
     for nm, sid in name_to_id.items():
         if nm.lower() == "jita":
             return sid
@@ -155,65 +149,101 @@ def find_jita_id(name_to_id: Dict[str, int]) -> int:
 
 def reachable_from(root: int, adj: Dict[int, Set[int]]) -> Set[int]:
     seen: Set[int] = set()
-    stack = [root]
-    while stack:
-        u = stack.pop()
+    q: Deque[int] = deque([root])
+    while q:
+        u = q.popleft()
         if u in seen:
             continue
         seen.add(u)
         for v in adj.get(u, ()):
             if v not in seen:
-                stack.append(v)
+                q.append(v)
     return seen
 
 
-def build_spanning_tree(root: int, adj: Dict[int, Set[int]], reachable: Set[int]) -> Dict[int, List[int]]:
+def bfs_to_nearest_unvisited(
+    start: int,
+    adj: Dict[int, Set[int]],
+    unvisited: Set[int],
+) -> Optional[List[int]]:
     """
-    Árbol de expansión determinista (orden por ID ascendente).
-    children[u] = [hijos...]
+    BFS desde 'start' hasta encontrar el primer nodo en 'unvisited'.
+    Devuelve el camino más corto (lista de IDs) desde start a ese objetivo, incluyendo start y target.
+    Si start ya es unvisited, devuelve [start].
     """
-    children: Dict[int, List[int]] = {root: []}
-    parent: Dict[int, int] = {root: root}
+    if start in unvisited:
+        return [start]
 
-    stack = [root]
-    while stack:
-        u = stack.pop()
-        for v in sorted(adj.get(u, set())):
-            if v not in reachable:
-                continue
+    parent: Dict[int, int] = {start: start}
+    q: Deque[int] = deque([start])
+
+    target: Optional[int] = None
+
+    while q:
+        u = q.popleft()
+        for v in adj.get(u, ()):
             if v in parent:
                 continue
             parent[v] = u
-            children.setdefault(u, []).append(v)
-            children.setdefault(v, [])
-            stack.append(v)
+            if v in unvisited:
+                target = v
+                q.clear()
+                break
+            q.append(v)
 
-    missing = reachable - set(parent.keys())
-    if missing:
-        raise RuntimeError(f"Árbol incompleto: faltan {len(missing)} nodos alcanzables.")
-    return children
+    if target is None:
+        return None
+
+    # reconstruir camino start -> target
+    path_rev: List[int] = [target]
+    cur = target
+    while cur != start:
+        cur = parent[cur]
+        path_rev.append(cur)
+    path_rev.reverse()
+    return path_rev
 
 
-def dfs_walk_from_tree(root: int, children: Dict[int, List[int]]) -> List[int]:
+def build_route_greedy_nearest_unvisited(
+    start: int,
+    adj: Dict[int, Set[int]],
+    reachable: Set[int],
+) -> List[int]:
     """
-    Walk DFS con backtracking (cada paso es una arista del árbol ⇒ arista real del grafo).
+    Heurística greedy tipo nearest-neighbor:
+    - Mantiene conjunto unvisited = reachable \ {start}
+    - Repite: BFS desde current hasta el unvisited más cercano; añade el path completo (incluye intermedios)
+      y marca como visitados todos los nodos del path.
     """
-    route: List[int] = [root]
-    stack: List[Tuple[int, int]] = [(root, 0)]  # (node, next_child_idx)
+    route: List[int] = [start]
+    visited: Set[int] = {start}
+    unvisited: Set[int] = set(reachable)
+    unvisited.discard(start)
 
-    while stack:
-        u, idx = stack[-1]
-        ch = children.get(u, [])
-        if idx < len(ch):
-            v = ch[idx]
-            stack[-1] = (u, idx + 1)
-            route.append(v)
-            stack.append((v, 0))
-        else:
-            stack.pop()
-            if stack:
-                parent = stack[-1][0]
-                route.append(parent)
+    current = start
+    steps = 0
+
+    while unvisited:
+        steps += 1
+        path = bfs_to_nearest_unvisited(current, adj, unvisited)
+        if path is None:
+            # No debería ocurrir si reachable está bien calculado
+            raise RuntimeError(
+                f"No se pudo alcanzar ningún unvisited desde {current}. "
+                "¿Grafo inconsistente o reachable incorrecto?"
+            )
+
+        # path incluye current al inicio. Añadimos desde el siguiente para no duplicar.
+        for sid in path[1:]:
+            route.append(sid)
+            visited.add(sid)
+            unvisited.discard(sid)
+
+        current = route[-1]
+
+        # Freno defensivo ante bucles improbables
+        if steps > len(reachable) * 10:
+            raise RuntimeError("Demasiadas iteraciones buscando unvisited. Posible inconsistencia en datos.")
 
     return route
 
@@ -221,8 +251,6 @@ def dfs_walk_from_tree(root: int, children: Dict[int, List[int]]) -> List[int]:
 def validate_route(route: List[int], reachable: Set[int], adj: Dict[int, Set[int]], id_to_name: Dict[int, str]) -> None:
     if not route:
         raise RuntimeError("Ruta vacía.")
-    if route[0] not in reachable:
-        raise RuntimeError("El origen no está en el conjunto alcanzable.")
 
     # Conectividad salto-a-salto
     for i in range(len(route) - 1):
@@ -236,7 +264,7 @@ def validate_route(route: List[int], reachable: Set[int], adj: Dict[int, Set[int
     if missing:
         raise RuntimeError(f"La ruta NO cubre todos los sistemas alcanzables: faltan {len(missing)}.")
 
-    # Nombres presentes para generar route_names.json
+    # Nombres presentes para route_names.json
     unnamed = [sid for sid in route if sid not in id_to_name]
     if unnamed:
         raise RuntimeError(f"Faltan nombres para {len(unnamed)} systems (ej. {unnamed[:10]}).")
@@ -251,19 +279,16 @@ def main() -> None:
 
     id_to_name, name_to_id = build_system_maps()
     jita_id = find_jita_id(name_to_id)
-
     adj = build_adjacency(name_to_id)
 
     reachable = reachable_from(jita_id, adj)
-    # Fail-fast: si esto vuelve a dar 1, algo va mal con el grafo/parseo
     if len(reachable) <= 1:
         raise RuntimeError(
-            f"Alcanzables desde Jita = {len(reachable)} (esperado >> 1). "
-            "Revisa stargates.jsonl.gz y el parseo."
+            f"Alcanzables desde Jita = {len(reachable)} (esperado >> 1). Revisa stargates.jsonl.gz."
         )
 
-    children = build_spanning_tree(jita_id, adj, reachable)
-    route = dfs_walk_from_tree(jita_id, children)
+    # Ruta aproximada “más corta”: greedy nearest-unvisited usando BFS (shortest paths en saltos)
+    route = build_route_greedy_nearest_unvisited(jita_id, adj, reachable)
 
     validate_route(route, reachable, adj, id_to_name)
 
@@ -283,6 +308,7 @@ def main() -> None:
         "reachable_systems_count": len(reachable),
         "unique_systems_in_route": len(set(route)),
         "route_length": len(route),
+        "heuristic": "greedy_nearest_unvisited_bfs",
         "inputs": {
             "solarsystems": {"path": SOLARSYSTEMS_GZ, "sha256": sha256_file(SOLARSYSTEMS_GZ)},
             "stargates": {"path": STARGATES_GZ, "sha256": sha256_file(STARGATES_GZ)},
