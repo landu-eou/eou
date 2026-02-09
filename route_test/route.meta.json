@@ -1,0 +1,17 @@
+{
+  "generated_at_utc": "2026-02-09T21:43:46.831721+00:00",
+  "jita_id": 30000142,
+  "reachable_systems_count": 1,
+  "unique_systems_in_route": 1,
+  "route_length": 1,
+  "inputs": {
+    "solarsystems": {
+      "path": "data/sde/solarsystems.jsonl.gz",
+      "sha256": "5eb5d5db154c2aa659eac9692b61a8cd3e6766e204c7945fb4e8c4dbaa177f15"
+    },
+    "stargates": {
+      "path": "data/sde/stargates.jsonl.gz",
+      "sha256": "c81e6661ccaa327bb851cbcd43496123faff4770ff4ea0f0024a663a35705a10"
+    }
+  }
+}
