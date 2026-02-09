@@ -270,3 +270,261 @@ jobs:
           fi
 
           update_state="false"
+          if [[ "${state_exists}" != "true" || -z "${local_etag}" || "${local_etag}" != "${remote_etag}" ]]; then
+            update_state="true"
+          fi
+
+          printf 'mode=%s\n' "$mode" >> "${GITHUB_OUTPUT}"
+          printf 'update_state=%s\n' "$update_state" >> "${GITHUB_OUTPUT}"
+
+      # ============================================================
+      # 6) Prepare load (solo si mode != noop)
+      #   - descarga ESI body y valida JSON
+      #   - valida gzip SDE (evita LFS pointer / gzip roto)
+      #   - reconcile: valida JSON de salida bq antes de jq
+      #   - genera load.ndjson (error si falta mapping)
+      # ============================================================
+      - name: Prepare load (download ESI + validate inputs + build ndjson)
+        if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' }}
+        id: prep
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mode="${{ steps.mode.outputs.mode }}"
+          lm_iso="${{ steps.esi.outputs.last_modified_iso }}"
+
+          # 1) Descarga ESI body + valida JSON
+          http_code="$(curl -sS -L -w "%{http_code}" -o esi_body.json "${ESI_URL}")"
+          if [[ "${http_code}" != "200" ]]; then
+            echo "ESI download failed: HTTP ${http_code}"
+            head -c 200 esi_body.json || true
+            exit 1
+          fi
+          if ! jq -e 'type=="array"' esi_body.json >/dev/null 2>&1; then
+            echo "ESI body is not a valid JSON array. First bytes:"
+            head -c 200 esi_body.json || true
+            exit 1
+          fi
+
+          # 2) Validar que el SDE sea gzip real (muy común fallo si fuera puntero LFS)
+          if ! gzip -t "${SDE_SOLARSYSTEMS_GZ}" >/dev/null 2>&1; then
+            echo "SDE file is not a valid gzip: ${SDE_SOLARSYSTEMS_GZ}"
+            echo "First lines (may be LFS pointer):"
+            head -n 5 "${SDE_SOLARSYSTEMS_GZ}" || true
+            exit 1
+          fi
+
+          # 3) Build mapping SDE y validar JSON
+          gzip -cd "${SDE_SOLARSYSTEMS_GZ}" \
+            | jq -s 'map({(.solarSystemID|tostring): .solarSystem}) | add' \
+            > sde_map.json
+          if ! jq -e 'type=="object"' sde_map.json >/dev/null 2>&1; then
+            echo "sde_map.json is not a valid JSON object."
+            head -c 200 sde_map.json || true
+            exit 1
+          fi
+
+          # 4) existing_map (solo reconcile) con validación de JSON
+          if [[ "${mode}" == "reconcile" ]]; then
+            bq --project_id="${GCP_PROJECT_ID}" query --quiet --format=json --use_legacy_sql=false \
+              "SELECT solarSystem
+               FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
+               WHERE snapshot_ts = TIMESTAMP('${lm_iso}')" \
+              > existing_rows.json
+
+            if ! jq -e 'type=="array"' existing_rows.json >/dev/null 2>&1; then
+              echo "BigQuery output is not valid JSON array (existing_rows.json). First bytes:"
+              head -c 300 existing_rows.json || true
+              exit 1
+            fi
+
+            jq 'map(.solarSystem) | map({(.): true}) | add // {}' existing_rows.json > existing_map.json
+          else
+            echo '{}' > existing_map.json
+          fi
+
+          # 5) Generar NDJSON (fail-fast si falta mapping)
+          if [[ "${mode}" == "reconcile" ]]; then
+            jq -c --arg ts "${lm_iso}" --slurpfile map sde_map.json --slurpfile exist existing_map.json '
+              .[] |
+              {
+                snapshot_ts: $ts,
+                solarSystem: ($map[0][(.system_id|tostring)] // error("missing solarSystem mapping for system_id=" + (.system_id|tostring))),
+                npc_kills: (.npc_kills|tonumber),
+                pod_kills: (.pod_kills|tonumber),
+                ship_kills: (.ship_kills|tonumber)
+              } |
+              select( ($exist[0][.solarSystem] // false) | not )
+            ' esi_body.json > load.ndjson
+          else
+            jq -c --arg ts "${lm_iso}" --slurpfile map sde_map.json '
+              .[] |
+              {
+                snapshot_ts: $ts,
+                solarSystem: ($map[0][(.system_id|tostring)] // error("missing solarSystem mapping for system_id=" + (.system_id|tostring))),
+                npc_kills: (.npc_kills|tonumber),
+                pod_kills: (.pod_kills|tonumber),
+                ship_kills: (.ship_kills|tonumber)
+              }
+            ' esi_body.json > load.ndjson
+          fi
+
+          echo "load_lines=$(wc -l < load.ndjson | tr -d ' ')" >> "${GITHUB_OUTPUT}"
+          echo "prepared=true" >> "${GITHUB_OUTPUT}"
+
+      # ============================================================
+      # 7) Sheets lock (fase inicial)
+      # ============================================================
+      - name: Sheets - initial lock (in_progress + next_run = now + LOCK_TIME)
+        if: ${{ steps.guard.outputs.proceed == 'true' && (steps.mode.outputs.mode == 'noop' || steps.prep.outputs.prepared == 'true') }}
+        id: sheets_lock
+        shell: bash
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+
+          send_batch() {
+            curl -sS -X POST \
+              -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+              -d "$1" >/dev/null
+          }
+
+          make_body_lock() {
+            jq -n \
+              --arg tab "${SHEET_TAB}" \
+              --arg row "${SHEETS_WORKFLOW_ROW}" \
+              --arg status "in_progress" \
+              --argjson next_run "$1" \
+              '{
+                valueInputOption: "RAW",
+                data: [
+                  {range: ($tab + "!B" + $row), values: [[ $status ]]},
+                  {range: ($tab + "!D" + $row), values: [[ $next_run ]]}
+                ]
+              }'
+          }
+
+          body="$(make_body_lock "${{ steps.boot.outputs.lock_serial }}")"
+          send_batch "${body}"
+          echo "locked=true" >> "${GITHUB_OUTPUT}"
+
+      # ============================================================
+      # 8) BigQuery load (máximo 1 batch por run)
+      # ============================================================
+      - name: BigQuery load (single batch)
+        if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' && steps.prep.outputs.load_lines != '0' }}
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          printf '%s' \
+            '[{"name":"snapshot_ts","type":"TIMESTAMP","mode":"REQUIRED"},'\
+            '{"name":"solarSystem","type":"STRING","mode":"NULLABLE"},'\
+            '{"name":"npc_kills","type":"INT64","mode":"NULLABLE"},'\
+            '{"name":"pod_kills","type":"INT64","mode":"NULLABLE"},'\
+            '{"name":"ship_kills","type":"INT64","mode":"NULLABLE"}]' \
+            > schema.json
+
+          bq --project_id="${GCP_PROJECT_ID}" load --quiet \
+            --source_format=NEWLINE_DELIMITED_JSON \
+            "${BQ_DATASET}.${BQ_TABLE}" \
+            load.ndjson \
+            schema.json
+
+      # ============================================================
+      # 9) Update state (solo si lock OK y update_state==true)
+      # ============================================================
+      - name: Update state etag (commit to repo)
+        if: ${{ steps.guard.outputs.proceed == 'true' && steps.sheets_lock.outputs.locked == 'true' && steps.mode.outputs.update_state == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$(dirname "${STATE_PATH}")"
+          jq -n --arg etag "${{ steps.esi.outputs.remote_etag }}" '{etag: $etag}' > "${STATE_PATH}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "${STATE_PATH}"
+          git diff --cached --quiet && exit 0
+
+          git commit -m "state: update system_kills etag"
+          git pull --rebase
+          git push
+
+      # ============================================================
+      # 10) Sheets finalize (fase final)
+      # ============================================================
+      - name: Sheets - finalize (status + next_run + optional last_modified)
+        if: ${{ always() && steps.sheets_lock.outputs.locked == 'true' }}
+        shell: bash
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+
+          send_batch() {
+            curl -sS -X POST \
+              -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+              -d "$1" >/dev/null
+          }
+
+          make_body_finalize() {
+            # $1=status, $2=next_run(serial), $3=include_last_modified(true/false), $4=last_modified(serial)
+            if [[ "$3" == "true" ]]; then
+              jq -n \
+                --arg tab "${SHEET_TAB}" \
+                --arg row "${SHEETS_WORKFLOW_ROW}" \
+                --arg status "$1" \
+                --argjson next_run "$2" \
+                --argjson last_modified "$4" \
+                '{
+                  valueInputOption: "RAW",
+                  data: [
+                    {range: ($tab + "!B" + $row), values: [[ $status ]]},
+                    {range: ($tab + "!D" + $row), values: [[ $next_run ]]},
+                    {range: ($tab + "!I" + $row), values: [[ $last_modified ]]}
+                  ]
+                }'
+            else
+              jq -n \
+                --arg tab "${SHEET_TAB}" \
+                --arg row "${SHEETS_WORKFLOW_ROW}" \
+                --arg status "$1" \
+                --argjson next_run "$2" \
+                '{
+                  valueInputOption: "RAW",
+                  data: [
+                    {range: ($tab + "!B" + $row), values: [[ $status ]]},
+                    {range: ($tab + "!D" + $row), values: [[ $next_run ]]}
+                  ]
+                }'
+            fi
+          }
+
+          if [[ "${JOB_STATUS}" == "success" ]]; then
+            status="completed"
+            next_run="${{ steps.esi.outputs.expires_plus5_serial }}"
+            if [[ "${{ steps.mode.outputs.update_state }}" == "true" ]]; then
+              body="$(make_body_finalize "${status}" "${next_run}" "true" "${{ steps.esi.outputs.last_modified_serial }}")"
+            else
+              body="$(make_body_finalize "${status}" "${next_run}" "false" "0")"
+            fi
+          else
+            status="failed"
+            next_run="${{ steps.boot.outputs.fail_plus5_serial }}"
+            body="$(make_body_finalize "${status}" "${next_run}" "false" "0")"
+          fi
+
+          send_batch "${body}"
