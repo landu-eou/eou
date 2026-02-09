@@ -278,11 +278,11 @@ jobs:
           printf 'update_state=%s\n' "$update_state" >> "${GITHUB_OUTPUT}"
 
       # ============================================================
-      # 6) Prepare load (solo si mode != noop)
-      #   - descarga ESI body y valida JSON
-      #   - valida gzip SDE (evita LFS pointer / gzip roto)
-      #   - reconcile: valida JSON de salida bq antes de jq
-      #   - genera load.ndjson (error si falta mapping)
+      # 6) Prepare load (fix: bq puede emitir WARNING en stdout)
+      #   - descarga ESI y valida JSON
+      #   - valida gzip SDE
+      #   - reconcile: limpia stdout de bq hasta el primer '{' o '['
+      #   - genera load.ndjson
       # ============================================================
       - name: Prepare load (download ESI + validate inputs + build ndjson)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' }}
@@ -294,6 +294,21 @@ jobs:
           set -euo pipefail
           mode="${{ steps.mode.outputs.mode }}"
           lm_iso="${{ steps.esi.outputs.last_modified_iso }}"
+
+          # Helper: keep only JSON from a stream that may start with warnings/log lines.
+          # It prints from the first line that begins (ignoring spaces) with '{' or '['.
+          stream_json_only() {
+            awk '
+              BEGIN{started=0}
+              {
+                if(started==0){
+                  if($0 ~ /^[[:space:]]*[\[{]/){ started=1; print $0 }
+                } else {
+                  print $0
+                }
+              }
+            '
+          }
 
           # 1) Descarga ESI body + valida JSON
           http_code="$(curl -sS -L -w "%{http_code}" -o esi_body.json "${ESI_URL}")"
@@ -308,7 +323,7 @@ jobs:
             exit 1
           fi
 
-          # 2) Validar que el SDE sea gzip real (muy común fallo si fuera puntero LFS)
+          # 2) Validar que el SDE sea gzip real (evita puntero LFS / gzip roto)
           if ! gzip -t "${SDE_SOLARSYSTEMS_GZ}" >/dev/null 2>&1; then
             echo "SDE file is not a valid gzip: ${SDE_SOLARSYSTEMS_GZ}"
             echo "First lines (may be LFS pointer):"
@@ -326,12 +341,13 @@ jobs:
             exit 1
           fi
 
-          # 4) existing_map (solo reconcile) con validación de JSON
+          # 4) existing_map (solo reconcile) con limpieza de warnings en stdout
           if [[ "${mode}" == "reconcile" ]]; then
             bq --project_id="${GCP_PROJECT_ID}" query --quiet --format=json --use_legacy_sql=false \
               "SELECT solarSystem
                FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
                WHERE snapshot_ts = TIMESTAMP('${lm_iso}')" \
+              | stream_json_only \
               > existing_rows.json
 
             if ! jq -e 'type=="array"' existing_rows.json >/dev/null 2>&1; then
