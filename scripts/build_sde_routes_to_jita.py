@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 
 import gzip
-import io
 import json
 import math
 import os
@@ -56,6 +55,17 @@ def safer_cost_to_enter(security_status: float) -> float:
     return 0.90
 
 
+def classify_security(security_status: float) -> Tuple[bool, bool]:
+    """
+    Returns (is_low, is_null)
+      low: 0 < sec < 0.45
+      null: sec <= 0.0
+    """
+    is_null = security_status <= 0.0
+    is_low = (security_status > 0.0) and (security_status < 0.45)
+    return is_low, is_null
+
+
 def parse_stargate_group(group: str) -> Optional[Tuple[str, str]]:
     """
     Expected: 'A ↔ B'
@@ -63,7 +73,6 @@ def parse_stargate_group(group: str) -> Optional[Tuple[str, str]]:
     """
     if not group:
         return None
-    # Some files may use different spacing; normalize around the symbol.
     if "↔" in group:
         parts = group.split("↔")
         if len(parts) == 2:
@@ -76,8 +85,8 @@ def parse_stargate_group(group: str) -> Optional[Tuple[str, str]]:
 
 def parse_stargate_fallback(stargate: str) -> Optional[Tuple[str, str]]:
     """
-    Fallback: 'A → B' (one direction line). We'll treat as an undirected connection
-    at graph level (since group usually exists).
+    Fallback: 'A → B' (one direction line).
+    We'll treat it as an undirected connection at graph level.
     """
     if not stargate:
         return None
@@ -99,7 +108,6 @@ def load_systems() -> Tuple[Dict[int, str], Dict[str, int]]:
         sid = int(row["solarSystemID"])
         name = str(row["solarSystem"])
         id_to_name[sid] = name
-        # If duplicates ever existed, keep first; but SDE should be unique.
         name_to_id.setdefault(name, sid)
 
     return id_to_name, name_to_id
@@ -109,14 +117,11 @@ def load_security() -> Dict[int, float]:
     sec: Dict[int, float] = {}
     for row in read_jsonl(MAP_SYSTEMS):
         sid = int(row["_key"])
-        # If missing, treat as <=0.0 later.
         sec[sid] = float(row.get("securityStatus", -1.0))
     return sec
 
 
-def load_edges(name_to_id: Dict[str, int]) -> List[List[int]]:
-    # Build undirected edges by parsing stargateGroup (preferred)
-    # and mapping system names to IDs.
+def load_adjacency(name_to_id: Dict[str, int]) -> Dict[int, List[int]]:
     edge_set: Set[Tuple[int, int]] = set()
 
     for row in read_jsonl_gz(STARGATES_GZ):
@@ -135,20 +140,16 @@ def load_edges(name_to_id: Dict[str, int]) -> List[List[int]]:
         u, v = (a_id, b_id) if a_id < b_id else (b_id, a_id)
         edge_set.add((u, v))
 
-    # adjacency list
-    # We must size adjacency by max system id range? No, use dict then compact to list.
-    # But we want O(1) neighbor iteration; simplest: dict[int, list[int]] then later map.
     adj: Dict[int, List[int]] = {}
     for u, v in edge_set:
         adj.setdefault(u, []).append(v)
         adj.setdefault(v, []).append(u)
 
-    # Convert to dense list indexed by system id max for speed (ids are ~30M; too sparse).
-    # So keep as dict-based adjacency. Return dict? We'll keep dict to avoid huge memory.
-    # We'll store as list-of-lists via mapping from ids? Too heavy; keep dict in outer scope.
-    # Here we return dict-like adjacency using a "list of lists" signature by wrapping later.
-    # We'll actually return the dict as adjacency by type ignore at call site.
-    return adj  # type: ignore[return-value]
+    # Determinismo: ordenar vecinos
+    for k in adj:
+        adj[k].sort()
+
+    return adj
 
 
 def dijkstra_reverse_from_dest(
@@ -157,17 +158,14 @@ def dijkstra_reverse_from_dest(
     security: Dict[int, float],
 ) -> Tuple[Dict[int, float], Dict[int, Optional[int]]]:
     """
-    Compute best cost-to-destination for all nodes, using reverse relaxation:
+    Reverse Dijkstra:
       dist[u] = dist[v] + cost_to_enter(v)
     where edge exists u<->v.
 
-    Returns:
-      dist: node->mincost to reach dest
-      next_hop: node->the neighbor to go next toward dest, or None (dest itself)
+    next_hop[u] = v means from u go to v as the next system toward dest.
     """
     dist: Dict[int, float] = {dest_id: 0.0}
     next_hop: Dict[int, Optional[int]] = {dest_id: None}
-
     heap: List[Tuple[float, int]] = [(0.0, dest_id)]
 
     while heap:
@@ -175,7 +173,6 @@ def dijkstra_reverse_from_dest(
         if d_v != dist.get(v, float("inf")):
             continue
 
-        # cost to enter v (when coming from any neighbor u -> v)
         sec_v = security.get(v, -1.0)
         w = safer_cost_to_enter(sec_v)
 
@@ -183,13 +180,12 @@ def dijkstra_reverse_from_dest(
             cand = d_v + w
             d_u = dist.get(u, float("inf"))
 
-            # Deterministic tie-break: if cost equal, pick smaller next-hop id
-            if cand < d_u - 0.0:
+            if cand < d_u:
                 dist[u] = cand
                 next_hop[u] = v
                 heapq.heappush(heap, (cand, u))
             elif cand == d_u:
-                # tie-break
+                # Tie-break determinista: next hop con menor ID
                 cur = next_hop.get(u)
                 if cur is None or v < cur:
                     next_hop[u] = v
@@ -197,65 +193,96 @@ def dijkstra_reverse_from_dest(
     return dist, next_hop
 
 
-def count_stargates(origin_id: int, dest_id: int, next_hop: Dict[int, Optional[int]]) -> Optional[int]:
+def build_path(origin_id: int, dest_id: int, next_hop: Dict[int, Optional[int]]) -> Optional[List[int]]:
+    """
+    Returns list of system IDs including origin and dest, or None if unreachable.
+    """
     if origin_id == dest_id:
-        return 0
+        return [origin_id]
 
-    # If origin not reachable, or chain breaks, return None
     if origin_id not in next_hop:
         return None
 
-    hops = 0
+    path: List[int] = []
     seen = set()
     cur = origin_id
-    while cur != dest_id:
+
+    while True:
         if cur in seen:
-            # safety against cycles (should not happen if next_hop from Dijkstra)
             return None
         seen.add(cur)
+
+        path.append(cur)
+        if cur == dest_id:
+            return path
 
         nxt = next_hop.get(cur)
         if nxt is None:
             return None
-        hops += 1
         cur = nxt
 
-        # Just in case
-        if hops > 100000:
+        if len(path) > 200000:
             return None
 
-    return hops
+
+def summarize_route_security(path_ids: List[int], security: Dict[int, float]) -> Tuple[int, int]:
+    """
+    Counts:
+      sslow: 0 < sec < 0.45
+      ssnull: sec <= 0.0
+    includes origin and destination
+    """
+    sslow = 0
+    ssnull = 0
+    for sid in path_ids:
+        sec = security.get(sid, -1.0)
+        is_low, is_null = classify_security(sec)
+        if is_low:
+            sslow += 1
+        if is_null:
+            ssnull += 1
+    return sslow, ssnull
 
 
 def main() -> None:
-    # Load systems
     id_to_name, name_to_id = load_systems()
 
     dest_id = name_to_id.get(DEST_NAME)
     if dest_id is None:
         raise RuntimeError(f'Destination system "{DEST_NAME}" not found in {SOLARSYSTEMS_GZ}')
 
-    # Load security status
     security = load_security()
+    adjacency = load_adjacency(name_to_id)
 
-    # Load edges / adjacency
-    adjacency: Dict[int, List[int]] = load_edges(name_to_id)  # type: ignore[assignment]
-
-    # Dijkstra reverse from Jita
     _, next_hop = dijkstra_reverse_from_dest(dest_id, adjacency, security)
 
-    # Write output gz (overwrite)
     os.makedirs(os.path.dirname(OUT_GZ), exist_ok=True)
+
     with gzip.open(OUT_GZ, "wt", encoding="utf-8", newline="\n") as out:
-        # Iterate all systems from solarsystems (authoritative list)
-        # Sort by name for stable output (optional but helps diffs)
+        # salida estable: por nombre
         for sid, sname in sorted(id_to_name.items(), key=lambda kv: kv[1]):
-            hops = count_stargates(sid, dest_id, next_hop)
-            record = {
-                "solarSystem": sname,
-                "route": f"{sname} → {DEST_NAME}",
-                "stargates": hops,  # int or None
-            }
+            path = build_path(sid, dest_id, next_hop)
+
+            if path is None:
+                record = {
+                    "solarSystem": sname,
+                    "route": f"{sname} → {DEST_NAME}",
+                    "stargates": None,
+                    "sslow": None,
+                    "ssnull": None,
+                }
+            else:
+                stargates = len(path) - 1
+                sslow, ssnull = summarize_route_security(path, security)
+
+                record = {
+                    "solarSystem": sname,
+                    "route": f"{sname} → {DEST_NAME}",
+                    "stargates": stargates,
+                    "sslow": sslow,
+                    "ssnull": ssnull,
+                }
+
             out.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
