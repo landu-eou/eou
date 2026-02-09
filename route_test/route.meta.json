@@ -1,9 +1,9 @@
 {
-  "generated_at_utc": "2026-02-09T23:04:31.834873+00:00",
+  "generated_at_utc": "2026-02-09T23:06:28.794836+00:00",
   "jita_id": 30000142,
   "reachable_systems_count": 5175,
   "unique_systems_in_route": 5175,
-  "route_length": 13334,
+  "route_length": 13307,
   "heuristic": "greedy_k_candidates_lookahead + random_restarts + 3min checkpoints",
   "params": {
     "search_budget_seconds": 1080,
@@ -16,10 +16,10 @@
     "max_restarts": 100000
   },
   "runs": {
-    "attempted": 45,
-    "completed": 45,
-    "best_seed": 6824595947281721995,
-    "checkpoints_done": 3,
+    "attempted": 151,
+    "completed": 151,
+    "best_seed": 6824595947281721905,
+    "checkpoints_done": 4,
     "last_push_ok": true
   },
   "inputs": {
@@ -33,7 +33,7 @@
     }
   },
   "timing": {
-    "elapsed_seconds": 53.706,
-    "deadline_in_seconds": 1026.294
+    "elapsed_seconds": 170.666,
+    "deadline_in_seconds": 909.334
   }
 }
