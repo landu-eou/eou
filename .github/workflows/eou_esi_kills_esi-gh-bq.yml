@@ -1,16 +1,21 @@
-# .github/workflows/eou_esi_kills_esi-gh-bq.yml
-name: ESI System Kills (ESI → GH → BQ)
+name: ESI System Jumps (ESI → GH → BQ)
 
 on:
   workflow_dispatch:
 
+# Permisos mínimos:
+# - actions:read  -> Guard por REST (listar runs)
+# - contents:write -> commit de states/system_jumps.json
+# - id-token:write -> WIF/OIDC hacia Google
 permissions:
   actions: read
   contents: write
   id-token: write
 
+# Candado oficial: evita solapamiento real.
+# Los duplicados/colas "útiles" se cortan con el Guard.
 concurrency:
-  group: eou_esi_kills_esi-gh-bq
+  group: eou_esi_jumps_esi-gh-bq
   cancel-in-progress: false
 
 jobs:
@@ -20,27 +25,29 @@ jobs:
 
     env:
       # Guard (anti-cola)
-      WORKFLOW_FILE: eou_esi_kills_esi-gh-bq.yml
+      WORKFLOW_FILE: eou_esi_jumps_esi-gh-bq.yml
       GH_API: https://api.github.com
 
       # Sheets (tabla de control)
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
-      SHEETS_WORKFLOW_ROW: "6"
-      LOCK_TIME: "120" # segundos
+      SHEETS_WORKFLOW_ROW: "5"
+      LOCK_TIME: "60" # segundos
 
       # ESI + estado local
-      ESI_URL: https://esi.evetech.net/universe/system_kills
-      STATE_PATH: states/system_kills.json
+      ESI_URL: https://esi.evetech.net/universe/system_jumps
+      STATE_PATH: states/system_jumps.json
       SDE_SOLARSYSTEMS_GZ: data/sde/solarsystems.jsonl.gz
 
       # BigQuery
       BQ_DATASET: eou
-      BQ_TABLE: system_kills
+      BQ_TABLE: system_jumps
 
     steps:
       # ============================================================
       # 0) GUARD (anti-cola / anti-duplicados)
+      # - Si hay otro run in_progress => salir sin trabajo
+      # - Si un run anterior terminó success después de que este run se creara => este run es redundante
       # ============================================================
       - name: Guard - decide proceed (anti-cola)
         id: guard
@@ -109,6 +116,9 @@ jobs:
 
       # ============================================================
       # 1) BOOTSTRAP (serials de Sheets reutilizables)
+      # - RUN_START_EPOCH para el fallback de fallo (run_start + 5min)
+      # - lock_serial = now + LOCK_TIME (fase inicial)
+      # - fail_plus5_serial = run_start + 5min (fase final si falla)
       # ============================================================
       - name: Bootstrap - compute epoch and Sheets serials
         if: ${{ steps.guard.outputs.proceed == 'true' }}
@@ -153,6 +163,9 @@ jobs:
 
       # ============================================================
       # 3) ESI headers + snapshot
+      # - lee etag local
+      # - obtiene remote_etag + last_modified (snapshot_ts) + expires(+5min)
+      # - serials: last_modified_serial, expires_plus5_serial
       # ============================================================
       - name: Read state + fetch ESI headers (ETag/Expires/Last-Modified)
         if: ${{ steps.guard.outputs.proceed == 'true' }}
@@ -220,9 +233,7 @@ jobs:
           CREATE TABLE IF NOT EXISTS \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\` (
             snapshot_ts TIMESTAMP NOT NULL,
             solarSystem STRING,
-            npc_kills INT64,
-            pod_kills INT64,
-            ship_kills INT64
+            ship_jumps INT64
           )
           PARTITION BY DATE(snapshot_ts)
           CLUSTER BY solarSystem
@@ -278,13 +289,13 @@ jobs:
           printf 'update_state=%s\n' "$update_state" >> "${GITHUB_OUTPUT}"
 
       # ============================================================
-      # 6) Prepare load (fix: bq puede emitir WARNING en stdout)
-      #   - descarga ESI y valida JSON
-      #   - valida gzip SDE
-      #   - reconcile: limpia stdout de bq hasta el primer '{' o '['
-      #   - genera load.ndjson
+      # 6) Prepare load (solo si mode != noop)
+      # - descarga ESI body
+      # - mapea system_id -> solarSystem (SDE)
+      # - reconcile: filtra faltantes comparando con BQ
+      # - error si falta mapping => aborta antes de tocar Sheets/BQ/State
       # ============================================================
-      - name: Prepare load (download ESI + validate inputs + build ndjson)
+      - name: Prepare load (download ESI + validate mapping + build ndjson)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' }}
         id: prep
         env:
@@ -295,82 +306,30 @@ jobs:
           mode="${{ steps.mode.outputs.mode }}"
           lm_iso="${{ steps.esi.outputs.last_modified_iso }}"
 
-          # Helper: keep only JSON from a stream that may start with warnings/log lines.
-          # It prints from the first line that begins (ignoring spaces) with '{' or '['.
-          stream_json_only() {
-            awk '
-              BEGIN{started=0}
-              {
-                if(started==0){
-                  if($0 ~ /^[[:space:]]*[\[{]/){ started=1; print $0 }
-                } else {
-                  print $0
-                }
-              }
-            '
-          }
+          curl -sS -L "${ESI_URL}" -o esi_body.json
 
-          # 1) Descarga ESI body + valida JSON
-          http_code="$(curl -sS -L -w "%{http_code}" -o esi_body.json "${ESI_URL}")"
-          if [[ "${http_code}" != "200" ]]; then
-            echo "ESI download failed: HTTP ${http_code}"
-            head -c 200 esi_body.json || true
-            exit 1
-          fi
-          if ! jq -e 'type=="array"' esi_body.json >/dev/null 2>&1; then
-            echo "ESI body is not a valid JSON array. First bytes:"
-            head -c 200 esi_body.json || true
-            exit 1
-          fi
-
-          # 2) Validar que el SDE sea gzip real (evita puntero LFS / gzip roto)
-          if ! gzip -t "${SDE_SOLARSYSTEMS_GZ}" >/dev/null 2>&1; then
-            echo "SDE file is not a valid gzip: ${SDE_SOLARSYSTEMS_GZ}"
-            echo "First lines (may be LFS pointer):"
-            head -n 5 "${SDE_SOLARSYSTEMS_GZ}" || true
-            exit 1
-          fi
-
-          # 3) Build mapping SDE y validar JSON
           gzip -cd "${SDE_SOLARSYSTEMS_GZ}" \
             | jq -s 'map({(.solarSystemID|tostring): .solarSystem}) | add' \
             > sde_map.json
-          if ! jq -e 'type=="object"' sde_map.json >/dev/null 2>&1; then
-            echo "sde_map.json is not a valid JSON object."
-            head -c 200 sde_map.json || true
-            exit 1
-          fi
 
-          # 4) existing_map (solo reconcile) con limpieza de warnings en stdout
           if [[ "${mode}" == "reconcile" ]]; then
             bq --project_id="${GCP_PROJECT_ID}" query --quiet --format=json --use_legacy_sql=false \
               "SELECT solarSystem
                FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
                WHERE snapshot_ts = TIMESTAMP('${lm_iso}')" \
-              | stream_json_only \
-              > existing_rows.json
-
-            if ! jq -e 'type=="array"' existing_rows.json >/dev/null 2>&1; then
-              echo "BigQuery output is not valid JSON array (existing_rows.json). First bytes:"
-              head -c 300 existing_rows.json || true
-              exit 1
-            fi
-
-            jq 'map(.solarSystem) | map({(.): true}) | add // {}' existing_rows.json > existing_map.json
+              | jq 'map(.solarSystem) | map({(.): true}) | add // {}' \
+              > existing_map.json
           else
             echo '{}' > existing_map.json
           fi
 
-          # 5) Generar NDJSON (fail-fast si falta mapping)
           if [[ "${mode}" == "reconcile" ]]; then
             jq -c --arg ts "${lm_iso}" --slurpfile map sde_map.json --slurpfile exist existing_map.json '
               .[] |
               {
                 snapshot_ts: $ts,
                 solarSystem: ($map[0][(.system_id|tostring)] // error("missing solarSystem mapping for system_id=" + (.system_id|tostring))),
-                npc_kills: (.npc_kills|tonumber),
-                pod_kills: (.pod_kills|tonumber),
-                ship_kills: (.ship_kills|tonumber)
+                ship_jumps: (.ship_jumps|tonumber)
               } |
               select( ($exist[0][.solarSystem] // false) | not )
             ' esi_body.json > load.ndjson
@@ -380,9 +339,7 @@ jobs:
               {
                 snapshot_ts: $ts,
                 solarSystem: ($map[0][(.system_id|tostring)] // error("missing solarSystem mapping for system_id=" + (.system_id|tostring))),
-                npc_kills: (.npc_kills|tonumber),
-                pod_kills: (.pod_kills|tonumber),
-                ship_kills: (.ship_kills|tonumber)
+                ship_jumps: (.ship_jumps|tonumber)
               }
             ' esi_body.json > load.ndjson
           fi
@@ -392,6 +349,8 @@ jobs:
 
       # ============================================================
       # 7) Sheets lock (fase inicial)
+      # - Se ejecuta tras prep para cumplir: si falta mapping => no tocar nada
+      # - status=in_progress, next_run=now+LOCK_TIME (serial numérico)
       # ============================================================
       - name: Sheets - initial lock (in_progress + next_run = now + LOCK_TIME)
         if: ${{ steps.guard.outputs.proceed == 'true' && (steps.mode.outputs.mode == 'noop' || steps.prep.outputs.prepared == 'true') }}
@@ -427,10 +386,13 @@ jobs:
 
           body="$(make_body_lock "${{ steps.boot.outputs.lock_serial }}")"
           send_batch "${body}"
+
           echo "locked=true" >> "${GITHUB_OUTPUT}"
 
       # ============================================================
       # 8) BigQuery load (máximo 1 batch por run)
+      # - Solo si hay filas (load_lines != 0)
+      # - schema.json temporal para snapshot_ts REQUIRED (coincide con TIMESTAMP NOT NULL)
       # ============================================================
       - name: BigQuery load (single batch)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' && steps.prep.outputs.load_lines != '0' }}
@@ -443,9 +405,7 @@ jobs:
           printf '%s' \
             '[{"name":"snapshot_ts","type":"TIMESTAMP","mode":"REQUIRED"},'\
             '{"name":"solarSystem","type":"STRING","mode":"NULLABLE"},'\
-            '{"name":"npc_kills","type":"INT64","mode":"NULLABLE"},'\
-            '{"name":"pod_kills","type":"INT64","mode":"NULLABLE"},'\
-            '{"name":"ship_kills","type":"INT64","mode":"NULLABLE"}]' \
+            '{"name":"ship_jumps","type":"INT64","mode":"NULLABLE"}]' \
             > schema.json
 
           bq --project_id="${GCP_PROJECT_ID}" load --quiet \
@@ -472,12 +432,15 @@ jobs:
           git add "${STATE_PATH}"
           git diff --cached --quiet && exit 0
 
-          git commit -m "state: update system_kills etag"
+          git commit -m "state: update system_jumps etag"
           git pull --rebase
           git push
 
       # ============================================================
       # 10) Sheets finalize (fase final)
+      # - Si success: next_run = Expires + 5min
+      # - Si fail:    next_run = run_start + 5min
+      # - last_modified (col I) solo si success && update_state==true
       # ============================================================
       - name: Sheets - finalize (status + next_run + optional last_modified)
         if: ${{ always() && steps.sheets_lock.outputs.locked == 'true' }}
