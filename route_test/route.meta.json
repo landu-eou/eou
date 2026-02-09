@@ -1,5 +1,5 @@
 {
-  "generated_at_utc": "2026-02-09T23:10:16.236210+00:00",
+  "generated_at_utc": "2026-02-09T23:13:16.577946+00:00",
   "jita_id": 30000142,
   "reachable_systems_count": 5175,
   "unique_systems_in_route": 5175,
@@ -16,10 +16,10 @@
     "max_restarts": 100000
   },
   "runs": {
-    "attempted": 352,
-    "completed": 352,
+    "attempted": 512,
+    "completed": 512,
     "best_seed": 6824595947281722310,
-    "checkpoints_done": 7,
+    "checkpoints_done": 8,
     "last_push_ok": true
   },
   "inputs": {
@@ -33,7 +33,7 @@
     }
   },
   "timing": {
-    "elapsed_seconds": 398.108,
-    "deadline_in_seconds": 681.892
+    "elapsed_seconds": 578.449,
+    "deadline_in_seconds": 501.551
   }
 }
