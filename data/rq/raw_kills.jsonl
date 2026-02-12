@@ -69,3 +69,13 @@
 {"killID":133305151,"zkb":{"hash":"6ec3812b0c252dfd36ee6a0d32c475e5d7bcf061","locationID":50009416,"labels":["tz:usw","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
 {"killID":133305148,"zkb":{"hash":"a9f0194f500af6f4e369ffdcd37bbaf55f3a0bda","locationID":50013734,"labels":["tz:usw","cat:6","solo","pvp","loc:highsec"]},"rearm":0}
 {"killID":133305155,"zkb":{"hash":"314f12f5ca1765e665624c3189c20d285954a259","locationID":50016522,"labels":["tz:usw","cat:6","solo","pvp"]},"rearm":0}
+{"killID":133305145,"zkb":{"hash":"86fdbe23cf92fb03a9153bc8ea0612d4e0f777e0","locationID":50009910,"labels":["tz:usw","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133305147,"zkb":{"hash":"67a6b8dba31c1fe88f6e6e551a95096b5eb3f57b","locationID":50009910,"labels":["tz:usw","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133305138,"zkb":{"hash":"95cb4dfa5a5b004e84ed1941a624a6dfb19cb04c","locationID":50009910,"labels":["tz:usw","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133305142,"zkb":{"hash":"8bbfacc8eae55f4e18d428abe75a0907453d0319","locationID":50009910,"labels":["tz:usw","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133305159,"zkb":{"hash":"15668e932930df0eead95e878a5988582d1b8a90","locationID":50016522,"labels":["tz:usw","cat:6","#:1","pvp"]},"rearm":0}
+{"killID":133304947,"zkb":{"hash":"8c6c5a8e06a9e3e018f331fd059d5ba8d4716aad","locationID":50014047,"labels":["tz:usw","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133305143,"zkb":{"hash":"09befba97e112b389a76307cf28a6ad76e8899e3","locationID":50001626,"labels":["tz:usw","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133305135,"zkb":{"hash":"ae27e885e56a4da99aff742490800e8f4692f8f0","locationID":50016491,"labels":["tz:usw","cat:6","solo","pvp"]},"rearm":0}
+{"killID":133305141,"zkb":{"hash":"a4f8afc5e39d818a859a2d2986e5e77441e6482f","locationID":50016491,"labels":["tz:usw","cat:6","#:1","pvp"]},"rearm":0}
+{"killID":133305131,"zkb":{"hash":"2d001fa68914caf17b88d46967ad587497874e84","locationID":50007503,"labels":["tz:usw","cat:6","solo","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
