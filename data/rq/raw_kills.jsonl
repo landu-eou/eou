@@ -73,3 +73,5 @@
 {"killID":133327075,"zkb":{"hash":"c8753a3f1ca78d00c6cbdc4b11258e8c6b2977fe","locationID":50008432,"labels":["tz:usw","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133327106,"zkb":{"hash":"360b657fb705219f56137a8ab87ff65a37b3037b","locationID":50003314,"labels":["tz:usw","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
 {"killID":133327093,"zkb":{"hash":"0ee8923fba88ab137484465bfce696a4fc500134","locationID":50003314,"labels":["tz:usw","cat:6","#:5+","pvp","loc:lowsec","fw:caldari","fw:calgal"]},"rearm":0}
+{"killID":133327116,"zkb":{"hash":"7de1d19e78600ebddebf51076250b516a29ea272","locationID":50003314,"labels":["tz:usw","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133326975,"zkb":{"hash":"a0b2a6071a4f63615e89ad1d6999d68879e790a0","locationID":50000067,"labels":["tz:usw","cat:6","#:1","pvp","loc:highsec"]},"rearm":0}
