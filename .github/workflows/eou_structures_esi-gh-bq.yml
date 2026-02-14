@@ -1,20 +1,13 @@
 name: ESI Structures (ESI → GH → BQ)
 
 on:
-  # Disparo externo (cron) vía workflow_dispatch.
-  # No se usa schedule interno.
   workflow_dispatch:
 
 permissions:
-  # Guard anti-cola consulta runs por REST API.
   actions: read
-  # Commit/push de data/esi/structures.jsonl.gz y states/structures.json.
   contents: write
-  # WIF/OIDC hacia Google.
   id-token: write
 
-# Candado oficial: evita que dos refresh simultáneos ejecuten trabajo.
-# cancel-in-progress:false => no cancela el run en curso.
 concurrency:
   group: eou_structures_esi-gh-bq
   cancel-in-progress: false
@@ -25,65 +18,34 @@ jobs:
     timeout-minutes: 90
 
     env:
-      # Identidad del workflow para el guard (anti-cola).
       WORKFLOW_FILE: eou_structures_esi-gh-bq.yml
 
-      # -----------------------
-      # Sheets (solo escritura)
-      # -----------------------
-      # Tab 'workflows':
-      # - Col B: status (string)
-      # - Col D: next_run (serial date number UTC)
-      # - Col I: last_modified (serial date number UTC, opcional)
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "8"
       LOCK_TIME: 300
 
-      # -----------------------
-      # Google / BigQuery
-      # -----------------------
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       BQ_DATASET: eou
       BQ_TABLE: structures
 
-      # -----------------------
-      # Paths en repo
-      # -----------------------
       STATE_ETAG_PATH: states/structures.json
       DATA_STRUCTURES_PATH: data/esi/structures.jsonl.gz
       SDE_SOLARSYSTEMS_PATH: data/sde/solarsystems.jsonl.gz
       SDE_TYPES_PATH: data/sde/types.jsonl.gz
 
-      # -----------------------
-      # URLs
-      # -----------------------
       SDE_ZIP_URL: https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip
       ESI_STRUCTURES_LIST_URL: https://esi.evetech.net/universe/structures/?filter=market
       ESI_STRUCTURE_DETAIL_URL_TEMPLATE: https://esi.evetech.net/universe/structures/{structure_id}/
 
-      # -----------------------
-      # Token selection + retries globales 401/420
-      # -----------------------
       PRIMARY_CHAR_ID: "2124070822"
       RETRY_BUDGET: "3"
 
-      # -----------------------
-      # ESI sustainability knobs (operacionales)
-      # -----------------------
-      # Default conservador: ~1 rps.
       ESI_MAX_RPM: "60"
-      # Si error-limit remain baja, se endurece el throttling.
       ESI_ERR_REMAIN_SOFT: "20"
       ESI_ERR_REMAIN_HARD: "5"
 
     steps:
-      # ------------------------------------------------------------
-      # 1) GUARD (anti-cola)
-      #    - Si hay otro run in_progress: salir sin hacer trabajo.
-      #    - Si hay cola queued y este run NO es leader: salir sin hacer trabajo.
-      #    (Usa REST API oficial de GitHub Actions.)
-      # ------------------------------------------------------------
       - name: Guard (anti-cola) — exit if another run is active / leader is different
         id: guard
         env:
@@ -116,21 +78,13 @@ jobs:
       - name: Exit if busy
         if: steps.guard.outputs.proceed != 'true'
         run: |
-          # Salida limpia: sin trabajo y sin ruido.
           exit 0
 
-      # ------------------------------------------------------------
-      # 2) Repo + toolchain
-      # ------------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # ------------------------------------------------------------
-      # 3) Auth Google (WIF/OIDC)
-      #    - Se usa access_token para Sheets y cloud-platform para gcloud/bq.
-      # ------------------------------------------------------------
       - name: Auth to Google (WIF)
         id: gcp_auth
         uses: google-github-actions/auth@v2
@@ -153,11 +107,6 @@ jobs:
         with:
           version: '>= 390.0.0'
 
-      # ------------------------------------------------------------
-      # 4) LOCK INICIAL en Sheets (solo escritura)
-      #    status = in_progress
-      #    next_run = now + LOCK_TIME (serial date number UTC)
-      # ------------------------------------------------------------
       - name: Lock (in_progress + next_run as value)
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
@@ -176,12 +125,6 @@ jobs:
           curl -fsSL -X POST -H "Authorization: Bearer ${ACCESS_TOKEN}" -H "Content-Type: application/json" \
             "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" -d "$payload"
 
-      # ------------------------------------------------------------
-      # 5) PIPELINE (ESI → GH files → BQ)
-      #    - Implementado en Python (inputs por env vars).
-      #    - El script publica outputs para Finalize Sheets:
-      #      status, next_run_epoch, write_last_modified, last_modified_epoch, repo_dirty
-      # ------------------------------------------------------------
       - name: Run structures pipeline
         id: structures
         env:
@@ -191,10 +134,6 @@ jobs:
           set -euo pipefail
           python scripts/esi/eou_structures_run.py
 
-      # ------------------------------------------------------------
-      # 6) Commit/push (solo si el script cambió repo)
-      #    - Si falla, Finalize marcará failed y next_run=+30m.
-      # ------------------------------------------------------------
       - name: Commit & push (only if repo_dirty)
         id: git_push
         if: steps.structures.outputs.repo_dirty == 'true'
@@ -220,12 +159,6 @@ jobs:
           echo "pushed=false" >> "$GITHUB_OUTPUT"
           exit 1
 
-      # ------------------------------------------------------------
-      # 7) FINALIZE en Sheets (solo escritura)
-      #    - Si el script no publicó outputs: failed + 30m.
-      #    - Si git_push falló: failed + 30m.
-      #    - last_modified solo se escribe si write_last_modified=true.
-      # ------------------------------------------------------------
       - name: Finalize Sheets (status + next_run [+ last_modified])
         if: always()
         env:
@@ -239,6 +172,19 @@ jobs:
           write_lm="${{ steps.structures.outputs.write_last_modified }}"
           lm_epoch="${{ steps.structures.outputs.last_modified_epoch }}"
 
+          # --- Diagnóstico mínimo (solo si falla) ---
+          fail_reason="${{ steps.structures.outputs.fail_reason }}"
+          fail_stage="${{ steps.structures.outputs.fail_stage }}"
+          sde_status="${{ steps.structures.outputs.http_sde_status }}"
+          list_status="${{ steps.structures.outputs.http_list_status }}"
+          retry_used="${{ steps.structures.outputs.retry_used }}"
+          enrich_total="${{ steps.structures.outputs.enrich_total }}"
+          enrich_401="${{ steps.structures.outputs.enrich_401 }}"
+          enrich_420="${{ steps.structures.outputs.enrich_420 }}"
+          bq_stage="${{ steps.structures.outputs.stage_bq }}"
+          data_stage="${{ steps.structures.outputs.stage_data }}"
+          state_stage="${{ steps.structures.outputs.stage_state_update }}"
+
           if [ -z "${status}" ] || [ -z "${next_epoch}" ]; then
             status="failed"
             next_epoch="$(date -u -d "+30 minutes" +%s)"
@@ -249,6 +195,10 @@ jobs:
           if [ "${{ steps.git_push.outcome }}" = "failure" ]; then
             status="failed"
             next_epoch="$(date -u -d "+30 minutes" +%s)"
+          fi
+
+          if [ "${status}" = "failed" ]; then
+            echo "diag fail_reason=${fail_reason} fail_stage=${fail_stage} sde=${sde_status} list=${list_status} retry_used=${retry_used} enrich_total=${enrich_total} enrich401=${enrich_401} enrich420=${enrich_420} stages(bq,data,state)=(${bq_stage},${data_stage},${state_stage})"
           fi
 
           next_serial="$(awk "BEGIN { printf \"%.10f\", (${next_epoch}/86400) + 25569 }")"
