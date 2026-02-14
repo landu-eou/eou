@@ -53,10 +53,8 @@ jobs:
       - name: Commit & Push (rebase on latest main)
         run: |
           set -e
-
           TARGET="data/sde/routes.jsonl.gz"
 
-          # Si no hay cambios, salir.
           if [ -z "$(git status --porcelain -- "$TARGET")" ]; then
             echo "No changes."
             exit 0
@@ -65,16 +63,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Asegura estar sobre el main remoto más reciente antes de crear el commit.
           git fetch origin main
           git rebase origin/main
 
           git add -- "$TARGET"
           git commit -m "sde: rebuild routes.jsonl.gz (stargate safer100 + cyno rules)"
 
-          # Anti-race: por si main avanzó entre rebase y commit, rebase de nuevo y push.
           git fetch origin main
           git rebase origin/main
 
-          # Push normal (fast-forward) tras rebase.
           git push origin HEAD:main
