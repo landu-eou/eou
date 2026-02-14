@@ -26,6 +26,16 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Sync with origin/main (clean rebase BEFORE generating)
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin main
+          # Workspace está limpio aquí (acabamos de hacer checkout), rebase seguro.
+          git rebase origin/main
+
       - name: Validate inputs exist
         run: |
           set -e
@@ -50,7 +60,7 @@ jobs:
           gzip -t data/sde/routes.jsonl.gz
           test -s data/sde/routes.jsonl.gz
 
-      - name: Commit & Push (rebase on latest main)
+      - name: Commit & Push (rebasing safely)
         run: |
           set -e
           TARGET="data/sde/routes.jsonl.gz"
@@ -60,15 +70,11 @@ jobs:
             exit 0
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git fetch origin main
-          git rebase origin/main
-
+          # Commit primero (ya estamos sobre origin/main por el step anterior)
           git add -- "$TARGET"
           git commit -m "sde: rebuild routes.jsonl.gz (stargate safer100 + cyno rules)"
 
+          # Anti-race: si main avanzó DURANTE el build, rebase con autostash (ahora NO hay cambios sin commit)
           git fetch origin main
           git rebase origin/main
 
