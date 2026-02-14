@@ -148,10 +148,26 @@ def load_stargates_graph(stargates_gz: str, name_to_id: Dict[str, int]) -> Dict[
         out[k] = sorted(vs)
     return out
 
-
 def load_ganksystems_ids(ganksystems_json: str, name_to_id: Dict[str, int]) -> Set[int]:
+    """
+    Accepts:
+      - Valid JSON: array/object/etc.
+      - Non-standard set-like format: { "Uedama", "Sivala", ... }
+      - Plain text: one system name per line (optionally comma-separated)
+    Returns a set of solarSystemID.
+    """
+    import re
+
+    text = ""
     with open(ganksystems_json, "rt", encoding="utf-8") as f:
-        data = json.load(f)
+        text = f.read()
+
+    # 1) Try strict JSON first
+    data = None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = None
 
     found: Set[int] = set()
 
@@ -182,8 +198,41 @@ def load_ganksystems_ids(ganksystems_json: str, name_to_id: Dict[str, int]) -> S
                 visit(v)
             return
 
-    visit(data)
+    if data is not None:
+        visit(data)
+        return found
+
+    # 2) Fallback: extract quoted strings "Name"
+    quoted = re.findall(r'"([^"]+)"', text)
+    if quoted:
+        for name in quoted:
+            sid = name_to_id.get(name.strip())
+            if sid is not None:
+                found.add(sid)
+        return found
+
+    # 3) Fallback: plain text lines (optionally comma-separated)
+    # Strip braces if present
+    cleaned = text.replace("{", "\n").replace("}", "\n")
+    for line in cleaned.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # remove trailing commas
+        if line.endswith(","):
+            line = line[:-1].strip()
+        # allow comma-separated items per line
+        parts = [p.strip() for p in line.split(",") if p.strip()]
+        for p in parts:
+            # remove surrounding quotes if any
+            if len(p) >= 2 and p[0] == p[-1] == '"':
+                p = p[1:-1].strip()
+            sid = name_to_id.get(p)
+            if sid is not None:
+                found.add(sid)
+
     return found
+
 
 
 # -----------------------------
