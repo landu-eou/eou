@@ -109,3 +109,12 @@
 {"killID":133361188,"zkb":{"hash":"187e301f634a597f6210cb49dfd8f760d5299051","locationID":50002796,"labels":["tz:au","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133361237,"zkb":{"hash":"99607c7daeb753e7885828c17799daa4811f0998","locationID":50003141,"labels":["tz:au","cat:6","solo","pvp","loc:lowsec"]},"rearm":0}
 {"killID":133361260,"zkb":{"hash":"53dd644b85abd78222fa8f4bab377c302424b0ce","locationID":50012306,"labels":["tz:au","cat:6","#:1","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133361208,"zkb":{"hash":"40828520702fb791ae0097b4ba7d8640016ac479","locationID":50009842,"labels":["tz:au","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133361257,"zkb":{"hash":"e62ee13971c13b7749e335604ebeb0dbefc192ad","locationID":50009843,"labels":["tz:au","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133361258,"zkb":{"hash":"f2e1cb1080b725fcc79eada98ee87d517bc3a9b3","locationID":50014002,"labels":["tz:au","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133361232,"zkb":{"hash":"e32f0d6ddf046bd0354403975063f135d8cc4377","locationID":50004550,"labels":["tz:au","cat:6","#:2+","pvp","loc:lowsec","fw:minmatar","fw:amamin"]},"rearm":0}
+{"killID":133361242,"zkb":{"hash":"94066a5289749e3a2b4ce6cacadc94e638b31d2b","locationID":50004550,"labels":["tz:au","cat:6","#:2+","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
+{"killID":133361251,"zkb":{"hash":"b6774e052ebb90896bff237add00e6463ebf1441","locationID":50004550,"labels":["tz:au","cat:6","#:2+","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
+{"killID":133361264,"zkb":{"hash":"dd62f36e36f781aff60bd1fa6d59ae255a0b611c","locationID":50004550,"labels":["tz:au","cat:6","#:2+","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
+{"killID":133361289,"zkb":{"hash":"e91e8a563441e3690b5ddd2064cfee92b0459e19","locationID":50007335,"labels":["tz:au","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133361302,"zkb":{"hash":"e89b3b02ec92073e8f3534242d7bbf3125caa47d","locationID":50007170,"labels":["tz:au","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
