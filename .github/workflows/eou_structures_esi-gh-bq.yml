@@ -20,27 +20,47 @@ jobs:
     env:
       WORKFLOW_FILE: eou_structures_esi-gh-bq.yml
 
+      # -----------------------
+      # Sheets (solo escritura)
+      # -----------------------
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "8"
       LOCK_TIME: 300
 
+      # -----------------------
+      # Google / BigQuery
+      # -----------------------
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       BQ_DATASET: eou
       BQ_TABLE: structures
+      # Importante: dataset EU (según tu propio panel). Pasamos location explícita para evitar mismatch.
+      BQ_LOCATION: EU
 
+      # -----------------------
+      # Paths en repo
+      # -----------------------
       STATE_ETAG_PATH: states/structures.json
       DATA_STRUCTURES_PATH: data/esi/structures.jsonl.gz
       SDE_SOLARSYSTEMS_PATH: data/sde/solarsystems.jsonl.gz
       SDE_TYPES_PATH: data/sde/types.jsonl.gz
 
+      # -----------------------
+      # URLs
+      # -----------------------
       SDE_ZIP_URL: https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip
       ESI_STRUCTURES_LIST_URL: https://esi.evetech.net/universe/structures/?filter=market
       ESI_STRUCTURE_DETAIL_URL_TEMPLATE: https://esi.evetech.net/universe/structures/{structure_id}/
 
+      # -----------------------
+      # Token selection + retries globales 401/420
+      # -----------------------
       PRIMARY_CHAR_ID: "2124070822"
       RETRY_BUDGET: "3"
 
+      # -----------------------
+      # ESI sustainability knobs
+      # -----------------------
       ESI_MAX_RPM: "60"
       ESI_ERR_REMAIN_SOFT: "20"
       ESI_ERR_REMAIN_HARD: "5"
@@ -185,6 +205,13 @@ jobs:
           data_stage="${{ steps.structures.outputs.stage_data }}"
           state_stage="${{ steps.structures.outputs.stage_state_update }}"
 
+          # --- Diagnóstico BQ (si aplica) ---
+          bq_step="${{ steps.structures.outputs.bq_step }}"
+          bq_rc="${{ steps.structures.outputs.bq_rc }}"
+          bq_location="${{ steps.structures.outputs.bq_location }}"
+          bq_cmd="${{ steps.structures.outputs.bq_cmd }}"
+          bq_stderr_snip="${{ steps.structures.outputs.bq_stderr_snip }}"
+
           if [ -z "${status}" ] || [ -z "${next_epoch}" ]; then
             status="failed"
             next_epoch="$(date -u -d "+30 minutes" +%s)"
@@ -199,6 +226,9 @@ jobs:
 
           if [ "${status}" = "failed" ]; then
             echo "diag fail_reason=${fail_reason} fail_stage=${fail_stage} sde=${sde_status} list=${list_status} retry_used=${retry_used} enrich_total=${enrich_total} enrich401=${enrich_401} enrich420=${enrich_420} stages(bq,data,state)=(${bq_stage},${data_stage},${state_stage})"
+            if [ "${fail_stage}" = "bq" ] || [ "${fail_reason}" = "BQ_FAIL" ]; then
+              echo "diag_bq step=${bq_step} rc=${bq_rc} location=${bq_location} cmd=${bq_cmd} stderr=${bq_stderr_snip}"
+            fi
           fi
 
           next_serial="$(awk "BEGIN { printf \"%.10f\", (${next_epoch}/86400) + 25569 }")"
