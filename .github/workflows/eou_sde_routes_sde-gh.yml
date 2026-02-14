@@ -16,8 +16,10 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Checkout
+      - name: Checkout (full history for rebase)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -26,6 +28,7 @@ jobs:
 
       - name: Validate inputs exist
         run: |
+          set -e
           test -f data/sde/solarsystems.jsonl.gz
           test -f data/sde/stargates.jsonl.gz
           test -f data/sde/ganksystems.json
@@ -34,6 +37,7 @@ jobs:
 
       - name: Build routes.jsonl.gz (full rebuild)
         run: |
+          set -e
           python -u scripts/build_sde_routes.py \
             --solarsystems data/sde/solarsystems.jsonl.gz \
             --stargates data/sde/stargates.jsonl.gz \
@@ -42,12 +46,17 @@ jobs:
 
       - name: Validate output
         run: |
+          set -e
           gzip -t data/sde/routes.jsonl.gz
           test -s data/sde/routes.jsonl.gz
 
-      - name: Commit if changed
+      - name: Commit & Push (rebase on latest main)
         run: |
+          set -e
+
           TARGET="data/sde/routes.jsonl.gz"
+
+          # Si no hay cambios, salir.
           if [ -z "$(git status --porcelain -- "$TARGET")" ]; then
             echo "No changes."
             exit 0
@@ -56,6 +65,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # Asegura estar sobre el main remoto más reciente antes de crear el commit.
+          git fetch origin main
+          git rebase origin/main
+
           git add -- "$TARGET"
           git commit -m "sde: rebuild routes.jsonl.gz (stargate safer100 + cyno rules)"
-          git push
+
+          # Anti-race: por si main avanzó entre rebase y commit, rebase de nuevo y push.
+          git fetch origin main
+          git rebase origin/main
+
+          # Push normal (fast-forward) tras rebase.
+          git push origin HEAD:main
