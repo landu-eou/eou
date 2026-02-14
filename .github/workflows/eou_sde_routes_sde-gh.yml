@@ -31,9 +31,7 @@ jobs:
           set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git fetch origin main
-          # Workspace está limpio aquí (acabamos de hacer checkout), rebase seguro.
           git rebase origin/main
 
       - name: Validate inputs exist
@@ -41,7 +39,7 @@ jobs:
           set -e
           test -f data/sde/solarsystems.jsonl.gz
           test -f data/sde/stargates.jsonl.gz
-          test -f data/sde/ganksystems.json
+          test -f data/sde/ganksystems.txt
           gzip -t data/sde/solarsystems.jsonl.gz
           gzip -t data/sde/stargates.jsonl.gz
 
@@ -51,7 +49,7 @@ jobs:
           python -u scripts/build_sde_routes.py \
             --solarsystems data/sde/solarsystems.jsonl.gz \
             --stargates data/sde/stargates.jsonl.gz \
-            --ganksystems data/sde/ganksystems.json \
+            --ganksystems data/sde/ganksystems.txt \
             --out data/sde/routes.jsonl.gz
 
       - name: Validate output
@@ -60,7 +58,7 @@ jobs:
           gzip -t data/sde/routes.jsonl.gz
           test -s data/sde/routes.jsonl.gz
 
-      - name: Commit & Push (rebasing safely)
+      - name: Commit & Push
         run: |
           set -e
           TARGET="data/sde/routes.jsonl.gz"
@@ -70,11 +68,9 @@ jobs:
             exit 0
           fi
 
-          # Commit primero (ya estamos sobre origin/main por el step anterior)
           git add -- "$TARGET"
           git commit -m "sde: rebuild routes.jsonl.gz (stargate safer100 + cyno rules)"
 
-          # Anti-race: si main avanzó DURANTE el build, rebase con autostash (ahora NO hay cambios sin commit)
           git fetch origin main
           git rebase origin/main
 
