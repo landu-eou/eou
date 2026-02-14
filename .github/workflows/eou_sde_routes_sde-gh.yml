@@ -1,0 +1,61 @@
+name: SDE Routes (stargate+cyno → routes.jsonl.gz)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: eou_sde_routes_sde-gh
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate inputs exist
+        run: |
+          test -f data/sde/solarsystems.jsonl.gz
+          test -f data/sde/stargates.jsonl.gz
+          test -f data/sde/ganksystems.json
+          gzip -t data/sde/solarsystems.jsonl.gz
+          gzip -t data/sde/stargates.jsonl.gz
+
+      - name: Build routes.jsonl.gz (full rebuild)
+        run: |
+          python -u scripts/build_sde_routes.py \
+            --solarsystems data/sde/solarsystems.jsonl.gz \
+            --stargates data/sde/stargates.jsonl.gz \
+            --ganksystems data/sde/ganksystems.json \
+            --out data/sde/routes.jsonl.gz
+
+      - name: Validate output
+        run: |
+          gzip -t data/sde/routes.jsonl.gz
+          test -s data/sde/routes.jsonl.gz
+
+      - name: Commit if changed
+        run: |
+          TARGET="data/sde/routes.jsonl.gz"
+          if [ -z "$(git status --porcelain -- "$TARGET")" ]; then
+            echo "No changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add -- "$TARGET"
+          git commit -m "sde: rebuild routes.jsonl.gz (stargate safer100 + cyno rules)"
+          git push
