@@ -268,7 +268,6 @@ def build_type_sets(
         if is_nl(s.sec):
             NL.add(sid)
 
-        # Highsec not ganklisted
         if sid in has_gate and s.sec >= LOWSEC_THRESHOLD and sid not in gank_ids:
             Hg.add(sid)
 
@@ -299,8 +298,6 @@ def build_type_sets(
 # Final routing
 # -----------------------------
 
-# Cost tuple:
-# fuel, cyno_count, risky_cyno_count, low2high_gate, gank_hi_entries, neg_minGateSec, stargate_count, intermediate_count, base_min_id
 Cost = Tuple[int, int, int, int, int, float, int, int, int]
 
 
@@ -308,6 +305,14 @@ def build_reverse_cyno_edges_bruteforce_LD_only(
     systems: Dict[int, System],
     LD: Set[int],
 ) -> Dict[int, List[Tuple[int, int, bool]]]:
+    """
+    Reverse cyno adjacency for destinations only in [LD].
+    dest -> list of (origin, fuel, dest_is_risky)
+
+    NEW STRONG RULE:
+      - origin of a cynoJump MUST have securityStatus < 0.45
+        (i.e., NO cyno origin in 0.45+ systems)
+    """
     eligible = []
     for did in LD:
         d = systems[did]
@@ -316,8 +321,10 @@ def build_reverse_cyno_edges_bruteforce_LD_only(
     r2 = float(MAX_CYNO_DIST_M) * float(MAX_CYNO_DIST_M)
     rev: Dict[int, List[Tuple[int, int, bool]]] = {did: [] for (did, *_rest) in eligible}
 
-    all_systems = list(systems.values())
-    for origin in all_systems:
+    # IMPORTANT: only origins with sec < 0.45
+    origin_systems = [s for s in systems.values() if s.sec < LOWSEC_THRESHOLD]
+
+    for origin in origin_systems:
         ox, oy, oz = origin.x, origin.y, origin.z
         oid = origin.system_id
 
@@ -541,14 +548,6 @@ def to_roman(n: int) -> str:
 
 
 def cyno_run_signature(route_steps: List[List[Any]]) -> str:
-    """
-    Returns roman signature for consecutive cynoJump runs:
-      - C           -> "I"
-      - CC          -> "II"
-      - C G C       -> "I-I"
-      - CC G C      -> "II-I"
-    If no cynoJump exists -> "".
-    """
     runs: List[int] = []
     i = 0
     while i < len(route_steps):
@@ -566,14 +565,8 @@ def cyno_run_signature(route_steps: List[List[Any]]) -> str:
 
 
 def normalize_roman_for_route_type(roman: str) -> str:
-    """
-    User rule:
-      - If roman == "I" => omit (return "")
-      - Otherwise keep (including "I-I")
-    """
-    if roman == "I":
-        return ""
-    return roman
+    # User rule: omit only when it is exactly "I"
+    return "" if roman == "I" else roman
 
 
 def build_route_type(
@@ -645,7 +638,7 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--jita-name", default="Jita")
 
-    # Backward compat: allow old flag but ignore it (do not write routesCat).
+    # Backward compat: allow old flag but ignore it
     ap.add_argument("--out-cat", default=None, help="DEPRECATED: ignored (routesCat removed).")
     args = ap.parse_args()
 
@@ -667,6 +660,8 @@ def main() -> int:
     base_has_lowsec, base_min_id = compute_base_flags(systems, base_next, jita_id)
 
     type_sets = build_type_sets(systems, gate_adj, gank_ids, base_has_lowsec)
+
+    # Cyno: ONLY to [LD], and now ONLY from origins sec < 0.45
     rev_cyno = build_reverse_cyno_edges_bruteforce_LD_only(systems, type_sets["LD"])
 
     best_safe, next_safe = dijkstra_final_routes(
