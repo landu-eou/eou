@@ -1,4 +1,4 @@
-name: SDE Routes to Jita (Safer100 + Cyno Rules)
+name: SDE Routes (SDE → GH) — routes.jsonl.gz
 
 on:
   workflow_dispatch:
@@ -7,16 +7,16 @@ permissions:
   contents: write
 
 concurrency:
-  group: eou_sde_routes_to_jita
+  group: eou_sde_routes_sde-gh
   cancel-in-progress: false
 
 jobs:
-  run:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
-      - name: Checkout
+      - name: Checkout (full history)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -26,31 +26,39 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Sync with remote main (rebase)
+        shell: bash
+        run: |
+          set -e
+          git fetch origin main
+          git rebase origin/main
+
       - name: Build routes.jsonl.gz
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
           python -u scripts/build_sde_routes.py \
             --solarsystems data/sde/solarsystems.jsonl.gz \
             --stargates data/sde/stargates.jsonl.gz \
+            --stations data/sde/stations.jsonl.gz \
             --ganksystems data/sde/ganksystems.txt \
             --out data/sde/routes.jsonl.gz
 
-      - name: Validate output
+      - name: Validate artifact
         shell: bash
         run: |
-          set -euo pipefail
-          gzip -t data/sde/routes.jsonl.gz
-          test -s data/sde/routes.jsonl.gz
+          set -e
+          TARGET="data/sde/routes.jsonl.gz"
+          gzip -t "$TARGET"
+          test -s "$TARGET"
 
-      - name: Commit & push if changed
+      - name: Commit & push if changed (rebase-safe)
         shell: bash
         run: |
-          set -euo pipefail
-
+          set -e
           TARGET="data/sde/routes.jsonl.gz"
 
-          # Detect changes (including new file)
+          # Detect changes (including untracked new file)
           if [ -z "$(git status --porcelain -- "$TARGET")" ]; then
             echo "No changes."
             exit 0
@@ -59,10 +67,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Stage first, then rebase cleanly (avoids "unstaged changes" rebase error)
           git add -- "$TARGET"
-          git commit -m "sde: rebuild routes.jsonl.gz (routeType)"
+          git commit -m "sde: rebuild routes.jsonl.gz (stations waypoints + cyno/gate rules)"
 
+          # Rebase again just in case main moved while building
           git fetch origin main
           git rebase origin/main
 
