@@ -15,11 +15,19 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Iterable, Any, Set
 
 LOWSEC_THRESHOLD = 0.45
-
 MAX_CYNO_DIST_M = 94_600_000_000_000_000  # 94600000000000000 m
 
 ISO_NUM = 2350
 ISO_DEN = 9_460_000_000_000_000  # 9460000000000000
+
+EDGE_STARGATE = "stargate"
+EDGE_CYNO = "cynoJump"
+
+# Cost order:
+# 1 cynoJumps, 2 jumpFuel, 3 riskyCynoJumps, 4 low->high gate count,
+# 5 gank highsec entries, 6 maximize minStargateSecurityStatus,
+# 7 stargates, 8 intermediate systems, 9 base_min_id
+Cost = Tuple[int, int, int, int, int, float, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -125,17 +133,10 @@ def load_stargates_graph(stargates_gz: str, name_to_id: Dict[str, int]) -> Dict[
         adj.setdefault(a_id, set()).add(b_id)
         adj.setdefault(b_id, set()).add(a_id)
 
-    out: Dict[int, List[int]] = {}
-    for k, vs in adj.items():
-        out[k] = sorted(vs)
-    return out
+    return {k: sorted(vs) for k, vs in adj.items()}
 
 
 def load_ganksystems_ids_txt(ganksystems_txt: str, name_to_id: Dict[str, int]) -> Set[int]:
-    """
-    One system name per line.
-    Allows blank lines and comments with # (also inline: "Uedama # comment").
-    """
     out: Set[int] = set()
     with open(ganksystems_txt, "rt", encoding="utf-8") as f:
         for line in f:
@@ -151,10 +152,6 @@ def load_ganksystems_ids_txt(ganksystems_txt: str, name_to_id: Dict[str, int]) -
                 out.add(sid)
     return out
 
-
-# -----------------------------
-# routeSDEsafe100 (stargate-only)
-# -----------------------------
 
 def safer_cost(sec_to: float, penalty_cost: float) -> float:
     if sec_to <= 0.0:
@@ -175,8 +172,7 @@ def dijkstra_route_sde_safer100(
     dist: Dict[int, Tuple[float, int]] = {dest_id: (0.0, 0)}  # (cost, gates)
     next_hop: Dict[int, int] = {}
 
-    heap: List[Tuple[float, int, int]] = []
-    heapq.heappush(heap, (0.0, 0, dest_id))
+    heap: List[Tuple[float, int, int]] = [(0.0, 0, dest_id)]
 
     while heap:
         cost_u, gates_u, u = heapq.heappop(heap)
@@ -191,9 +187,7 @@ def dijkstra_route_sde_safer100(
             cand = (new_cost, new_gates)
 
             old = dist.get(p, (INF, 10**18))
-            better = cand < old
-            equal = cand == old
-            if better or (equal and u < next_hop.get(p, 2**31 - 1)):
+            if cand < old or (cand == old and u < next_hop.get(p, 2**31 - 1)):
                 dist[p] = cand
                 next_hop[p] = u
                 heapq.heappush(heap, (new_cost, new_gates, p))
@@ -242,10 +236,6 @@ def compute_base_flags(
 
     return memo_low, memo_min
 
-
-# -----------------------------
-# Types
-# -----------------------------
 
 def is_lowsec(sec: float) -> bool:
     return 0.0 < sec < LOWSEC_THRESHOLD
@@ -309,20 +299,6 @@ def build_type_sets(
     }
 
 
-# -----------------------------
-# Final routing (Opción A) + counters
-# -----------------------------
-
-EDGE_STARGATE = "stargate"
-EDGE_CYNO = "cynoJump"
-
-# Cost order:
-# 1 cynoJumps, 2 jumpFuel, 3 riskyCynoJumps, 4 low->high gate count,
-# 5 gank highsec entries, 6 maximize minStargateSecurityStatus,
-# 7 stargates, 8 intermediate systems, 9 base_min_id
-Cost = Tuple[int, int, int, int, int, float, int, int, int]
-
-
 def build_reverse_cyno_edges_bruteforce_LD_only(
     systems: Dict[int, System],
     LD: Set[int],
@@ -357,8 +333,8 @@ def build_reverse_cyno_edges_bruteforce_LD_only(
 
             rev[did].append((oid, fuel, dest_is_risky))
 
-    for did, items in rev.items():
-        items.sort(key=lambda t: (t[0], t[1], t[2]))
+    for did in rev:
+        rev[did].sort(key=lambda t: (t[0], t[1], t[2]))
     return rev
 
 
@@ -412,8 +388,7 @@ def dijkstra_final_routes(
     start: Cost = (0, 0, 0, 0, 0, -1.0, 0, 0, base_min_id.get(dest_id, INF_ID))
     best[dest_id] = start
 
-    heap: List[Tuple[Cost, int]] = []
-    heapq.heappush(heap, (start, dest_id))
+    heap: List[Tuple[Cost, int]] = [(start, dest_id)]
 
     while heap:
         cost_u, u = heapq.heappop(heap)
@@ -442,9 +417,7 @@ def dijkstra_final_routes(
             cand: Cost = (cyno_j, fuel, risky_j, low2high2, gank_hi2, neg_min2, gates2, inter2, bm_p)
             old = best.get(p, inf_cost())
 
-            better = cand < old
-            equal = cand == old
-            if better or (equal and u < nxt_step.get(p, (2**31 - 1, "", 0))[0]):
+            if cand < old or (cand == old and u < nxt_step.get(p, (2**31 - 1, "", 0))[0]):
                 best[p] = cand
                 nxt_step[p] = (u, EDGE_STARGATE, 1)
                 heapq.heappush(heap, (cand, p))
@@ -467,9 +440,7 @@ def dijkstra_final_routes(
             )
             old = best.get(p, inf_cost())
 
-            better = cand < old
-            equal = cand == old
-            if better or (equal and u < nxt_step.get(p, (2**31 - 1, "", 0))[0]):
+            if cand < old or (cand == old and u < nxt_step.get(p, (2**31 - 1, "", 0))[0]):
                 best[p] = cand
                 nxt_step[p] = (u, EDGE_CYNO, fuel_edge)
                 heapq.heappush(heap, (cand, p))
@@ -547,7 +518,6 @@ def compute_route_counters(
 
     for etype, nxt, _meta in raw:
         s = systems[nxt]
-
         if etype == EDGE_CYNO:
             if s.cyno_jump_security == "safe":
                 safe += 1
@@ -563,16 +533,10 @@ def compute_route_counters(
             elif (0.0 < s.sec < LOWSEC_THRESHOLD) and s.system_id not in gank_ids:
                 lowsec += 1
 
-    cyno_counts = {"safe": safe, "risky": risky}
-    gate_counts = {"hisec": hisec, "midsec": midsec, "ganksec": ganksec, "lowsec": lowsec}
-    return cyno_counts, gate_counts
+    return {"safe": safe, "risky": risky}, {"hisec": hisec, "midsec": midsec, "ganksec": ganksec, "lowsec": lowsec}
 
 
 def write_jsonl_gz_atomic(path: str, rows: Iterable[dict], inner_filename: str) -> None:
-    """
-    Atomic write; sets gzip header original filename to `inner_filename`
-    (so it shows as routes.jsonl / routesCat.jsonl when inspected/extracted).
-    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     if os.path.exists(tmp):
@@ -589,7 +553,6 @@ def write_jsonl_gz_atomic(path: str, rows: Iterable[dict], inner_filename: str) 
 
 
 def canonical_cat_key(obj: dict) -> str:
-    # stable, content-based dedupe
     return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
@@ -597,9 +560,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--solarsystems", required=True)
     ap.add_argument("--stargates", required=True)
-    ap.add_argument("--ganksystems", required=True)  # .txt
-    ap.add_argument("--out", required=True)          # routes.jsonl.gz
-    ap.add_argument("--out-cat", required=True)      # routesCat.jsonl.gz
+    ap.add_argument("--ganksystems", required=True)
+    ap.add_argument("--out", required=True)       # routes.jsonl.gz
+    ap.add_argument("--out-cat", required=True)   # routesCat.jsonl.gz
     ap.add_argument("--jita-name", default="Jita")
     args = ap.parse_args()
 
@@ -611,7 +574,7 @@ def main() -> int:
         print(f"ERROR: Destination system '{args.jita_name}' not found.", file=sys.stderr)
         return 2
 
-    origin_ids = sorted(gate_adj.keys())  # systems with stargates
+    origin_ids = sorted(gate_adj.keys())
     gank_ids = load_ganksystems_ids_txt(args.ganksystems, name_to_id)
 
     base_next = dijkstra_route_sde_safer100(systems, gate_adj, jita_id)
@@ -630,11 +593,10 @@ def main() -> int:
         base_min_id=base_min_id,
     )
 
-    # Collect unique categories across ALL origins.
-    # Also includes hasRoute=false category when applicable.
     cats: Dict[str, dict] = {}
 
-    def cat_from_counts(has_route: bool, cyno_count: int, cyno_counts: Dict[str, int], gate_counts: Dict[str, int]) -> dict:
+    def cat_obj(has_route: bool, cyno_count: int, cyno_counts: Dict[str, int], gate_counts: Dict[str, int]) -> dict:
+        # IMPORTANT: count is INT (not bool). No jumpFuel. No stargates.count.
         return {
             "hasRoute": bool(has_route),
             "cynoJumps": {
@@ -650,6 +612,16 @@ def main() -> int:
             },
         }
 
+    # FORCE include base categories even if not present in data:
+    # - hasRoute:false
+    # - hasRoute:true with zero jumps (e.g., Jita)
+    forced = [
+        cat_obj(False, 0, {"safe": 0, "risky": 0}, {"hisec": 0, "midsec": 0, "ganksec": 0, "lowsec": 0}),
+        cat_obj(True, 0, {"safe": 0, "risky": 0}, {"hisec": 0, "midsec": 0, "ganksec": 0, "lowsec": 0}),
+    ]
+    for c in forced:
+        cats[canonical_cat_key(c)] = c
+
     def row_for_origin(oid: int) -> dict:
         o = systems[oid]
 
@@ -662,8 +634,8 @@ def main() -> int:
                 "stargates": {"count": 0, "hisec": 0, "midsec": 0, "ganksec": 0, "lowsec": 0},
                 "route": [],
             }
-            cobj = cat_from_counts(True, 0, {"safe": 0, "risky": 0}, {"hisec": 0, "midsec": 0, "ganksec": 0, "lowsec": 0})
-            cats[canonical_cat_key(cobj)] = cobj
+            c = cat_obj(True, 0, {"safe": 0, "risky": 0}, {"hisec": 0, "midsec": 0, "ganksec": 0, "lowsec": 0})
+            cats[canonical_cat_key(c)] = c
             return row
 
         if oid not in best:
@@ -675,17 +647,17 @@ def main() -> int:
                 "stargates": {"count": 0, "hisec": 0, "midsec": 0, "ganksec": 0, "lowsec": 0},
                 "route": [],
             }
-            cobj = cat_from_counts(False, 0, {"safe": 0, "risky": 0}, {"hisec": 0, "midsec": 0, "ganksec": 0, "lowsec": 0})
-            cats[canonical_cat_key(cobj)] = cobj
+            c = cat_obj(False, 0, {"safe": 0, "risky": 0}, {"hisec": 0, "midsec": 0, "ganksec": 0, "lowsec": 0})
+            cats[canonical_cat_key(c)] = c
             return row
 
         cyno_j, fuel_total, _risky_j, _low2high, _gank_hi, _neg_min, gates, _inter, _bm = best[oid]
-
         raw = reconstruct_raw_hops(jita_id, oid, nxt)
         steps = compress_steps(systems, raw)
         cyno_counts, gate_counts = compute_route_counters(systems, gank_ids, raw)
 
-        jump_fuel_out = int(fuel_total) * 2  # doubled total fuel; per-hop cyno fuel stays unchanged
+        # jumpFuel doubled (per-step cyno fuel unchanged)
+        jump_fuel_out = int(fuel_total) * 2
 
         row = {
             "solarSystem": o.name,
@@ -706,25 +678,24 @@ def main() -> int:
             "route": steps,
         }
 
-        cobj = cat_from_counts(True, int(cyno_j), cyno_counts, gate_counts)
-        cats[canonical_cat_key(cobj)] = cobj
+        c = cat_obj(True, int(cyno_j), cyno_counts, gate_counts)
+        cats[canonical_cat_key(c)] = c
 
         return row
 
-    # Rewrite outputs (no residue of previous contents)
+    # Rewrite outputs (no residue)
     if os.path.exists(args.out):
         os.remove(args.out)
     if os.path.exists(args.out_cat):
         os.remove(args.out_cat)
 
-    # Write routes.jsonl.gz
     write_jsonl_gz_atomic(
         args.out,
         (row_for_origin(oid) for oid in origin_ids),
         inner_filename="routes.jsonl",
     )
 
-    # Write deduped routesCat.jsonl.gz (stable order)
+    # Dedup + stable order
     cat_rows = [cats[k] for k in sorted(cats.keys())]
     write_jsonl_gz_atomic(
         args.out_cat,
