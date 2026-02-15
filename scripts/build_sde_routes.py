@@ -244,7 +244,7 @@ def compute_base_flags(
 
 
 # -----------------------------
-# Types (per your rules)
+# Types
 # -----------------------------
 
 def is_lowsec(sec: float) -> bool:
@@ -310,7 +310,7 @@ def build_type_sets(
 
 
 # -----------------------------
-# Final routing (Opción A) + counters
+# Final routing (Opción A)
 # -----------------------------
 
 EDGE_STARGATE = "stargate"
@@ -482,11 +482,6 @@ def reconstruct_raw_hops(
     origin_id: int,
     nxt_step: Dict[int, Tuple[int, str, int]],
 ) -> List[Tuple[str, int, int]]:
-    """
-    Returns list of (etype, next_system_id, meta) for each hop (NOT compressed).
-    For stargate: meta=1
-    For cynoJump: meta=fuel_edge
-    """
     if origin_id == dest_id:
         return []
 
@@ -542,11 +537,6 @@ def compute_route_counters(
     gank_ids: Set[int],
     raw: List[Tuple[str, int, int]],
 ) -> Tuple[Dict[str, int], Dict[str, int]]:
-    """
-    Counts systems reached by each hop type:
-      - cynoJump counts based on destination system's cynoJumpSecurity (safe/risky)
-      - stargate counts based on destination system's sec and gank membership
-    """
     safe = 0
     risky = 0
 
@@ -564,7 +554,6 @@ def compute_route_counters(
             elif s.cyno_jump_security == "risky":
                 risky += 1
         else:
-            # stargate destination categorization
             if s.system_id in gank_ids and s.sec >= LOWSEC_THRESHOLD:
                 ganksec += 1
             elif s.sec >= 0.65 and s.system_id not in gank_ids:
@@ -574,23 +563,19 @@ def compute_route_counters(
             elif (0.0 < s.sec < LOWSEC_THRESHOLD) and s.system_id not in gank_ids:
                 lowsec += 1
 
-    cyno_counts = {"safe": safe, "risky": risky}
-    gate_counts = {"hisec": hisec, "midsec": midsec, "ganksec": ganksec, "lowsec": lowsec}
-    return cyno_counts, gate_counts
+    return (
+        {"safe": safe, "risky": risky},
+        {"hisec": hisec, "midsec": midsec, "ganksec": ganksec, "lowsec": lowsec},
+    )
 
 
 def write_jsonl_gz_atomic(path: str, rows: Iterable[dict], inner_filename: str) -> None:
-    """
-    Writes a .jsonl.gz atomically but sets the gzip header filename to `inner_filename`
-    (so it shows as routes.jsonl when inspected/extracted).
-    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     if os.path.exists(tmp):
         os.remove(tmp)
 
     with open(tmp, "wb") as raw:
-        # IMPORTANT: filename=inner_filename controls gzip header name
         with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0, filename=inner_filename) as gz:
             with io.TextIOWrapper(gz, encoding="utf-8", newline="\n") as f:
                 for obj in rows:
@@ -600,12 +585,18 @@ def write_jsonl_gz_atomic(path: str, rows: Iterable[dict], inner_filename: str) 
     os.replace(tmp, path)
 
 
+def b01(x: int) -> bool:
+    # true iff >0
+    return x > 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--solarsystems", required=True)
     ap.add_argument("--stargates", required=True)
     ap.add_argument("--ganksystems", required=True)  # .txt
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", required=True)          # routes.jsonl.gz
+    ap.add_argument("--out-cat", required=True)      # routesCat.jsonl.gz
     ap.add_argument("--jita-name", default="Jita")
     args = ap.parse_args()
 
@@ -617,7 +608,6 @@ def main() -> int:
         print(f"ERROR: Destination system '{args.jita_name}' not found.", file=sys.stderr)
         return 2
 
-    origin_ids = sorted(gate_adj.keys())
     gank_ids = load_ganksystems_ids_txt(args.ganksystems, name_to_id)
 
     base_next = dijkstra_route_sde_safer100(systems, gate_adj, jita_id)
@@ -636,7 +626,10 @@ def main() -> int:
         base_min_id=base_min_id,
     )
 
-    def row_for_origin(oid: int) -> dict:
+    # ---- routes.jsonl.gz (only origins that have stargates, as before)
+    origin_ids = sorted(gate_adj.keys())
+
+    def row_routes(oid: int) -> dict:
         o = systems[oid]
 
         if oid == jita_id:
@@ -660,13 +653,11 @@ def main() -> int:
             }
 
         cyno_j, fuel_total, _risky_j, _low2high, _gank_hi, _neg_min, gates, _inter, _bm = best[oid]
-
         raw = reconstruct_raw_hops(jita_id, oid, nxt)
         steps = compress_steps(systems, raw)
         cyno_counts, gate_counts = compute_route_counters(systems, gank_ids, raw)
 
-        # IMPORTANT: jumpFuel is doubled, but cynoJump per-step fuel stays unchanged in route[]
-        jump_fuel_out = int(fuel_total) * 2
+        jump_fuel_out = int(fuel_total) * 2  # doubled total, per-step cyno fuel unchanged
 
         return {
             "solarSystem": o.name,
@@ -687,15 +678,64 @@ def main() -> int:
             "route": steps,
         }
 
-    out_path = args.out
-    if os.path.exists(out_path):
-        os.remove(out_path)
+    # ---- routesCat.jsonl.gz (ALL systems, dedup by system_id)
+    all_ids = sorted(systems.keys())
 
-    # Set the filename stored INSIDE gzip
-    inner = "routes.jsonl"
-    write_jsonl_gz_atomic(out_path, (row_for_origin(oid) for oid in origin_ids), inner_filename=inner)
+    def row_cat(sid: int) -> dict:
+        # Derive booleans from computed best route (if any)
+        if sid == jita_id:
+            return {
+                "solarSystem": systems[sid].name,
+                "hasRoute": True,
+                "jumpFuel": False,  # 0
+                "cynoJumps": {"count": 0, "safe": False, "risky": False},
+                "stargates": {"count": False, "hisec": False, "midsec": False, "ganksec": False, "lowsec": False},
+            }
 
-    print(f"OK: wrote {out_path} for {len(origin_ids)} origin systems (systems with stargates).")
+        if sid not in best:
+            return {
+                "solarSystem": systems[sid].name,
+                "hasRoute": False,
+                "jumpFuel": False,
+                "cynoJumps": {"count": 0, "safe": False, "risky": False},
+                "stargates": {"count": False, "hisec": False, "midsec": False, "ganksec": False, "lowsec": False},
+            }
+
+        cyno_j, fuel_total, _risky_j, _low2high, _gank_hi, _neg_min, gates, _inter, _bm = best[sid]
+        raw = reconstruct_raw_hops(jita_id, sid, nxt)
+        cyno_counts, gate_counts = compute_route_counters(systems, gank_ids, raw)
+
+        jump_fuel_out = int(fuel_total) * 2
+
+        return {
+            "solarSystem": systems[sid].name,
+            "hasRoute": True,
+            "jumpFuel": b01(jump_fuel_out),
+            "cynoJumps": {
+                "count": int(cyno_j),
+                "safe": b01(int(cyno_counts["safe"])),
+                "risky": b01(int(cyno_counts["risky"])),
+            },
+            "stargates": {
+                "count": b01(int(gates)),
+                "hisec": b01(int(gate_counts["hisec"])),
+                "midsec": b01(int(gate_counts["midsec"])),
+                "ganksec": b01(int(gate_counts["ganksec"])),
+                "lowsec": b01(int(gate_counts["lowsec"])),
+            },
+        }
+
+    # No leftovers
+    if os.path.exists(args.out):
+        os.remove(args.out)
+    if os.path.exists(args.out_cat):
+        os.remove(args.out_cat)
+
+    write_jsonl_gz_atomic(args.out, (row_routes(oid) for oid in origin_ids), inner_filename="routes.jsonl")
+    write_jsonl_gz_atomic(args.out_cat, (row_cat(sid) for sid in all_ids), inner_filename="routesCat.jsonl")
+
+    print(f"OK: wrote {args.out} (origins with stargates={len(origin_ids)})")
+    print(f"OK: wrote {args.out_cat} (all systems={len(all_ids)})")
     return 0
 
 
