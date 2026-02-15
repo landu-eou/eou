@@ -310,7 +310,7 @@ def build_type_sets(
 
 
 # -----------------------------
-# Final routing + counters
+# Final routing (Opción A) + counters
 # -----------------------------
 
 EDGE_STARGATE = "stargate"
@@ -570,8 +570,8 @@ def compute_route_counters(
 
 def write_jsonl_gz_atomic(path: str, rows: Iterable[dict], inner_filename: str) -> None:
     """
-    Atomic write + set gzip header filename to inner_filename.
-    (El nombre "interno" se controla con el parámetro filename del constructor.)
+    Atomic write; sets gzip header original filename to `inner_filename`
+    (so it shows as routes.jsonl / routesCat.jsonl when inspected/extracted).
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
@@ -588,57 +588,9 @@ def write_jsonl_gz_atomic(path: str, rows: Iterable[dict], inner_filename: str) 
     os.replace(tmp, path)
 
 
-def make_routescat_record(route_row: dict) -> dict:
-    """
-    Convert a routes.jsonl row into a category signature without solarSystem,
-    with booleans meaning (>0).
-    """
-    has_route = bool(route_row.get("hasRoute", False))
-    jump_fuel = int(route_row.get("jumpFuel", 0))
-
-    cj = route_row.get("cynoJumps", {}) or {}
-    sg = route_row.get("stargates", {}) or {}
-
-    cj_count = int(cj.get("count", 0))
-    cj_safe = int(cj.get("safe", 0))
-    cj_risky = int(cj.get("risky", 0))
-
-    sg_count = int(sg.get("count", 0))
-    sg_hisec = int(sg.get("hisec", 0))
-    sg_midsec = int(sg.get("midsec", 0))
-    sg_ganksec = int(sg.get("ganksec", 0))
-    sg_lowsec = int(sg.get("lowsec", 0))
-
-    return {
-        "hasRoute": has_route,
-        "jumpFuel": (jump_fuel > 0),
-        "cynoJumps": {
-            "count": (cj_count > 0),
-            "safe": (cj_safe > 0),
-            "risky": (cj_risky > 0),
-        },
-        "stargates": {
-            "count": (sg_count > 0),
-            "hisec": (sg_hisec > 0),
-            "midsec": (sg_midsec > 0),
-            "ganksec": (sg_ganksec > 0),
-            "lowsec": (sg_lowsec > 0),
-        },
-    }
-
-
-def stable_key_cat(cat: dict) -> Tuple:
-    """
-    Stable sorting for deterministic output.
-    """
-    cj = cat["cynoJumps"]
-    sg = cat["stargates"]
-    return (
-        cat["hasRoute"],
-        cat["jumpFuel"],
-        cj["count"], cj["safe"], cj["risky"],
-        sg["count"], sg["hisec"], sg["midsec"], sg["ganksec"], sg["lowsec"],
-    )
+def canonical_cat_key(obj: dict) -> str:
+    # stable, content-based dedupe
+    return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def main() -> int:
@@ -647,7 +599,7 @@ def main() -> int:
     ap.add_argument("--stargates", required=True)
     ap.add_argument("--ganksystems", required=True)  # .txt
     ap.add_argument("--out", required=True)          # routes.jsonl.gz
-    ap.add_argument("--out-cat", default=None)       # routesCat.jsonl.gz
+    ap.add_argument("--out-cat", required=True)      # routesCat.jsonl.gz
     ap.add_argument("--jita-name", default="Jita")
     args = ap.parse_args()
 
@@ -659,7 +611,7 @@ def main() -> int:
         print(f"ERROR: Destination system '{args.jita_name}' not found.", file=sys.stderr)
         return 2
 
-    origin_ids = sorted(gate_adj.keys())
+    origin_ids = sorted(gate_adj.keys())  # systems with stargates
     gank_ids = load_ganksystems_ids_txt(args.ganksystems, name_to_id)
 
     base_next = dijkstra_route_sde_safer100(systems, gate_adj, jita_id)
@@ -678,8 +630,25 @@ def main() -> int:
         base_min_id=base_min_id,
     )
 
-    # --- We'll collect unique category signatures while emitting routes rows
-    cat_set: Set[str] = set()
+    # Collect unique categories across ALL origins.
+    # Also includes hasRoute=false category when applicable.
+    cats: Dict[str, dict] = {}
+
+    def cat_from_counts(has_route: bool, cyno_count: int, cyno_counts: Dict[str, int], gate_counts: Dict[str, int]) -> dict:
+        return {
+            "hasRoute": bool(has_route),
+            "cynoJumps": {
+                "count": int(cyno_count),
+                "safe": bool(cyno_counts.get("safe", 0) > 0),
+                "risky": bool(cyno_counts.get("risky", 0) > 0),
+            },
+            "stargates": {
+                "hisec": bool(gate_counts.get("hisec", 0) > 0),
+                "midsec": bool(gate_counts.get("midsec", 0) > 0),
+                "ganksec": bool(gate_counts.get("ganksec", 0) > 0),
+                "lowsec": bool(gate_counts.get("lowsec", 0) > 0),
+            },
+        }
 
     def row_for_origin(oid: int) -> dict:
         o = systems[oid]
@@ -693,7 +662,11 @@ def main() -> int:
                 "stargates": {"count": 0, "hisec": 0, "midsec": 0, "ganksec": 0, "lowsec": 0},
                 "route": [],
             }
-        elif oid not in best:
+            cobj = cat_from_counts(True, 0, {"safe": 0, "risky": 0}, {"hisec": 0, "midsec": 0, "ganksec": 0, "lowsec": 0})
+            cats[canonical_cat_key(cobj)] = cobj
+            return row
+
+        if oid not in best:
             row = {
                 "solarSystem": o.name,
                 "hasRoute": False,
@@ -702,73 +675,65 @@ def main() -> int:
                 "stargates": {"count": 0, "hisec": 0, "midsec": 0, "ganksec": 0, "lowsec": 0},
                 "route": [],
             }
-        else:
-            cyno_j, fuel_total, _risky_j, _low2high, _gank_hi, _neg_min, gates, _inter, _bm = best[oid]
-            raw = reconstruct_raw_hops(jita_id, oid, nxt)
-            steps = compress_steps(systems, raw)
-            cyno_counts, gate_counts = compute_route_counters(systems, gank_ids, raw)
+            cobj = cat_from_counts(False, 0, {"safe": 0, "risky": 0}, {"hisec": 0, "midsec": 0, "ganksec": 0, "lowsec": 0})
+            cats[canonical_cat_key(cobj)] = cobj
+            return row
 
-            # jumpFuel is doubled (global total), but per-cynoJump fuel stays in steps
-            jump_fuel_out = int(fuel_total) * 2
+        cyno_j, fuel_total, _risky_j, _low2high, _gank_hi, _neg_min, gates, _inter, _bm = best[oid]
 
-            row = {
-                "solarSystem": o.name,
-                "hasRoute": True,
-                "jumpFuel": int(jump_fuel_out),
-                "cynoJumps": {
-                    "count": int(cyno_j),
-                    "safe": int(cyno_counts["safe"]),
-                    "risky": int(cyno_counts["risky"]),
-                },
-                "stargates": {
-                    "count": int(gates),
-                    "hisec": int(gate_counts["hisec"]),
-                    "midsec": int(gate_counts["midsec"]),
-                    "ganksec": int(gate_counts["ganksec"]),
-                    "lowsec": int(gate_counts["lowsec"]),
-                },
-                "route": steps,
-            }
+        raw = reconstruct_raw_hops(jita_id, oid, nxt)
+        steps = compress_steps(systems, raw)
+        cyno_counts, gate_counts = compute_route_counters(systems, gank_ids, raw)
 
-        # add category signature (no duplicates)
-        cat = make_routescat_record(row)
-        cat_set.add(json.dumps(cat, separators=(",", ":"), sort_keys=True))
+        jump_fuel_out = int(fuel_total) * 2  # doubled total fuel; per-hop cyno fuel stays unchanged
+
+        row = {
+            "solarSystem": o.name,
+            "hasRoute": True,
+            "jumpFuel": jump_fuel_out,
+            "cynoJumps": {
+                "count": int(cyno_j),
+                "safe": int(cyno_counts["safe"]),
+                "risky": int(cyno_counts["risky"]),
+            },
+            "stargates": {
+                "count": int(gates),
+                "hisec": int(gate_counts["hisec"]),
+                "midsec": int(gate_counts["midsec"]),
+                "ganksec": int(gate_counts["ganksec"]),
+                "lowsec": int(gate_counts["lowsec"]),
+            },
+            "route": steps,
+        }
+
+        cobj = cat_from_counts(True, int(cyno_j), cyno_counts, gate_counts)
+        cats[canonical_cat_key(cobj)] = cobj
+
         return row
 
-    out_path = args.out
-    if os.path.exists(out_path):
-        os.remove(out_path)
+    # Rewrite outputs (no residue of previous contents)
+    if os.path.exists(args.out):
+        os.remove(args.out)
+    if os.path.exists(args.out_cat):
+        os.remove(args.out_cat)
 
+    # Write routes.jsonl.gz
     write_jsonl_gz_atomic(
-        out_path,
+        args.out,
         (row_for_origin(oid) for oid in origin_ids),
         inner_filename="routes.jsonl",
     )
 
-    # Determine routesCat output path
-    out_cat = args.out_cat
-    if out_cat is None:
-        # If out is ".../routes.jsonl.gz" -> ".../routesCat.jsonl.gz"
-        base = out_path
-        if base.endswith("routes.jsonl.gz"):
-            out_cat = base[:-len("routes.jsonl.gz")] + "routesCat.jsonl.gz"
-        else:
-            out_cat = base + ".cat.jsonl.gz"
-
-    if os.path.exists(out_cat):
-        os.remove(out_cat)
-
-    # Decode, sort deterministically, and write unique categories
-    cats = [json.loads(s) for s in cat_set]
-    cats.sort(key=stable_key_cat)
-
+    # Write deduped routesCat.jsonl.gz (stable order)
+    cat_rows = [cats[k] for k in sorted(cats.keys())]
     write_jsonl_gz_atomic(
-        out_cat,
-        cats,
+        args.out_cat,
+        cat_rows,
         inner_filename="routesCat.jsonl",
     )
 
-    print(f"OK: wrote {out_path} (routes) and {out_cat} (unique categories={len(cats)}).")
+    print(f"OK: wrote {args.out} ({len(origin_ids)} origins).")
+    print(f"OK: wrote {args.out_cat} ({len(cat_rows)} unique categories).")
     return 0
 
 
