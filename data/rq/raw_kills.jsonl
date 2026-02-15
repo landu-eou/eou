@@ -141,3 +141,13 @@
 {"killID":133401172,"zkb":{"hash":"f495b25d219bfe3801bb4d557728f503469aa073","locationID":50002722,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133401159,"zkb":{"hash":"a3af1675211f36fce87d3f33b0369c744c875863","locationID":50002722,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133401162,"zkb":{"hash":"a007d7471fbca7244a4e4eb4f24f641d04c9b2c2","locationID":50016548,"labels":["tz:eu","cat:6","#:10+","pvp"]},"rearm":0}
+{"killID":133401310,"zkb":{"hash":"481a495c34d8fe5166106b2b9a8cd5d9e8971a9c","locationID":50000363,"labels":["tz:eu","cat:6","#:1","pvp","loc:highsec"]},"rearm":0}
+{"killID":133401091,"zkb":{"hash":"1899104c0cd2945e4383aef716416cf85af4ddd5","locationID":50003014,"labels":["tz:eu","cat:6","#:1","pvp","loc:highsec"]},"rearm":0}
+{"killID":133401096,"zkb":{"hash":"330070435b3f1096e87e2aa5c8e6cdb2c1adf3df","locationID":50003014,"labels":["tz:eu","cat:6","#:1","pvp","loc:highsec"]},"rearm":0}
+{"killID":133401206,"zkb":{"hash":"604f9acfbb61a048111b6efc5dafc2a4a288a35b","locationID":50008278,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133401217,"zkb":{"hash":"299c6639a100cc68115b3c9dceb34b3e41992d69","locationID":50008278,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133401218,"zkb":{"hash":"63fee44b77489628f90715c78eed6dce5f069eb0","locationID":50008278,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133401240,"zkb":{"hash":"654ff7cddf1ab607d75b9116d0d1aa7e4aec49ea","locationID":50008278,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133401291,"zkb":{"hash":"bcaebcc7d011789bfd487dccae6b34dd82ca7194","locationID":50001630,"labels":["tz:eu","cat:6","#:1","pvp","loc:highsec"]},"rearm":0}
+{"killID":133401295,"zkb":{"hash":"3098d814bf6d6731290063df4a68692270c7b531","locationID":50008278,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133401215,"zkb":{"hash":"563ff87c351de952d14353ac2e63028690bcd4a0","locationID":50008275,"labels":["tz:eu","cat:6","solo","pvp","loc:lowsec","fw:gallente","fw:calgal"]},"rearm":0}
