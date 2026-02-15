@@ -1,4 +1,4 @@
-name: SDE Routes to Jita (Safer100 + Cyno + Crossroads)
+name: SDE Routes to Jita (Safer100 + Cyno Rules)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  run:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -21,61 +21,49 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Git identity
+      - name: Build routes.jsonl.gz
+        shell: bash
         run: |
-          set -e
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      # Rebase first to avoid the "cannot rebase: You have unstaged changes" trap later
-      - name: Sync with main (rebase)
-        run: |
-          set -e
-          git fetch origin main
-          git pull --rebase --autostash origin main
-
-      - name: Build routes + crossroads
-        run: |
-          set -e
+          set -euo pipefail
           python -u scripts/build_sde_routes.py \
             --solarsystems data/sde/solarsystems.jsonl.gz \
             --stargates data/sde/stargates.jsonl.gz \
             --ganksystems data/sde/ganksystems.txt \
-            --out data/sde/routes.jsonl.gz \
-            --out-crossroads data/sde/crossroads.jsonl.gz
+            --out data/sde/routes.jsonl.gz
 
-      - name: Validate outputs
+      - name: Validate output
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           gzip -t data/sde/routes.jsonl.gz
-          gzip -t data/sde/crossroads.jsonl.gz
           test -s data/sde/routes.jsonl.gz
-          test -s data/sde/crossroads.jsonl.gz
 
-      - name: Commit & push if changed (safe rebase)
+      - name: Commit & push if changed
+        shell: bash
         run: |
-          set -e
-          ROUTES="data/sde/routes.jsonl.gz"
-          CROSS="data/sde/crossroads.jsonl.gz"
+          set -euo pipefail
 
-          # Stage first; this also makes autostash unnecessary for these files
-          git add -- "$ROUTES" "$CROSS"
+          TARGET="data/sde/routes.jsonl.gz"
 
-          if [ -z "$(git status --porcelain -- "$ROUTES" "$CROSS")" ]; then
+          # Detect changes (including new file)
+          if [ -z "$(git status --porcelain -- "$TARGET")" ]; then
             echo "No changes."
             exit 0
           fi
 
-          git commit -m "sde: rebuild routes + crossroads (safer100 + cyno rules)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Rebase again right before pushing to avoid non-fast-forward
+          # Stage first, then rebase cleanly (avoids "unstaged changes" rebase error)
+          git add -- "$TARGET"
+          git commit -m "sde: rebuild routes.jsonl.gz (routeType)"
+
           git fetch origin main
-          git pull --rebase --autostash origin main
+          git rebase origin/main
 
           git push origin HEAD:main
