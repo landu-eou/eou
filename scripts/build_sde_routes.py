@@ -19,9 +19,12 @@ LOWSEC_THRESHOLD = 0.45
 # Cyno constraints (user-provided)
 MAX_CYNO_DIST_M = 94_600_000_000_000_000  # 94600000000000000 m
 
-# Fuel constants
+# Fuel constants (user-provided)
 ISO_NUM = 2350
 ISO_DEN = 9_460_000_000_000_000  # 9460000000000000 (fuel per meter denominator)
+
+EDGE_STARGATE = "stargate"
+EDGE_CYNO = "cynoJump"
 
 
 @dataclass(frozen=True)
@@ -127,16 +130,10 @@ def load_stargates_graph(stargates_gz: str, name_to_id: Dict[str, int]) -> Dict[
         adj.setdefault(a_id, set()).add(b_id)
         adj.setdefault(b_id, set()).add(a_id)
 
-    out: Dict[int, List[int]] = {}
-    for k, vs in adj.items():
-        out[k] = sorted(vs)
-    return out
+    return {k: sorted(vs) for k, vs in adj.items()}
 
 
 def load_ganksystems_ids_txt(ganksystems_txt: str, name_to_id: Dict[str, int]) -> Set[int]:
-    """
-    One system name per line. Blank lines and # comments allowed.
-    """
     out: Set[int] = set()
     with open(ganksystems_txt, "rt", encoding="utf-8") as f:
         for line in f:
@@ -154,9 +151,9 @@ def load_ganksystems_ids_txt(ganksystems_txt: str, name_to_id: Dict[str, int]) -
 # -----------------------------
 
 def safer_cost(sec_to: float, penalty_cost: float) -> float:
-    # As per Route Calculation guide for "Safer":
-    # if sec <= 0.0 -> 2*penalty_cost
-    # elif sec < 0.45 -> penalty_cost
+    # CCP Route Calculation guide (Safer):
+    # sec <= 0.0 -> 2*penalty_cost
+    # sec < 0.45 -> penalty_cost
     # else -> 0.90
     if sec_to <= 0.0:
         return 2.0 * penalty_cost
@@ -180,8 +177,8 @@ def dijkstra_route_sde_safer100(
     dist: Dict[int, Tuple[float, int]] = {dest_id: (0.0, 0)}  # (cost, gates)
     next_hop: Dict[int, int] = {}
 
-    heap: List[Tuple[float, int, int]] = []
-    heapq.heappush(heap, (0.0, 0, dest_id))
+    heap: List[Tuple[float, int, int]] = [(0.0, 0, dest_id)]
+    heapq.heapify(heap)
 
     while heap:
         cost_u, gates_u, u = heapq.heappop(heap)
@@ -191,17 +188,12 @@ def dijkstra_route_sde_safer100(
 
         for p in gate_adj.get(u, []):
             inc = safer_cost(systems[u].sec, penalty_cost)
-            new_cost = cost_u + inc
-            new_gates = gates_u + 1
-            cand = (new_cost, new_gates)
-
+            cand = (cost_u + inc, gates_u + 1)
             old = dist.get(p, (INF, 10**18))
-            better = cand < old
-            equal = cand == old
-            if better or (equal and u < next_hop.get(p, 2**31 - 1)):
+            if cand < old or (cand == old and u < next_hop.get(p, 2**31 - 1)):
                 dist[p] = cand
                 next_hop[p] = u
-                heapq.heappush(heap, (new_cost, new_gates, p))
+                heapq.heappush(heap, (cand[0], cand[1], p))
 
     return next_hop
 
@@ -253,7 +245,7 @@ def compute_base_flags(
 
 
 # -----------------------------
-# Types (per your rules)
+# Type sets (gate rules)
 # -----------------------------
 
 def is_lowsec(sec: float) -> bool:
@@ -275,38 +267,29 @@ def build_type_sets(
     S: Set[int] = set()
     NL: Set[int] = set()
     Hg: Set[int] = set()
-    HG: Set[int] = set()
     Lg: Set[int] = set()
     LD: Set[int] = set()
     LDg: Set[int] = set()
     I: Set[int] = set()
 
     for sid, s in systems.items():
-        # [Tipo S]: has at least one stargate and sec<=1
         if sid in has_gate and s.sec <= 1.0:
             S.add(sid)
 
         if is_nl(s.sec):
             NL.add(sid)
 
-        # Highsec candidates with gates
-        if sid in has_gate and s.sec >= LOWSEC_THRESHOLD:
-            if sid in gank_ids:
-                HG.add(sid)
-            else:
-                Hg.add(sid)
+        if sid in has_gate and s.sec >= LOWSEC_THRESHOLD and sid not in gank_ids:
+            Hg.add(sid)
 
-        # Lowsec non-gank
         if is_lowsec(s.sec) and sid not in gank_ids:
             Lg.add(sid)
 
-        # Cyno destinations allowed: 0<sec<0.45 and cyno safe/risky
         if is_lowsec(s.sec) and s.cyno_jump_security in ("safe", "risky"):
             LD.add(sid)
             if sid not in gank_ids:
                 LDg.add(sid)
 
-        # I: highsec with base route that includes lowsec somewhere
         if s.sec >= LOWSEC_THRESHOLD and base_has_lowsec.get(sid, False):
             I.add(sid)
 
@@ -315,7 +298,6 @@ def build_type_sets(
         "S": S,
         "NL": NL,
         "Hg": Hg,
-        "HG": HG,
         "Lg": Lg,
         "LD": LD,
         "LDg": LDg,
@@ -324,39 +306,24 @@ def build_type_sets(
 
 
 # -----------------------------
-# Final routing
+# Final routing (cyno + gate)
 # -----------------------------
 
-EDGE_STARGATE = "stargate"
-EDGE_CYNO = "cynoJump"
-
-# Selection order (your latest preference):
-# 1) fewer cynoJumps
-# 2) lower total jumpFuel (note: output shows 2x fuel, but the optimiser must use real fuel)
-# 3) fewer risky cynoJumps
-# 4) low->high stargate crossings
-# 5) gank highsec nodes (intermediate nodes count)
-# 6) max(minStargateSecurityStatus)
-# 7) fewer stargates
-# 8) fewer intermediate systems
-# 9) min base_min_id
-Cost = Tuple[int, int, int, int, int, float, int, int, int]
+# Base internal cost tuple:
+# fuel, cyno_count, risky_cyno_count, low2high_gate, gank_hi_entries, neg_minGateSec, stargate_count, intermediate_count, base_min_id
+BaseCost = Tuple[int, int, int, int, int, float, int, int, int]
 
 
 def build_reverse_cyno_edges_bruteforce_LD_only(
     systems: Dict[int, System],
     LD: Set[int],
 ) -> Dict[int, List[Tuple[int, int, bool]]]:
-    """
-    Reverse cyno adjacency for destinations only in [LD].
-    dest -> list of (origin, fuel, dest_is_risky)
-    """
     eligible = []
     for did in LD:
         d = systems[did]
         eligible.append((did, d.x, d.y, d.z, d.cyno_jump_security == "risky"))
 
-    r2 = float(MAX_CYNO_DIST_M) * float(MAX_CYNO_DIST_M)
+    r2 = float(MAX_CYNO_DIST_M) ** 2
     rev: Dict[int, List[Tuple[int, int, bool]]] = {did: [] for (did, *_rest) in eligible}
 
     all_systems = list(systems.values())
@@ -364,8 +331,6 @@ def build_reverse_cyno_edges_bruteforce_LD_only(
         ox, oy, oz = origin.x, origin.y, origin.z
         oid = origin.system_id
 
-        # Cyno restriction you stated earlier is applied by LD set:
-        # 0<sec<0.45 AND cynoJumpSecurity in (safe,risky)
         for did, dx, dy, dz, dest_is_risky in eligible:
             if did == oid:
                 continue
@@ -397,7 +362,7 @@ def dijkstra_final_routes(
     gank_ids: Set[int],
     base_min_id: Dict[int, int],
     allow_risky_cyno: bool,
-) -> Tuple[Dict[int, Cost], Dict[int, Tuple[int, str, int]]]:
+) -> Tuple[Dict[int, BaseCost], Dict[int, Tuple[int, str, int]]]:
     has_gate = type_sets["has_gate"]
     S = type_sets["S"]
     NL = type_sets["NL"]
@@ -410,38 +375,49 @@ def dijkstra_final_routes(
     INF_FLOAT = float("inf")
     INF_ID = 2**31 - 1
 
-    def inf_cost() -> Cost:
+    def inf_cost() -> BaseCost:
         return (INF_INT, INF_INT, INF_INT, INF_INT, INF_INT, INF_FLOAT, INF_INT, INF_INT, INF_ID)
 
+    # Your stargate norms (latest):
+    # - S Ø NL  unless I -> LDg
+    # - NL Ø S  unless Lg -> Hg
     def gate_allowed(p: int, u: int) -> bool:
-        # Forward gate p -> u
-
         if p not in has_gate or u not in has_gate:
             return False
 
-        # [S] Ø [NL]  (unless [I] -> [LDg])
         if (p in S) and (u in NL):
             return (p in I) and (u in LDg)
 
-        # [NL] Ø [S]  (unless [Lg] -> [Hg])
         if (p in NL) and (u in S):
             return (p in Lg) and (u in Hg)
 
-        # Otherwise allowed
         return True
 
-    best: Dict[int, Cost] = {}
+    # Comparison order (your latest “Opción A” variant for the final route selection):
+    # 1) fewer cynoJumps
+    # 2) lower fuel
+    # 3) fewer risky cynoJumps
+    # 4) fewer low->high gates
+    # 5) fewer gank highsec intermediate nodes
+    # 6) maximize min stargate sec  (stored as neg; we want larger neg_min => higher min sec)
+    # 7) fewer stargates
+    # 8) fewer intermediate systems
+    # 9) lower base_min_id
+    def key(c: BaseCost) -> Tuple[Any, ...]:
+        fuel, cyno_j, risky_j, low2high, gank_hi, neg_min, gates, inter, bm = c
+        return (cyno_j, fuel, risky_j, low2high, gank_hi, neg_min, gates, inter, bm)
+
+    best: Dict[int, BaseCost] = {}
     nxt_step: Dict[int, Tuple[int, str, int]] = {}
 
-    # minStargateSecurityStatus uses negative(max) trick; start at -1.0
-    start: Cost = (0, 0, 0, 0, 0, -1.0, 0, 0, base_min_id.get(dest_id, INF_ID))
+    start: BaseCost = (0, 0, 0, 0, 0, -1.0, 0, 0, base_min_id.get(dest_id, INF_ID))
     best[dest_id] = start
 
-    heap: List[Tuple[Cost, int]] = []
-    heapq.heappush(heap, (start, dest_id))
+    heap: List[Tuple[Tuple[Any, ...], int, BaseCost]] = []
+    heapq.heappush(heap, (key(start), dest_id, start))
 
     while heap:
-        cost_u, u = heapq.heappop(heap)
+        _k, u, cost_u = heapq.heappop(heap)
         if best.get(u) != cost_u:
             continue
 
@@ -459,41 +435,18 @@ def dijkstra_final_routes(
             inter2 = inter + (0 if u == dest_id else 1)
 
             low2high2 = low2high + (1 if (sec_p < LOWSEC_THRESHOLD and sec_u >= LOWSEC_THRESHOLD) else 0)
-
-            # count intermediate gank-highsec nodes
             gank_hi2 = gank_hi + (1 if (u != dest_id and (u in gank_ids) and (sec_u >= LOWSEC_THRESHOLD)) else 0)
 
-            # update min stargate security (among visited-by-gate nodes)
             neg_min2 = max(neg_min, -round(sec_u, 6))
-
             bm_p = base_min_id.get(p, INF_ID)
 
-            cand: Cost = (
-                fuel,          # (2nd criterion)
-                cyno_j,        # (1st criterion)
-                risky_j,       # (3rd)
-                low2high2,     # (4th)
-                gank_hi2,      # (5th)
-                neg_min2,      # (6th)
-                gates2,        # (7th)
-                inter2,        # (8th)
-                bm_p,          # (9th)
-            )
-
-            # reorder tuple to match criteria:
-            # 1 cyno_jumps, 2 fuel, 3 risky, ... 9
-            cand_reordered: Cost = (
-                cand[1], cand[0], cand[2], cand[3], cand[4], cand[5], cand[6], cand[7], cand[8]
-            )
+            cand: BaseCost = (fuel, cyno_j, risky_j, low2high2, gank_hi2, neg_min2, gates2, inter2, bm_p)
             old = best.get(p, inf_cost())
-            old_reordered: Cost = (old[1], old[0], old[2], old[3], old[4], old[5], old[6], old[7], old[8])
 
-            better = cand_reordered < old_reordered
-            equal = cand_reordered == old_reordered
-            if better or (equal and u < nxt_step.get(p, (2**31 - 1, "", 0))[0]):
+            if key(cand) < key(old) or (key(cand) == key(old) and u < nxt_step.get(p, (2**31 - 1, "", 0))[0]):
                 best[p] = cand
                 nxt_step[p] = (u, EDGE_STARGATE, 1)
-                heapq.heappush(heap, (cand, p))
+                heapq.heappush(heap, (key(cand), p, cand))
 
         # Cyno predecessors (p -> u)
         for (p, fuel_edge, dest_is_risky) in rev_cyno.get(u, []):
@@ -501,9 +454,9 @@ def dijkstra_final_routes(
                 continue
 
             fuel, cyno_j, risky_j, low2high, gank_hi, neg_min, gates, inter, _bm = cost_u
-            bm_p = base_min_id.get(p, 2**31 - 1)
+            bm_p = base_min_id.get(p, INF_ID)
 
-            cand: Cost = (
+            cand: BaseCost = (
                 fuel + fuel_edge,
                 cyno_j + 1,
                 risky_j + (1 if dest_is_risky else 0),
@@ -514,17 +467,12 @@ def dijkstra_final_routes(
                 inter + 1,
                 bm_p,
             )
-
-            cand_reordered: Cost = (cand[1], cand[0], cand[2], cand[3], cand[4], cand[5], cand[6], cand[7], cand[8])
             old = best.get(p, inf_cost())
-            old_reordered: Cost = (old[1], old[0], old[2], old[3], old[4], old[5], old[6], old[7], old[8])
 
-            better = cand_reordered < old_reordered
-            equal = cand_reordered == old_reordered
-            if better or (equal and u < nxt_step.get(p, (2**31 - 1, "", 0))[0]):
+            if key(cand) < key(old) or (key(cand) == key(old) and u < nxt_step.get(p, (2**31 - 1, "", 0))[0]):
                 best[p] = cand
                 nxt_step[p] = (u, EDGE_CYNO, fuel_edge)
-                heapq.heappush(heap, (cand, p))
+                heapq.heappush(heap, (key(cand), p, cand))
 
     return best, nxt_step
 
@@ -577,14 +525,107 @@ def reconstruct_steps(
     return out
 
 
-def write_jsonl_gz_atomic(path: str, rows: Iterable[dict]) -> None:
+# -----------------------------
+# routeType naming with roman suppression for "I"
+# -----------------------------
+
+_ROMAN_MAP = [
+    (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+    (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+    (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+]
+
+
+def to_roman(n: int) -> str:
+    if n <= 0:
+        raise ValueError("roman requires positive integer")
+    out = []
+    x = n
+    for v, sym in _ROMAN_MAP:
+        while x >= v:
+            out.append(sym)
+            x -= v
+    return "".join(out)
+
+
+def cyno_run_signature(route_steps: List[List[Any]]) -> str:
+    runs: List[int] = []
+    i = 0
+    while i < len(route_steps):
+        if route_steps[i][0] != EDGE_CYNO:
+            i += 1
+            continue
+        j = i
+        while j < len(route_steps) and route_steps[j][0] == EDGE_CYNO:
+            j += 1
+        runs.append(j - i)
+        i = j
+    if not runs:
+        return ""
+    return "-".join(to_roman(r) for r in runs)
+
+
+def normalize_roman_for_route_type(roman: str) -> str:
+    # user rule: omit exactly "I", keep "II", "III", ..., and keep compound like "I-I"
+    return "" if roman == "I" else roman
+
+
+def build_route_type(
+    *,
+    has_route: bool,
+    origin_is_jita: bool,
+    route_steps: List[List[Any]],
+    cyno_risky_count: int,
+    stargates_lowsec_count: int,
+    stargates_ganksec_count: int,
+    stargates_total: int,
+) -> str:
+    if not has_route:
+        return "no route"
+
+    if origin_is_jita:
+        return "highway 0"
+
+    has_cyno = any(step[0] == EDGE_CYNO for step in route_steps)
+
+    if not has_cyno:
+        base = "highway"
+        roman = ""
+    else:
+        first = route_steps[0][0] if route_steps else EDGE_STARGATE
+        base = "spaceport" if first == EDGE_CYNO else "island"
+        roman = normalize_roman_for_route_type(cyno_run_signature(route_steps))
+
+    prefixes: List[str] = []
+    if has_cyno and cyno_risky_count > 0:
+        prefixes.append("risky")
+
+    if stargates_lowsec_count > 0:
+        prefixes.append("red")
+    elif stargates_ganksec_count > 0:
+        prefixes.append("yellow")
+
+    parts: List[str] = []
+    parts.extend(prefixes)
+    parts.append(base)
+    if roman:
+        parts.append(roman)
+    parts.append(str(int(stargates_total)))
+    return " ".join(parts)
+
+
+# -----------------------------
+# GZip writer (atomic) with internal filename control
+# -----------------------------
+
+def write_jsonl_gz_atomic(path: str, rows: Iterable[dict], gz_filename: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     if os.path.exists(tmp):
         os.remove(tmp)
 
     with open(tmp, "wb") as raw:
-        with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as gz:
+        with gzip.GzipFile(filename=gz_filename, fileobj=raw, mode="wb", mtime=0) as gz:
             with io.TextIOWrapper(gz, encoding="utf-8", newline="\n") as f:
                 for obj in rows:
                     f.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")))
@@ -594,45 +635,32 @@ def write_jsonl_gz_atomic(path: str, rows: Iterable[dict]) -> None:
 
 
 # -----------------------------
-# Crossroads (routeSDEsafe100-only)
+# Crossroads (routeSDEsafe100-only), Option B (intermediate-only)
 # -----------------------------
 
-def compute_crossroads_counts_intermediate_only(
+def compute_crossroads_intermediate_only(
     systems: Dict[int, System],
     base_next: Dict[int, int],
     dest_id: int,
     origin_ids: List[int],
 ) -> Dict[int, int]:
     """
-    Count, for each system u, how many routeSDEsafe100 paths (origin->...->dest)
-    pass through u as an INTERMEDIATE node (Option B):
-      - excludes origin and excludes dest
-    Only counts u if systems[u].sec >= 0.45 (enforced at the end).
+    Count how many routeSDEsafe100 (stargate-only) paths include node as INTERMEDIATE:
+      - excludes origin itself
+      - excludes destination (Jita)
+    Only returns nodes with sec >= 0.45 and count > 0.
     """
-
     origins: Set[int] = set(origin_ids)
 
-    # Build children map from next_hop:
+    # Build children list from next_hop: child -> parent (toward dest) so reverse is parent -> children
     children: Dict[int, List[int]] = {}
-    nodes_in_tree: Set[int] = {dest_id}
+    for child, parent in base_next.items():
+        children.setdefault(parent, []).append(child)
 
-    for o in origin_ids:
-        nxt = base_next.get(o)
-        if nxt is None:
-            continue  # unreachable in base stargate-only
-        children.setdefault(nxt, []).append(o)
-        nodes_in_tree.add(o)
-        nodes_in_tree.add(nxt)
+    # Compute nodes reachable in the base tree
+    nodes: Set[int] = set(children.keys()) | set(base_next.keys()) | {dest_id}
 
-    # But we only added first edge per origin. We need all edges:
-    # for every node p with next_hop[p]=u, add p to children[u]
-    children = {}
-    for p, u in base_next.items():
-        children.setdefault(u, []).append(p)
-        nodes_in_tree.add(p)
-        nodes_in_tree.add(u)
-
-    # Compute depth (distance to dest following next pointers) for ordering
+    # Depth memo to topologically process far->near
     sys.setrecursionlimit(20000)
     depth_memo: Dict[int, int] = {}
 
@@ -643,7 +671,7 @@ def compute_crossroads_counts_intermediate_only(
             return depth_memo[n]
         nxt = base_next.get(n)
         if nxt is None:
-            depth_memo[n] = -1  # unreachable
+            depth_memo[n] = -1
             return -1
         d = depth(nxt)
         if d < 0:
@@ -652,100 +680,49 @@ def compute_crossroads_counts_intermediate_only(
         depth_memo[n] = d + 1
         return depth_memo[n]
 
-    depths = []
-    for n in nodes_in_tree:
+    order: List[Tuple[int, int]] = []
+    for n in nodes:
         d = depth(n)
         if d >= 0:
-            depths.append((d, n))
+            order.append((d, n))
+    order.sort(reverse=True)  # farthest first
 
-    # process from farthest to nearest
-    depths.sort(reverse=True)
-
-    subtree: Dict[int, int] = {dest_id: 0}
-
-    for _d, n in depths:
-        if n == dest_id:
-            continue
-        # base subtree count: 1 if n is an origin with stargates
+    # subtree[n] = number of origins whose path (including the origin node) passes through n
+    subtree: Dict[int, int] = {}
+    for _d, n in order:
         c = 1 if n in origins else 0
-        # plus contributions from children that point to n (i.e., have next_hop[child]=n)
         for ch in children.get(n, []):
             c += subtree.get(ch, 0)
         subtree[n] = c
 
-    # Convert to "intermediate-only pass count"
-    pass_count: Dict[int, int] = {}
+    # intermediate-only pass count: subtree[n] minus routes whose origin==n (and exclude dest)
+    out: Dict[int, int] = {}
     for n, c in subtree.items():
         if n == dest_id:
             continue
-        # as intermediate: routes through n excluding when origin == n
         inter = c - (1 if n in origins else 0)
         if inter > 0 and systems[n].sec >= LOWSEC_THRESHOLD:
-            pass_count[n] = inter
+            out[n] = inter
 
-    return pass_count
-
-
-# -----------------------------
-# routeType (simple, Jita-specific naming)
-# -----------------------------
-
-_ROMANS = {2: "II", 3: "III", 4: "IV", 5: "V", 6: "VI", 7: "VII", 8: "VIII", 9: "IX", 10: "X"}
-
-
-def _roman_if_gt_1(n: int) -> str:
-    if n <= 1:
-        return ""
-    return _ROMANS.get(n, str(n))
-
-
-def build_route_type(
-    base_next: Dict[int, int],
-    origin_id: int,
-    dest_id: int,
-    has_route: bool,
-    cyno_count: int,
-    risky_cyno_count: int,
-    stargates_count: int,
-    st_lowsec: int,
-    st_ganksec: int,
-) -> str:
-    if not has_route:
-        return "no route"
-
-    # prefix priority for security exposure on stargate part
-    color = ""
-    if st_lowsec > 0:
-        color = "red "
-    elif st_ganksec > 0:
-        color = "yellow "
-
-    risky = "risky " if risky_cyno_count > 0 else ""
-
-    if cyno_count == 0:
-        base = "highway"
-        roman = ""
-    else:
-        # island if origin has no base stargate-only route to Jita (i.e., no next hop in base tree)
-        is_island_start = (origin_id != dest_id) and (base_next.get(origin_id) is None)
-        base = "island" if is_island_start else "spaceport"
-        roman = _roman_if_gt_1(cyno_count)
-        if roman:
-            base = f"{base} {roman}"
-
-    # Append total stargates at end
-    return f"{risky}{color}{base} {stargates_count}".strip()
+    return out
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--solarsystems", required=True)
     ap.add_argument("--stargates", required=True)
-    ap.add_argument("--ganksystems", required=True)  # .txt
-    ap.add_argument("--out", required=True)          # routes.jsonl.gz
+    ap.add_argument("--ganksystems", required=True)
+    ap.add_argument("--out", required=True)
     ap.add_argument("--out-crossroads", default=None)
     ap.add_argument("--jita-name", default="Jita")
+
+    # Backward compat: ignore removed output
+    ap.add_argument("--out-cat", default=None, help="DEPRECATED: ignored (routesCat removed).")
+
     args = ap.parse_args()
+
+    if args.out_cat is not None:
+        print("WARNING: --out-cat is deprecated and ignored; routesCat is no longer generated.", file=sys.stderr)
 
     systems, name_to_id = load_systems(args.solarsystems)
     gate_adj = load_stargates_graph(args.stargates, name_to_id)
@@ -755,22 +732,16 @@ def main() -> int:
         print(f"ERROR: Destination system '{args.jita_name}' not found.", file=sys.stderr)
         return 2
 
-    # Origins: all systems that contain stargates
     origin_ids = sorted(gate_adj.keys())
-
     gank_ids = load_ganksystems_ids_txt(args.ganksystems, name_to_id)
 
-    # routeSDEsafe100 precompute (Safer+100)
+    # routeSDEsafe100 precompute
     base_next = dijkstra_route_sde_safer100(systems, gate_adj, jita_id)
     base_has_lowsec, base_min_id = compute_base_flags(systems, base_next, jita_id)
 
-    # Types under your rules
     type_sets = build_type_sets(systems, gate_adj, gank_ids, base_has_lowsec)
-
-    # Cyno adjacency (only LD destinations)
     rev_cyno = build_reverse_cyno_edges_bruteforce_LD_only(systems, type_sets["LD"])
 
-    # Two-pass: risky cyno only if needed
     best_safe, next_safe = dijkstra_final_routes(
         systems=systems,
         gate_adj=gate_adj,
@@ -781,7 +752,6 @@ def main() -> int:
         base_min_id=base_min_id,
         allow_risky_cyno=False,
     )
-
     best_risky, next_risky = dijkstra_final_routes(
         systems=systems,
         gate_adj=gate_adj,
@@ -793,91 +763,36 @@ def main() -> int:
         allow_risky_cyno=True,
     )
 
-    def compute_counts_from_steps(oid: int, steps: List[List[Any]]) -> Tuple[int, int, int, int, int, int, int]:
-        """
-        Returns:
-          cyno_count, cyno_safe, cyno_risky,
-          st_count, st_hisec, st_midsec, st_ganksec, st_lowsec
-        """
-        cyno_count = 0
-        cyno_safe = 0
-        cyno_risky = 0
-
-        st_count = 0
-        st_hisec = 0
-        st_midsec = 0
-        st_ganksec = 0
-        st_lowsec = 0
-
-        cur = oid
-        for step in steps:
-            etype = step[0]
-            dest_name = step[1]
-            meta = step[2]
-            did = name_to_id.get(dest_name)
-
-            if did is None:
-                # should not happen; ignore defensively
-                cur = cur
-                continue
-
-            if etype == EDGE_CYNO:
-                cyno_count += 1
-                if systems[did].cyno_jump_security == "risky":
-                    cyno_risky += 1
-                elif systems[did].cyno_jump_security == "safe":
-                    cyno_safe += 1
-                cur = did
-            else:
-                # aggregated gate step: meta = number of gates, but destination is the last system
-                # we need to walk meta times to count intermediate gate nodes; however we only store the final node name.
-                # For counting stargate categories we count ONLY the visited-by-gate nodes along the actual path.
-                # We reconstruct by simulating next hops from cur using nxt_step pointers (already encoded in steps).
-                # Given that steps are aggregated, we can't know intermediates without walking. We'll walk using next pointers by re-running reconstruction raw.
-                # To keep determinism, we recompute counts by replaying the original raw path using next_safe/next_risky later (below).
-                st_count += int(meta)
-                cur = did
-
-        return cyno_count, cyno_safe, cyno_risky, st_count, st_hisec, st_midsec, st_ganksec, st_lowsec
-
-    def replay_full_path_nodes(origin: int, nxt_map: Dict[int, Tuple[int, str, int]]) -> Tuple[List[Tuple[str, int, int]], List[int]]:
-        """
-        Returns:
-          raw edges: (etype, next_id, meta)
-          visited nodes sequence (excluding origin): each hop destination system id in order
-        """
-        raw: List[Tuple[str, int, int]] = []
+    def replay_full_path_nodes(origin: int, nxt_map: Dict[int, Tuple[int, str, int]]) -> List[int]:
         nodes: List[int] = []
         cur = origin
         seen = set()
         while cur != jita_id:
             if cur in seen:
-                return [], []
+                return []
             seen.add(cur)
             ns = nxt_map.get(cur)
             if ns is None:
-                return [], []
-            nxt, etype, meta = ns
-            raw.append((etype, nxt, meta))
+                return []
+            nxt, _etype, _meta = ns
             nodes.append(nxt)
             cur = nxt
-        return raw, nodes
+        return nodes
 
     def row_for_origin(oid: int) -> dict:
         o = systems[oid]
 
         if oid == jita_id:
-            route_type = build_route_type(base_next, oid, jita_id, True, 0, 0, 0, 0, 0)
             return {
                 "solarSystem": o.name,
-                "routeType": route_type,     # replaces hasRoute
+                "routeType": "highway 0",
                 "jumpFuel": 0,
                 "cynoJumps": {"count": 0, "safe": 0, "risky": 0},
                 "stargates": {"count": 0, "hisec": 0, "midsec": 0, "ganksec": 0, "lowsec": 0},
                 "route": [],
             }
 
-        chosen_cost: Optional[Cost] = None
+        chosen_cost: Optional[BaseCost] = None
         chosen_next: Optional[Dict[int, Tuple[int, str, int]]] = None
 
         if oid in best_safe:
@@ -898,9 +813,7 @@ def main() -> int:
             }
 
         steps = reconstruct_steps(systems, jita_id, oid, chosen_next)
-
-        # replay the full node sequence to count per-category precisely
-        _raw, path_nodes = replay_full_path_nodes(oid, chosen_next)
+        path_nodes = replay_full_path_nodes(oid, chosen_next)
 
         cyno_count = 0
         cyno_safe = 0
@@ -911,7 +824,6 @@ def main() -> int:
         st_ganksec = 0
         st_lowsec = 0
 
-        # Walk path nodes; for each node, determine if it was entered by gate or cyno by looking at next-edge type
         cur = oid
         for nxt in path_nodes:
             etype = chosen_next[cur][1]
@@ -934,56 +846,49 @@ def main() -> int:
                     st_hisec += 1
             cur = nxt
 
-        # jumpFuel: store DOUBLE of total cyno fuel used (but keep per-cyno meta in route unchanged)
-        fuel_real, _cyno_j, _risky_j, _low2high, _gank_hi, _neg_min, _gates, _inter, _bm = chosen_cost
-        fuel_out = int(fuel_real) * 2
+        fuel_real, _cj, _rj, _l2h, _gankhi, _negmin, _gates, _inter, _bm = chosen_cost
+        jump_fuel_out = int(fuel_real) * 2  # your rule: doubled output fuel, per-step meta unchanged
 
         route_type = build_route_type(
-            base_next=base_next,
-            origin_id=oid,
-            dest_id=jita_id,
             has_route=True,
-            cyno_count=cyno_count,
-            risky_cyno_count=cyno_risky,
-            stargates_count=st_count,
-            st_lowsec=st_lowsec,
-            st_ganksec=st_ganksec,
+            origin_is_jita=False,
+            route_steps=steps,
+            cyno_risky_count=cyno_risky,
+            stargates_lowsec_count=st_lowsec,
+            stargates_ganksec_count=st_ganksec,
+            stargates_total=st_count,
         )
 
         return {
             "solarSystem": o.name,
             "routeType": route_type,
-            "jumpFuel": fuel_out,
+            "jumpFuel": int(jump_fuel_out),
             "cynoJumps": {"count": int(cyno_count), "safe": int(cyno_safe), "risky": int(cyno_risky)},
             "stargates": {"count": int(st_count), "hisec": int(st_hisec), "midsec": int(st_midsec), "ganksec": int(st_ganksec), "lowsec": int(st_lowsec)},
             "route": steps,
         }
 
-    # Write routes
+    # Write routes.jsonl.gz
     out_path = args.out
     if os.path.exists(out_path):
         os.remove(out_path)
-    write_jsonl_gz_atomic(out_path, (row_for_origin(oid) for oid in origin_ids))
+    write_jsonl_gz_atomic(out_path, (row_for_origin(oid) for oid in origin_ids), gz_filename="routes.jsonl")
     print(f"OK: wrote {out_path} for {len(origin_ids)} origin systems (systems with stargates).")
 
-    # Write crossroads (routeSDEsafe100-only)
+    # Write crossroads.jsonl.gz ALWAYS
     out_cross = args.out_crossroads
     if not out_cross:
-        # default sibling file next to routes.jsonl.gz
         out_cross = os.path.join(os.path.dirname(out_path), "crossroads.jsonl.gz")
 
-    cross_counts = compute_crossroads_counts_intermediate_only(
+    cross_counts = compute_crossroads_intermediate_only(
         systems=systems,
         base_next=base_next,
         dest_id=jita_id,
         origin_ids=origin_ids,
     )
 
-    # Sort by routes desc, then name asc for determinism
-    sorted_cross = sorted(
-        cross_counts.items(),
-        key=lambda kv: (-kv[1], systems[kv[0]].name),
-    )
+    # Deterministic sort: routes desc, then name asc
+    sorted_cross = sorted(cross_counts.items(), key=lambda kv: (-kv[1], systems[kv[0]].name))
 
     def cross_rows() -> Iterable[dict]:
         for sid, cnt in sorted_cross:
@@ -991,7 +896,7 @@ def main() -> int:
 
     if os.path.exists(out_cross):
         os.remove(out_cross)
-    write_jsonl_gz_atomic(out_cross, cross_rows())
+    write_jsonl_gz_atomic(out_cross, cross_rows(), gz_filename="crossroads.jsonl")
     print(f"OK: wrote {out_cross} with {len(sorted_cross)} crossroads (sec>=0.45, intermediate-only).")
 
     return 0
