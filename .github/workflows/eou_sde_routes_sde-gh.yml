@@ -1,4 +1,4 @@
-name: SDE Routes (stargate+cyno → routes.jsonl.gz + routesCat.jsonl.gz)
+name: SDE Routes to Jita (Safer100 + Cyno Rules)
 
 on:
   workflow_dispatch:
@@ -7,73 +7,61 @@ permissions:
   contents: write
 
 concurrency:
-  group: eou_sde_routes_sde-gh
+  group: eou_sde_routes_to_jita
   cancel-in-progress: false
 
 jobs:
-  build:
+  run:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
-      - name: Checkout (full history for rebase)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Sync with origin/main (clean rebase BEFORE generating)
+      - name: Build routes.jsonl.gz
+        shell: bash
         run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin main
-          git rebase origin/main
-
-      - name: Validate inputs exist
-        run: |
-          set -e
-          test -f data/sde/solarsystems.jsonl.gz
-          test -f data/sde/stargates.jsonl.gz
-          test -f data/sde/ganksystems.txt
-          gzip -t data/sde/solarsystems.jsonl.gz
-          gzip -t data/sde/stargates.jsonl.gz
-
-      - name: Build routes (full rebuild)
-        run: |
-          set -e
+          set -euo pipefail
           python -u scripts/build_sde_routes.py \
             --solarsystems data/sde/solarsystems.jsonl.gz \
             --stargates data/sde/stargates.jsonl.gz \
             --ganksystems data/sde/ganksystems.txt \
-            --out data/sde/routes.jsonl.gz \
-            --out-cat data/sde/routesCat.jsonl.gz
+            --out data/sde/routes.jsonl.gz
 
-      - name: Validate outputs
+      - name: Validate output
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           gzip -t data/sde/routes.jsonl.gz
-          gzip -t data/sde/routesCat.jsonl.gz
           test -s data/sde/routes.jsonl.gz
-          test -s data/sde/routesCat.jsonl.gz
 
-      - name: Commit & Push
+      - name: Commit & push if changed
+        shell: bash
         run: |
-          set -e
-          T1="data/sde/routes.jsonl.gz"
-          T2="data/sde/routesCat.jsonl.gz"
+          set -euo pipefail
 
-          if [ -z "$(git status --porcelain -- "$T1" "$T2")" ]; then
+          TARGET="data/sde/routes.jsonl.gz"
+
+          # Detect changes (including new file)
+          if [ -z "$(git status --porcelain -- "$TARGET")" ]; then
             echo "No changes."
             exit 0
           fi
 
-          git add -- "$T1" "$T2"
-          git commit -m "sde: rebuild routes.jsonl.gz + routesCat.jsonl.gz (cyno+gate rules)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage first, then rebase cleanly (avoids "unstaged changes" rebase error)
+          git add -- "$TARGET"
+          git commit -m "sde: rebuild routes.jsonl.gz (routeType)"
 
           git fetch origin main
           git rebase origin/main
