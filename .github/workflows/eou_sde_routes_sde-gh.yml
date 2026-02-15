@@ -1,4 +1,4 @@
-name: SDE Routes (stargate+cyno → routes.jsonl.gz)
+name: SDE Routes (stargate+cyno → routes.jsonl.gz + routesCat.jsonl.gz)
 
 on:
   workflow_dispatch:
@@ -43,33 +43,37 @@ jobs:
           gzip -t data/sde/solarsystems.jsonl.gz
           gzip -t data/sde/stargates.jsonl.gz
 
-      - name: Build routes.jsonl.gz (full rebuild)
+      - name: Build routes (full rebuild)
         run: |
           set -e
           python -u scripts/build_sde_routes.py \
             --solarsystems data/sde/solarsystems.jsonl.gz \
             --stargates data/sde/stargates.jsonl.gz \
             --ganksystems data/sde/ganksystems.txt \
-            --out data/sde/routes.jsonl.gz
+            --out data/sde/routes.jsonl.gz \
+            --out-cat data/sde/routesCat.jsonl.gz
 
-      - name: Validate output
+      - name: Validate outputs
         run: |
           set -e
           gzip -t data/sde/routes.jsonl.gz
+          gzip -t data/sde/routesCat.jsonl.gz
           test -s data/sde/routes.jsonl.gz
+          test -s data/sde/routesCat.jsonl.gz
 
       - name: Commit & Push
         run: |
           set -e
-          TARGET="data/sde/routes.jsonl.gz"
+          T1="data/sde/routes.jsonl.gz"
+          T2="data/sde/routesCat.jsonl.gz"
 
-          if [ -z "$(git status --porcelain -- "$TARGET")" ]; then
+          if [ -z "$(git status --porcelain -- "$T1" "$T2")" ]; then
             echo "No changes."
             exit 0
           fi
 
-          git add -- "$TARGET"
-          git commit -m "sde: rebuild routes.jsonl.gz (stargate safer100 + cyno rules)"
+          git add -- "$T1" "$T2"
+          git commit -m "sde: rebuild routes.jsonl.gz + routesCat.jsonl.gz (cyno+gate rules)"
 
           git fetch origin main
           git rebase origin/main
