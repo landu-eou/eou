@@ -268,6 +268,7 @@ def build_type_sets(
         if is_nl(s.sec):
             NL.add(sid)
 
+        # Highsec not ganklisted
         if sid in has_gate and s.sec >= LOWSEC_THRESHOLD and sid not in gank_ids:
             Hg.add(sid)
 
@@ -379,15 +380,13 @@ def dijkstra_final_routes(
         if (p in NL) and (u in S):
             return (p in Lg) and (u in Hg)
 
-        # Additional explicit: cannot enter sec<=0 by gate; cannot enter lowsec ganklisted by gate
+        # Explicit blocks:
         su = systems[u]
         if su.sec <= 0.0:
             return False
         if su.sec < LOWSEC_THRESHOLD and u in gank_ids:
             return False
 
-        # Allow Hg -> HG -> Hg etc as per your latest relaxation: you only wanted to limit entering HG from Lg,
-        # which is already covered by the NL<->S rule. Here HG are just highsec ganklisted, and gates are allowed.
         return True
 
     best: Dict[int, Cost] = {}
@@ -509,7 +508,7 @@ def reconstruct_steps(
 
 
 # -----------------------------
-# routeType naming
+# routeType naming (with "I" suppression)
 # -----------------------------
 
 _ROMAN_MAP = [
@@ -542,6 +541,14 @@ def to_roman(n: int) -> str:
 
 
 def cyno_run_signature(route_steps: List[List[Any]]) -> str:
+    """
+    Returns roman signature for consecutive cynoJump runs:
+      - C           -> "I"
+      - CC          -> "II"
+      - C G C       -> "I-I"
+      - CC G C      -> "II-I"
+    If no cynoJump exists -> "".
+    """
     runs: List[int] = []
     i = 0
     while i < len(route_steps):
@@ -556,6 +563,17 @@ def cyno_run_signature(route_steps: List[List[Any]]) -> str:
     if not runs:
         return ""
     return "-".join(to_roman(r) for r in runs)
+
+
+def normalize_roman_for_route_type(roman: str) -> str:
+    """
+    User rule:
+      - If roman == "I" => omit (return "")
+      - Otherwise keep (including "I-I")
+    """
+    if roman == "I":
+        return ""
+    return roman
 
 
 def build_route_type(
@@ -580,12 +598,9 @@ def build_route_type(
         base = "highway"
         roman = ""
     else:
-        # Your definition:
-        # spaceport = cynoJump -> stargates -> Jita (route starts with cynoJump)
-        # island    = stargates -> cynoJump -> stargates -> Jita (route starts with stargate)
         first = route_steps[0][0] if route_steps else EDGE_STARGATE
         base = "spaceport" if first == EDGE_CYNO else "island"
-        roman = cyno_run_signature(route_steps)
+        roman = normalize_roman_for_route_type(cyno_run_signature(route_steps))
 
     prefixes: List[str] = []
     if has_cyno and cyno_risky_count > 0:
@@ -602,7 +617,6 @@ def build_route_type(
     if roman:
         parts.append(roman)
 
-    # Append total stargates at end (except no route)
     parts.append(str(int(stargates_total)))
     return " ".join(parts)
 
@@ -700,19 +714,16 @@ def main() -> int:
                 "route": [],
             }
 
-        # choose map
         use_safe = oid in best_safe
         cost = best_safe[oid] if use_safe else best_risky[oid]
         chosen_next = next_safe if use_safe else next_risky
 
         route_steps = reconstruct_steps(systems, jita_id, oid, chosen_next)
 
-        fuel, cyno_count, _risky_cyno_count_from_cost, _low2high, _gank_hi, _neg_min, st_total, _inter, _bm = cost
+        fuel, cyno_count, _risky_cyno_cost, _low2high, _gank_hi, _neg_min, st_total, _inter, _bm = cost
+        jump_fuel = int(fuel) * 2  # user rule: double jumpFuel (not per-step fuel)
 
-        # jumpFuel is double, step cyno fuel unchanged
-        jump_fuel = int(fuel) * 2
-
-        # Count safe/risky cyno destinations from route_steps
+        # Count safe/risky cyno destinations
         safe_c = 0
         risky_c = 0
         for step in route_steps:
@@ -727,7 +738,7 @@ def main() -> int:
                 elif cj == "safe":
                     safe_c += 1
 
-        # Count gate biome by simulating actual chosen_next traversal (counts entered systems by gate)
+        # Gate biome counts by simulating actual chosen_next traversal (count entered systems by gate)
         hisec = midsec = ganksec = lowsec = 0
         cur = oid
         seen: Set[int] = set()
