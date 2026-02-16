@@ -638,4 +638,77 @@ def main() -> int:
         base_has_lowsec=base_has_lowsec,
         base_min_id=base_min_id,
         lowsec_has_hisec_nb=lowsec_has_hisec_nb,
-        forced_cyno_origins=
+        forced_cyno_origins=forced_cyno_origins,
+        allow_risky_cyno=False,
+    )
+
+    best2, next2 = dijkstra_final(
+        systems=systems,
+        gate_adj=gate_adj,
+        rev_cyno=rev_cyno,
+        dest_id=jita_id,
+        gank_ids=gank_ids,
+        base_has_lowsec=base_has_lowsec,
+        base_min_id=base_min_id,
+        lowsec_has_hisec_nb=lowsec_has_hisec_nb,
+        forced_cyno_origins=forced_cyno_origins,
+        allow_risky_cyno=True,
+    )
+
+    def row_for_origin(oid: int) -> dict:
+        o = systems[oid]
+
+        if oid == jita_id:
+            return {
+                "solarSystem": o.name,
+                "hasRoute": True,
+                "stargates": 0,
+                "jumps": 0,
+                "isotopes": 0,
+                "route": [],
+            }
+
+        if oid in best1:
+            raw = reconstruct_raw_steps(oid, jita_id, next1)
+            if not raw:
+                # reachable but reconstruction failed (should be rare)
+                return {"solarSystem": o.name, "hasRoute": False, "stargates": 0, "jumps": 0, "isotopes": 0, "route": []}
+        elif oid in best2:
+            raw = reconstruct_raw_steps(oid, jita_id, next2)
+            if not raw:
+                return {"solarSystem": o.name, "hasRoute": False, "stargates": 0, "jumps": 0, "isotopes": 0, "route": []}
+        else:
+            return {
+                "solarSystem": o.name,
+                "hasRoute": False,
+                "stargates": 0,
+                "jumps": 0,
+                "isotopes": 0,
+                "route": [],
+            }
+
+        stargates, jumps, isotopes = totals_from_raw(raw)
+        route = compress_route(systems, raw)
+
+        return {
+            "solarSystem": o.name,
+            "hasRoute": True,
+            "stargates": int(stargates),
+            "jumps": int(jumps),
+            "isotopes": int(isotopes),
+            "route": route,
+        }
+
+    # Full rebuild: delete output then write deterministically & atomically
+    out_path = args.out
+    if os.path.exists(out_path):
+        os.remove(out_path)
+
+    write_jsonl_gz_atomic(out_path, (row_for_origin(oid) for oid in origin_ids))
+
+    print(f"OK: wrote {out_path} for {len(origin_ids)} origins (systems with stargates).")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
