@@ -3,13 +3,6 @@ name: SDE Routes (SDE → GH)
 on:
   workflow_dispatch:
 
-env:
-  WORKFLOW_FILE: eou_sde_routes_sde-gh.yml
-  SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
-  SHEET_TAB: workflows
-  SHEETS_WORKFLOW_ROW: "10"
-  LOCK_TIME: "60" # seconds
-
 permissions:
   actions: read
   contents: write
@@ -17,6 +10,13 @@ permissions:
 concurrency:
   group: eou_sde_routes_sde-gh
   cancel-in-progress: false
+
+env:
+  WORKFLOW_FILE: eou_sde_routes_sde-gh.yml
+  SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
+  SHEET_TAB: workflows
+  SHEETS_WORKFLOW_ROW: "10"
+  LOCK_TIME: "60"
 
 jobs:
   build:
