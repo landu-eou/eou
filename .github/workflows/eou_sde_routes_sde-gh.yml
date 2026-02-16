@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Checkout (full history)
+      - name: Checkout (full history for rebase/push safety)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -26,17 +26,18 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Sync with remote main (rebase)
+      - name: Fast-forward local branch (rebase, autostash)
         shell: bash
         run: |
-          set -e
-          git fetch origin main
-          git rebase origin/main
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase --autostash origin main
 
       - name: Build routes.jsonl.gz
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           python -u scripts/build_sde_routes.py \
             --solarsystems data/sde/solarsystems.jsonl.gz \
             --stargates data/sde/stargates.jsonl.gz \
@@ -47,31 +48,25 @@ jobs:
       - name: Validate artifact
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           TARGET="data/sde/routes.jsonl.gz"
           gzip -t "$TARGET"
           test -s "$TARGET"
 
-      - name: Commit & push if changed (rebase-safe)
+      - name: Commit & push if changed (rebase-safe, autostash)
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           TARGET="data/sde/routes.jsonl.gz"
 
-          # Detect changes (including untracked new file)
           if [ -z "$(git status --porcelain -- "$TARGET")" ]; then
             echo "No changes."
             exit 0
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git add -- "$TARGET"
-          git commit -m "sde: rebuild routes.jsonl.gz (stations waypoints + cyno/gate rules)"
+          git commit -m "sde: rebuild routes.jsonl.gz (optimized routing + stations)"
 
-          # Rebase again just in case main moved while building
-          git fetch origin main
-          git rebase origin/main
-
+          # If main moved while computing, rebase and push safely.
+          git pull --rebase --autostash origin main
           git push origin HEAD:main
