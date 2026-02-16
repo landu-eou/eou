@@ -250,13 +250,23 @@ def load_state_etags(path: str) -> Dict[str, str]:
 def write_state_etags_atomic(path: str, etags: Dict[str, str]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
+
+    # Orden determinista por clave (evita churn innecesario en commits)
+    ordered = dict(sorted(etags.items(), key=lambda x: x[0]))
+
     if os.path.exists(tmp):
         os.remove(tmp)
-    with open(tmp, "wt", encoding="utf-8", newline="\n") as f:
-        json.dump({"etag": etags}, f, ensure_ascii=False, separators=(",", ":"))
-        f.write("\n")
-    os.replace(tmp, path)
 
+    with open(tmp, "wt", encoding="utf-8", newline="\n") as f:
+        json.dump(
+            {"etag": ordered},
+            f,
+            ensure_ascii=False,
+            indent=2,          # <-- INDENTACIÓN LEGIBLE
+        )
+        f.write("\n")          # newline final estilo UNIX
+
+    os.replace(tmp, path)
 
 def compute_current_etags() -> Dict[str, str]:
     out: Dict[str, str] = {}
