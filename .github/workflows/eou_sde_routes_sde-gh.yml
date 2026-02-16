@@ -16,23 +16,18 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Checkout (full history for rebase/push safety)
+      # Checkout ligero: suficiente para construir.
+      # (El historial completo NO es necesario salvo que vayamos a rebase/commitear.)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          ref: main
+          fetch-depth: 2
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Fast-forward local branch (rebase, autostash)
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase --autostash origin main
 
       - name: Build routes.jsonl.gz
         shell: bash
@@ -53,6 +48,7 @@ jobs:
           gzip -t "$TARGET"
           test -s "$TARGET"
 
+      # Solo si hay cambios: entonces sí hacemos pull --rebase (autostash) y push.
       - name: Commit & push if changed (rebase-safe, autostash)
         shell: bash
         run: |
@@ -60,13 +56,15 @@ jobs:
           TARGET="data/sde/routes.jsonl.gz"
 
           if [ -z "$(git status --porcelain -- "$TARGET")" ]; then
-            echo "No changes."
             exit 0
           fi
 
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Si main avanzó mientras se computaba, rebase antes del commit/push.
+          git pull --rebase --autostash origin main
+
           git add -- "$TARGET"
           git commit -m "sde: rebuild routes.jsonl.gz (optimized routing + stations)"
-
-          # If main moved while computing, rebase and push safely.
-          git pull --rebase --autostash origin main
           git push origin HEAD:main
