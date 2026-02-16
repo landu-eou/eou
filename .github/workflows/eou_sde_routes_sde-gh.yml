@@ -1,5 +1,7 @@
 name: SDE Routes (SDE → GH)
 
+run-name: SDE Routes manual #${{ github.run_number }}
+
 on:
   workflow_dispatch:
 
@@ -24,7 +26,6 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      # 0) Guard anti-cola: si ya hay otro run in_progress del mismo workflow, salir sin trabajo
       - name: Guard: exit if another run is in progress
         id: guard
         uses: actions/github-script@v7
@@ -45,7 +46,6 @@ jobs:
               runs = res.data.workflow_runs || [];
             } catch (e) {
               core.warning(`Could not list runs for workflow_id=${wf}. Error: ${e.message}`);
-              // Si fallase aquí, preferimos NO bloquear ejecución (para no “matar” el workflow).
               runs = [];
             }
 
@@ -74,7 +74,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 1) Fase inicial: etags + schedule + decide cambios
       - name: Compute etags + schedule values
         id: meta
         shell: bash
@@ -89,7 +88,6 @@ jobs:
               data/sde/stations.jsonl.gz \
               data/sde/ganksystems.txt
 
-      # 2) LOCK externo en Sheets si hubo cambios
       - name: Sheets: set RUNNING + lock next_run (only if inputs changed)
         if: steps.meta.outputs.inputs_changed == 'true'
         shell: bash
@@ -107,7 +105,6 @@ jobs:
             --status "RUNNING" \
             --next-run-serial "${{ steps.meta.outputs.next_run_lock_serial }}"
 
-      # 3) Si NO cambió nada: éxito rápido + next_run=+6h y salir
       - name: Sheets: set SUCCESS_NO_CHANGE + next_run=+6h, then exit
         if: steps.meta.outputs.inputs_changed != 'true'
         shell: bash
@@ -127,7 +124,6 @@ jobs:
           echo "No input changes. Done."
           exit 0
 
-      # 4) Build
       - name: Build routes.jsonl.gz
         shell: bash
         run: |
@@ -146,7 +142,6 @@ jobs:
           gzip -t data/sde/routes.jsonl.gz
           test -s data/sde/routes.jsonl.gz
 
-      # 5) Success final: write state etags + commit (routes+state) + sheets
       - name: Update states/routes.json from computed etags
         shell: bash
         run: |
@@ -194,7 +189,6 @@ jobs:
             --next-run-serial "${{ steps.meta.outputs.next_run_6h_serial }}" \
             --last-modified-serial "${{ steps.meta.outputs.now_serial }}"
 
-      # 6) Failure final: next_run=+10m
       - name: Sheets: set FAILURE + next_run=+10m
         if: failure()
         shell: bash
