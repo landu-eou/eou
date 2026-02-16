@@ -29,364 +29,68 @@ name: SDE Routes (SDE → GH)
 on:
   workflow_dispatch:
 
-# Permisos mínimos necesarios:
-# - actions:read   -> Guard anti-cola consultando runs del workflow por REST
-# - contents:write -> commit/push de routes.jsonl.gz y states/routes.json
-# - id-token:write -> WIF/OIDC para Google (Sheets API)
 permissions:
-  actions: read
   contents: write
-  id-token: write
 
-# Candado "oficial": evita solapamiento real.
-# Nota: los runs en cola se cortan por el Guard (sin hacer trabajo).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: eou_sde_routes_sde-gh
   cancel-in-progress: false
 
 jobs:
-  run:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
-    env:
-      # Identidad del workflow
-      WORKFLOW_FILE: eou_sde_routes_sde-gh.yml
-
-      # Google Sheets (estado compartido)
-      SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
-      SHEET_TAB: workflows
-      SHEETS_WORKFLOW_ROW: "10"
-
-      # Locking / planificación
-      LOCK_TIME: 60  # segundos
-
-      # Cooldowns (según tu especificación)
-      COOLDOWN_OK: 21600     # 6 horas
-      COOLDOWN_NOCHANGE: 21600  # 6 horas
-      COOLDOWN_FAIL: 600     # 10 minutos
-
-      # Rutas / inputs
-      IN_SOLARSYSTEMS: data/sde/solarsystems.jsonl.gz
-      IN_STARGATES: data/sde/stargates.jsonl.gz
-      IN_STATIONS: data/sde/stations.jsonl.gz
-      IN_GANKSYSTEMS: data/sde/ganksystems.txt
-
-      OUT_ROUTES: data/sde/routes.jsonl.gz
-      STATE_FILE: states/routes.json
-
     steps:
-      # ================================================================
-      # 1) GUARD ANTI-COLA (SALE SIN TRABAJAR SI HAY OTRO RUN VIVO)
-      # ================================================================
-      - name: Guard - decide proceed (no-queue)
-        id: guard
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          WF_FILE: ${{ env.WORKFLOW_FILE }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          api="https://api.github.com/repos/${REPO}/actions/workflows/${WF_FILE}/runs?per_page=50"
-          json="$(curl -fsSL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${api}")"
-
-          proceed="true"
-
-          this="$(jq --arg rid "$RUN_ID" -c '
-            (.workflow_runs // [])
-            | map(select(.id == ($rid|tonumber)))
-            | .[0] // empty
-          ' <<< "$json")"
-
-          if [ -n "$this" ]; then
-            this_created="$(jq -r '.created_at' <<< "$this")"
-            this_num="$(jq -r '.run_number' <<< "$this")"
-
-            # Si al crearse este run ya existía otro run "vivo" creado antes
-            alive_at_creation="$(jq --arg rid "$RUN_ID" --arg tc "$this_created" '
-              (.workflow_runs // [])
-              | map(
-                  select(.id != ($rid|tonumber))
-                  | select(.created_at < $tc)
-                  | select(.status=="queued" or .status=="in_progress")
-                )
-              | length
-            ' <<< "$json")"
-
-            if [ "$alive_at_creation" -gt 0 ]; then
-              proceed="false"
-            else
-              # Además, si hay varios queued/in_progress, solo trabaja el de menor run_number (líder)
-              leader="$(jq '
-                (.workflow_runs // [])
-                | map(select(.status=="queued" or .status=="in_progress"))
-                | map(.run_number)
-                | min // empty
-              ' <<< "$json")"
-
-              if [ -n "$leader" ] && [ "$leader" != "$this_num" ]; then
-                proceed="false"
-              fi
-            fi
-          fi
-
-          echo "proceed=$proceed" >> "$GITHUB_OUTPUT"
-
-      - name: Exit if skipped (busy)
-        if: steps.guard.outputs.proceed != 'true'
-        shell: bash
-        run: |
-          echo "Skipped due to overlapping run (guard)."
-          exit 0
-
-      # ================================================================
-      # 2) AUTH GOOGLE (WIF/OIDC) PARA ESCRIBIR EN SHEETS
-      # ================================================================
-      - name: Auth to Google (WIF)
-        id: gcp_auth
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-          token_format: access_token
-          access_token_scopes: |
-            https://www.googleapis.com/auth/spreadsheets
-
-      # ================================================================
-      # 3) LOCK INICIAL (LO PRIMERÍSIMO QUE TOCA ESTADO)
-      #    - status = in_progress
-      #    - next_run = now + LOCK_TIME (serial UTC)
-      # ================================================================
-      - name: Initial lock (in_progress + next_run)
-        env:
-          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          row="${SHEETS_WORKFLOW_ROW}"
-
-          # serial sheets UTC = epoch/86400 + 25569  (origen 1899-12-30)
-          epoch="$(date -u -d "+${LOCK_TIME} seconds" +%s)"
-          serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
-
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
-            -d "{
-              \"valueInputOption\":\"RAW\",
-              \"data\":[
-                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"in_progress\"]]},
-                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${serial}]]}
-              ]
-            }"
-
-      # ================================================================
-      # 4) CHECKOUT (solo ahora, después del lock)
-      # ================================================================
+      # Checkout ligero: suficiente para construir.
+      # (El historial completo NO es necesario salvo que vayamos a rebase/commitear.)
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 2
 
-      # ================================================================
-      # 5) ETAG CHECK (SHA256) VS states/routes.json
-      #    - Si NO hay cambios: success fast-exit + next_run=+6h
-      # ================================================================
-      - name: Compute etags (SHA256) and compare with state
-        id: etag
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p "$(dirname "${STATE_FILE}")"
-
-          # Hashes actuales (strong etag: sha256 hex)
-          h_sol="$(sha256sum "${IN_SOLARSYSTEMS}" | awk '{print $1}')"
-          h_sg="$(sha256sum "${IN_STARGATES}" | awk '{print $1}')"
-          h_st="$(sha256sum "${IN_STATIONS}" | awk '{print $1}')"
-          h_gk="$(sha256sum "${IN_GANKSYSTEMS}" | awk '{print $1}')"
-
-          cur_json="$(jq -n \
-            --arg a "${IN_SOLARSYSTEMS}" --arg ha "$h_sol" \
-            --arg b "${IN_STARGATES}"    --arg hb "$h_sg" \
-            --arg c "${IN_STATIONS}"     --arg hc "$h_st" \
-            --arg d "${IN_GANKSYSTEMS}"  --arg hd "$h_gk" \
-            '{etag:{($a):$ha,($b):$hb,($c):$hc,($d):$hd}}')"
-
-          if [ -f "${STATE_FILE}" ]; then
-            old_json="$(cat "${STATE_FILE}")"
-          else
-            old_json="{}"
-          fi
-
-          changed="$(jq -n --argjson cur "$cur_json" --argjson old "$old_json" '
-            ($old.etag // {}) as $o
-            | ($cur.etag // {}) as $c
-            | ($c | to_entries | map(select($o[.key] != .value)) | length) > 0
-          ')"
-
-          echo "changed=${changed}" >> "$GITHUB_OUTPUT"
-          echo "$cur_json" > /tmp/routes_state_new.json
-
-      - name: Validate inputs (fast preflight)
-        if: steps.etag.outputs.changed == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f "${IN_SOLARSYSTEMS}" && gzip -t "${IN_SOLARSYSTEMS}"
-          test -f "${IN_STARGATES}" && gzip -t "${IN_STARGATES}"
-          test -f "${IN_STATIONS}" && gzip -t "${IN_STATIONS}"
-          test -f "${IN_GANKSYSTEMS}"
-
-      - name: No changes -> finalize next_run (+6h) and exit
-        if: steps.etag.outputs.changed != 'true'
-        env:
-          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          row="${SHEETS_WORKFLOW_ROW}"
-
-          epoch="$(date -u -d "+${COOLDOWN_NOCHANGE} seconds" +%s)"
-          serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
-
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
-            -d "{
-              \"valueInputOption\":\"RAW\",
-              \"data\":[
-                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"completed\"]]},
-                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${serial}]]}
-              ]
-            }"
-
-          echo "No input changes detected. Exiting successfully."
-          exit 0
-
-      # ================================================================
-      # 6) OBJETIVO (build) — solo si changed=true
-      # ================================================================
       - name: Set up Python
-        if: steps.etag.outputs.changed == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Build routes.jsonl.gz (full rebuild)
-        if: steps.etag.outputs.changed == 'true'
+      - name: Build routes.jsonl.gz
         shell: bash
         run: |
           set -euo pipefail
-          rm -f "${OUT_ROUTES}"
           python -u scripts/build_sde_routes.py \
-            --solarsystems "${IN_SOLARSYSTEMS}" \
-            --stargates "${IN_STARGATES}" \
-            --stations "${IN_STATIONS}" \
-            --ganksystems "${IN_GANKSYSTEMS}" \
-            --out "${OUT_ROUTES}"
+            --solarsystems data/sde/solarsystems.jsonl.gz \
+            --stargates data/sde/stargates.jsonl.gz \
+            --stations data/sde/stations.jsonl.gz \
+            --ganksystems data/sde/ganksystems.txt \
+            --out data/sde/routes.jsonl.gz
 
-      - name: Validate output
-        if: steps.etag.outputs.changed == 'true'
+      - name: Validate artifact
         shell: bash
         run: |
           set -euo pipefail
-          gzip -t "${OUT_ROUTES}"
-          test -s "${OUT_ROUTES}"
+          TARGET="data/sde/routes.jsonl.gz"
+          gzip -t "$TARGET"
+          test -s "$TARGET"
 
-      # ================================================================
-      # 7) FINAL OK (changed=true): actualizar states + commit en bloque + Sheets
-      # ================================================================
-      - name: Update states/routes.json
-        if: steps.etag.outputs.changed == 'true'
+      # Solo si hay cambios: entonces sí hacemos pull --rebase (autostash) y push.
+      - name: Commit & push if changed (rebase-safe, autostash)
         shell: bash
         run: |
           set -euo pipefail
-          mv /tmp/routes_state_new.json "${STATE_FILE}"
+          TARGET="data/sde/routes.jsonl.gz"
 
-      - name: Commit & push (single commit, batch)
-        if: steps.etag.outputs.changed == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # Si no hay cambios reales (por determinismo), no comitear
-          if [ -z "$(git status --porcelain -- "${OUT_ROUTES}" "${STATE_FILE}")" ]; then
-            echo "No changes to commit."
+          if [ -z "$(git status --porcelain -- "$TARGET")" ]; then
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Rebase-safe
+          # Si main avanzó mientras se computaba, rebase antes del commit/push.
           git pull --rebase --autostash origin main
 
-          git add -- "${OUT_ROUTES}" "${STATE_FILE}"
-          git commit -m "sde: rebuild routes + update routes state etags"
+          git add -- "$TARGET"
+          git commit -m "sde: rebuild routes.jsonl.gz (optimized routing + stations)"
           git push origin HEAD:main
-
-      - name: Finalize OK (completed + next_run + last_modified)
-        if: steps.etag.outputs.changed == 'true' && success()
-        env:
-          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          row="${SHEETS_WORKFLOW_ROW}"
-
-          epoch_next="$(date -u -d "+${COOLDOWN_OK} seconds" +%s)"
-          serial_next="$(awk "BEGIN { printf \"%.10f\", (${epoch_next}/86400) + 25569 }")"
-
-          epoch_now="$(date -u +%s)"
-          serial_now="$(awk "BEGIN { printf \"%.10f\", (${epoch_now}/86400) + 25569 }")"
-
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
-            -d "{
-              \"valueInputOption\":\"RAW\",
-              \"data\":[
-                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"completed\"]]},
-                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${serial_next}]]},
-                {\"range\":\"${SHEET_TAB}!I${row}:I${row}\",\"values\":[[${serial_now}]]}
-              ]
-            }"
-
-      # ================================================================
-      # 8) FINAL FAIL (changed=true): next_run=+10m, status=failed
-      # ================================================================
-      - name: Finalize FAIL (failed + next_run +10m)
-        if: steps.etag.outputs.changed == 'true' && failure()
-        env:
-          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          row="${SHEETS_WORKFLOW_ROW}"
-
-          epoch_next="$(date -u -d "+${COOLDOWN_FAIL} seconds" +%s)"
-          serial_next="$(awk "BEGIN { printf \"%.10f\", (${epoch_next}/86400) + 25569 }")"
-
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
-            -d "{
-              \"valueInputOption\":\"RAW\",
-              \"data\":[
-                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"failed\"]]},
-                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${serial_next}]]}
-              ]
-            }"
