@@ -1,10 +1,11 @@
 name: test
-on:
-  workflow_dispatch:
+
+'on':
+  workflow_dispatch: {}
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Guard exit if another run is in progress
+      - name: Guard exit
         run: echo ok
