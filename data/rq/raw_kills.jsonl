@@ -96,3 +96,13 @@
 {"killID":133408268,"zkb":{"hash":"dfc5c052459037c43d7df4d99b1734c2805dace0","locationID":50006382,"labels":["tz:use","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133408316,"zkb":{"hash":"4749665c85989d19c7cf4e17b657d60337f12d46","locationID":50006382,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133408300,"zkb":{"hash":"603890d064032fc178c0391a1d2422667c19dc3b","locationID":50006382,"labels":["tz:use","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133408329,"zkb":{"hash":"a52217fafa46a935fdc19206f47825a66af3d4b3","locationID":50013452,"labels":["tz:use","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133408317,"zkb":{"hash":"97d8e8b1cb0a6fbe427fb4d9fa14aec1400cdc2d","locationID":50013976,"labels":["tz:use","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133408332,"zkb":{"hash":"b29b807d817888d19d97c6896d1c6283b46f1ec6","locationID":50013976,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133408348,"zkb":{"hash":"3015db1fec9681921a90da8f2263b05a741d8576","locationID":50012090,"labels":["tz:use","cat:6","#:5+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133408326,"zkb":{"hash":"7efce067da85541c993edf97adddd66c7545c20d","locationID":50013698,"labels":["tz:use","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133408357,"zkb":{"hash":"9f82faf32db77a5590e73ef493ff86e04bdd9416","locationID":50002088,"labels":["tz:use","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133408339,"zkb":{"hash":"355af2a29898fb7ef420e7fbb11d9e55b760a7cc","locationID":50001396,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133408349,"zkb":{"hash":"263c8584e8f4025d30765ca29fc1b040e9483cca","locationID":50001396,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133408322,"zkb":{"hash":"b02229ebd8245e157a50074ab37dcd28821fec5c","locationID":50011767,"labels":["tz:use","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133408354,"zkb":{"hash":"081792291e430f7155d3f4394b72185bc6d409f1","locationID":50012090,"labels":["tz:use","cat:6","#:10+","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
