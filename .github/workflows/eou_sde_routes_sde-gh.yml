@@ -44,7 +44,7 @@ jobs:
             const others = runs.filter(r => String(r.id) !== String(context.runId));
 
             if (others.length > 0) {
-              core.info(`Another run is already in progress (run_id=${others[0].id}). Exiting without work.`);
+              core.info(`Another run already in progress (run_id=${others[0].id}). Exiting without work.`);
               core.setOutput("skip", "true");
             } else {
               core.setOutput("skip", "false");
@@ -53,7 +53,7 @@ jobs:
       - name: Stop (no work) if locked
         if: steps.guard.outputs.skip == 'true'
         run: |
-          echo "Locked: another run in progress. Exiting."
+          echo "Locked: another run is in progress. Exiting."
           exit 0
 
       - name: Checkout
@@ -89,7 +89,7 @@ jobs:
           APS_SHEETS_TOKEN: ${{ secrets.APS_SHEETS_TOKEN }}
         run: |
           set -euo pipefail
-          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets \
+          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets-update \
             --webapp-url "$APS_SHEETS_WEBAPP_URL" \
             --token "$APS_SHEETS_TOKEN" \
             --sheets-id "$SHEETS_ID" \
@@ -106,7 +106,7 @@ jobs:
           APS_SHEETS_TOKEN: ${{ secrets.APS_SHEETS_TOKEN }}
         run: |
           set -euo pipefail
-          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets \
+          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets-update \
             --webapp-url "$APS_SHEETS_WEBAPP_URL" \
             --token "$APS_SHEETS_TOKEN" \
             --sheets-id "$SHEETS_ID" \
@@ -128,7 +128,7 @@ jobs:
             --ganksystems data/sde/ganksystems.txt \
             --out data/sde/routes.jsonl.gz
 
-      - name: Validate routes.jsonl.gz
+      - name: Validate output (routes.jsonl.gz)
         shell: bash
         run: |
           set -euo pipefail
@@ -152,6 +152,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           git add -- data/sde/routes.jsonl.gz states/routes.json
 
           if [ -z "$(git status --porcelain -- data/sde/routes.jsonl.gz states/routes.json)" ]; then
@@ -161,6 +162,7 @@ jobs:
             git config user.email "github-actions[bot]@users.noreply.github.com"
 
             git pull --rebase --autostash origin main
+
             git commit -m "sde: rebuild routes.jsonl.gz + update states/routes.json (etags)"
             git push origin HEAD:main
           fi
@@ -172,7 +174,7 @@ jobs:
           APS_SHEETS_TOKEN: ${{ secrets.APS_SHEETS_TOKEN }}
         run: |
           set -euo pipefail
-          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets \
+          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets-update \
             --webapp-url "$APS_SHEETS_WEBAPP_URL" \
             --token "$APS_SHEETS_TOKEN" \
             --sheets-id "$SHEETS_ID" \
@@ -190,7 +192,7 @@ jobs:
           APS_SHEETS_TOKEN: ${{ secrets.APS_SHEETS_TOKEN }}
         run: |
           set -euo pipefail
-          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets \
+          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets-update \
             --webapp-url "$APS_SHEETS_WEBAPP_URL" \
             --token "$APS_SHEETS_TOKEN" \
             --sheets-id "$SHEETS_ID" \
