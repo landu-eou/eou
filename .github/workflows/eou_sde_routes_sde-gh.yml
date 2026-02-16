@@ -3,16 +3,11 @@ name: SDE Routes (SDE → GH)
 on:
   workflow_dispatch:
 
-# Permisos mínimos necesarios:
-# - contents:write  -> commitear routes.jsonl.gz y states/routes.json
-# - actions:read    -> guard por REST API (listar runs)
-# - id-token:write  -> WIF hacia Google (Sheets)
 permissions:
   contents: write
   actions: read
   id-token: write
 
-# Candado oficial (anti-solapamiento). GitHub garantiza como mucho 1 in-progress y 1 pending por group. :contentReference[oaicite:4]{index=4}
 concurrency:
   group: eou_sde_routes_sde-gh
   cancel-in-progress: false
@@ -22,7 +17,7 @@ env:
   SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
   SHEET_TAB: workflows
   SHEETS_WORKFLOW_ROW: "10"
-  LOCK_TIME: "60"  # segundos
+  LOCK_TIME: "60"
 
 jobs:
   run:
@@ -41,7 +36,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Auth oficial con WIF para obtener access_token usable contra Google APIs (Sheets). :contentReference[oaicite:5]{index=5}
       - name: Auth to Google (WIF) for Sheets
         id: gauth
         uses: google-github-actions/auth@v2
@@ -52,8 +46,6 @@ jobs:
           access_token_scopes: |
             https://www.googleapis.com/auth/spreadsheets
 
-      # Guard "anti-colas" basado en next_run de Sheets + lock inicial.
-      # Toda la lógica (lock/etag/build/commit/sheets) vive en el script único.
       - name: Build & publish routes (lock + etag + commit)
         shell: bash
         env:
