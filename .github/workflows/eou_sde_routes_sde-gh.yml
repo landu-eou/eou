@@ -3,6 +3,13 @@ name: SDE Routes (SDE → GH)
 on:
   workflow_dispatch:
 
+env:
+  WORKFLOW_FILE: eou_sde_routes_sde-gh.yml
+  SHEETS_ID: 1fnoPr1Ho6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
+  SHEET_TAB: workflows
+  SHEETS_WORKFLOW_ROW: "10"
+  LOCK_TIME: "60" # seconds
+
 permissions:
   actions: read
   contents: write
@@ -11,20 +18,13 @@ concurrency:
   group: eou_sde_routes_sde-gh
   cancel-in-progress: false
 
-env:
-  WORKFLOW_FILE: eou_sde_routes_sde-gh.yml
-  SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
-  SHEET_TAB: workflows
-  SHEETS_WORKFLOW_ROW: "10"
-  LOCK_TIME: "60"
-
 jobs:
-  build:
+  run:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
-      # 0) Guard anti-cola (si ya hay otro run in_progress, salimos sin trabajo)
+      # 0) Guard anti-cola: si ya hay otro run in_progress del mismo workflow, salimos sin trabajo.
       - name: Guard: exit if another run is in progress
         id: guard
         uses: actions/github-script@v7
@@ -33,19 +33,19 @@ jobs:
             const wf = process.env.WORKFLOW_FILE;
             const { owner, repo } = context.repo;
 
+            // List workflow runs for a workflow (workflow_id can be the workflow file name).
             const res = await github.rest.actions.listWorkflowRuns({
               owner,
               repo,
-              workflow_id: wf,     // se puede usar el nombre del workflow file
+              workflow_id: wf,
               status: "in_progress",
               per_page: 100
             });
 
             const runs = res.data.workflow_runs || [];
             const others = runs.filter(r => String(r.id) !== String(context.runId));
-
             if (others.length > 0) {
-              core.info(`Another run already in progress (run_id=${others[0].id}). Exiting without work.`);
+              core.info(`Another run is already in progress (run_id=${others[0].id}). Exiting without work.`);
               core.setOutput("skip", "true");
             } else {
               core.setOutput("skip", "false");
@@ -54,10 +54,9 @@ jobs:
       - name: Stop (no work) if locked
         if: steps.guard.outputs.skip == 'true'
         run: |
-          echo "Locked: another run is in progress. Exiting."
+          echo "Locked: another run in progress. Exiting."
           exit 0
 
-      # 1) Checkout + Python
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -69,7 +68,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 2) Meta inicial: etags + schedules (LOCK_TIME / +6h / +10m) y decide si hay cambios
+      # 1) Fase inicial: calcular etags + next_run (lock/6h/10m) y decidir si inputs cambiaron.
       - name: Compute etags + schedule values
         id: meta
         shell: bash
@@ -84,7 +83,7 @@ jobs:
               data/sde/stations.jsonl.gz \
               data/sde/ganksystems.txt
 
-      # 3) Fase inicial: LOCK en Sheets solo si hay cambios
+      # 2) Si hay cambios: LOCK externo en Sheets (next_run = now + LOCK_TIME)
       - name: Sheets: set RUNNING + lock next_run (only if inputs changed)
         if: steps.meta.outputs.inputs_changed == 'true'
         shell: bash
@@ -93,7 +92,7 @@ jobs:
           APS_SHEETS_TOKEN: ${{ secrets.APS_SHEETS_TOKEN }}
         run: |
           set -euo pipefail
-          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets-update \
+          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets \
             --webapp-url "$APS_SHEETS_WEBAPP_URL" \
             --token "$APS_SHEETS_TOKEN" \
             --sheets-id "$SHEETS_ID" \
@@ -102,8 +101,8 @@ jobs:
             --status "RUNNING" \
             --next-run-serial "${{ steps.meta.outputs.next_run_lock_serial }}"
 
-      # 4) Si NO hay cambios: éxito rápido + next_run = now + 6h y salir
-      - name: Sheets: set SUCCESS (no changes) + next_run=+6h, then exit
+      # 3) Si NO hay cambios: éxito rápido + next_run = now + 6h y salir
+      - name: Sheets: set SUCCESS_NO_CHANGE + next_run=+6h, then exit
         if: steps.meta.outputs.inputs_changed != 'true'
         shell: bash
         env:
@@ -111,7 +110,7 @@ jobs:
           APS_SHEETS_TOKEN: ${{ secrets.APS_SHEETS_TOKEN }}
         run: |
           set -euo pipefail
-          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets-update \
+          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets \
             --webapp-url "$APS_SHEETS_WEBAPP_URL" \
             --token "$APS_SHEETS_TOKEN" \
             --sheets-id "$SHEETS_ID" \
@@ -122,7 +121,7 @@ jobs:
           echo "No input changes. Done."
           exit 0
 
-      # 5) Fase objetivo: build routes (solo si hubo cambios)
+      # 4) Fase objetivo: build routes (solo si hubo cambios)
       - name: Build routes.jsonl.gz
         shell: bash
         run: |
@@ -134,21 +133,25 @@ jobs:
             --ganksystems data/sde/ganksystems.txt \
             --out data/sde/routes.jsonl.gz
 
-      - name: Validate output (routes.jsonl.gz)
+      - name: Validate routes.jsonl.gz
         shell: bash
         run: |
           set -euo pipefail
-          TARGET="data/sde/routes.jsonl.gz"
-          gzip -t "$TARGET"
-          test -s "$TARGET"
+          gzip -t data/sde/routes.jsonl.gz
+          test -s data/sde/routes.jsonl.gz
 
-      # 6) Fase final éxito: escribir states/routes.json con etags + commit "de golpe"
+      # 5) Fase final éxito:
+      #    - actualizar states/routes.json con los etags
+      #    - commit "de golpe": routes + states
+      #    - sheets: SUCCESS + next_run=+6h + last_modified=now
       - name: Update states/routes.json from computed etags
         shell: bash
         run: |
           set -euo pipefail
-          python -u scripts/sde/eou_sde_routes_sde-gh.py write-state \
+          python -u scripts/sde/eou_sde_routes_sde-gh.py meta \
             --state-file states/routes.json \
+            --write-state \
+            --lock-seconds "${LOCK_TIME}" \
             --inputs \
               data/sde/solarsystems.jsonl.gz \
               data/sde/stargates.jsonl.gz \
@@ -159,7 +162,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           git add -- data/sde/routes.jsonl.gz states/routes.json
 
           if [ -z "$(git status --porcelain -- data/sde/routes.jsonl.gz states/routes.json)" ]; then
@@ -167,9 +169,7 @@ jobs:
           else
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-
             git pull --rebase --autostash origin main
-
             git commit -m "sde: rebuild routes.jsonl.gz + update states/routes.json (etags)"
             git push origin HEAD:main
           fi
@@ -181,7 +181,7 @@ jobs:
           APS_SHEETS_TOKEN: ${{ secrets.APS_SHEETS_TOKEN }}
         run: |
           set -euo pipefail
-          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets-update \
+          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets \
             --webapp-url "$APS_SHEETS_WEBAPP_URL" \
             --token "$APS_SHEETS_TOKEN" \
             --sheets-id "$SHEETS_ID" \
@@ -191,7 +191,7 @@ jobs:
             --next-run-serial "${{ steps.meta.outputs.next_run_6h_serial }}" \
             --last-modified-serial "${{ steps.meta.outputs.now_serial }}"
 
-      # 7) Fase final fallo: next_run = now + 10m
+      # 6) Fase final fallo: next_run = now + 10m
       - name: Sheets: set FAILURE + next_run=+10m
         if: failure()
         shell: bash
@@ -200,7 +200,7 @@ jobs:
           APS_SHEETS_TOKEN: ${{ secrets.APS_SHEETS_TOKEN }}
         run: |
           set -euo pipefail
-          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets-update \
+          python -u scripts/sde/eou_sde_routes_sde-gh.py sheets \
             --webapp-url "$APS_SHEETS_WEBAPP_URL" \
             --token "$APS_SHEETS_TOKEN" \
             --sheets-id "$SHEETS_ID" \
