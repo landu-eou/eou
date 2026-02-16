@@ -1359,12 +1359,12 @@ def main() -> int:
     if existing_next > now_serial:
         # Another run already set next_run; exit without work.
         # We can update status if you want visibility; but to avoid churn, only set if it changes.
-        set_status("SKIPPED_LOCK")
+        set_status("completed")
         return 0
 
     # Lock immediately (now + LOCK_TIME seconds) + status RUNNING
     lock_serial = sheets_serial_utc(now + float(LOCK_TIME))
-    set_status_next("RUNNING", lock_serial)
+    set_status_next("in_progress", lock_serial)
 
     # Compare etags
     prev_etags = load_state_etags(STATE_ROUTES)
@@ -1379,7 +1379,7 @@ def main() -> int:
     if not changed:
         # No work needed; successful
         next6h = sheets_serial_utc(now + 6 * 3600.0)
-        set_status_next("SUCCESS_NOCHANGE", next6h)
+        set_status_next("completed", next6h)
         return 0
 
     # Build attempt
@@ -1388,7 +1388,7 @@ def main() -> int:
     except Exception as e:
         # Failure: next_run = now + 10 minutes
         next10m = sheets_serial_utc(time.time() + 10 * 60.0)
-        set_status_next("FAILED_BUILD", next10m)
+        set_status_next("failed", next10m)
         # Let the run fail in GitHub as well
         print(f"Build failed: {e}", file=sys.stderr)
         return 1
@@ -1409,7 +1409,7 @@ def main() -> int:
     now2 = time.time()
     next6h = sheets_serial_utc(now2 + 6 * 3600.0)
     last_mod = sheets_serial_utc(now2)
-    set_status_next_last("SUCCESS", next6h, last_mod)
+    set_status_next_last("completed", next6h, last_mod)
     return 0
 
 
