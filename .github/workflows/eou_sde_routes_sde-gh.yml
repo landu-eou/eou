@@ -1,3 +1,30 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# File tree (inputs / outputs / state) used by this workflow
+#
+# repo/
+# ├─ .github/
+# │  └─ workflows/
+# │     └─ eou_sde_routes_sde-gh.yml          # this workflow
+# ├─ scripts/
+# │  └─ build_sde_routes.py                   # builder (writes routes.jsonl.gz)
+# ├─ data/
+# │  └─ sde/
+# │     ├─ solarsystems.jsonl.gz              # INPUT (etag tracked)
+# │     ├─ stargates.jsonl.gz                 # INPUT (etag tracked)
+# │     ├─ stations.jsonl.gz                  # INPUT (etag tracked) [optional if script ignores; keep if workflow passes]
+# │     ├─ ganksystems.txt                    # INPUT (etag tracked)
+# │     └─ routes.jsonl.gz                    # OUTPUT (rebuilt from scratch)
+# └─ states/
+#    └─ routes.json                           # STATE (stores strong etags per input file)
+#
+# External state (not in repo):
+# └─ Google Sheets: SHEETS_ID / tab 'workflows'
+#    ├─ Col B (status)
+#    ├─ Col D (next_run)  [UTC serial number]
+#    └─ Col I (last_modified) [UTC serial number]
+# ──────────────────────────────────────────────────────────────────────────────
+
+
 name: SDE Routes (SDE → GH)
 
 on:
