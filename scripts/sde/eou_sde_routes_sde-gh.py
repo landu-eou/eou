@@ -1,24 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-EOU · SDE Routes (SDE → GH)
-
-- Sin artifacts.
-- Candado anti-solapamiento: concurrency en YAML (oficial).
-- Anti-colas: si next_run (Sheets) está en el futuro, este run termina sin hacer trabajo.
-- Lock inicial: si no está locked, escribe next_run = now + LOCK_TIME (seg) al empezar.
-- ETag: SHA256 de inputs del repo. states/routes.json solo contiene {"etag":{...}}.
-- Si no cambia ningún ETag -> run exitoso, next_run = now + 6h (Sheets).
-- Si cambian y build OK -> commit conjunto (routes + states) y:
-    next_run = now + 6h, last_modified = now
-- Si cambian y build FAIL -> next_run = now + 10m
-
-Salida data/sde/routes.jsonl.gz:
-- Inserta solarSystemClass entre solarSystem y routeType.
-- routExpanded NO incluye el sistema solar de origen (salvo Jita, que queda como estación final).
-"""
-
 from __future__ import annotations
 
 import gzip
@@ -34,9 +16,9 @@ import heapq
 import hashlib
 import urllib.request
 import urllib.error
+import urllib.parse
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Iterable, Any, Set
-
 
 # -----------------------------
 # ENV / Constants
@@ -49,31 +31,27 @@ SHEETS_WORKFLOW_ROW = int(os.environ.get("SHEETS_WORKFLOW_ROW", "10"))
 LOCK_TIME = int(os.environ.get("LOCK_TIME", "60"))
 
 GOOGLE_OAUTH_ACCESS_TOKEN = os.environ.get("GOOGLE_OAUTH_ACCESS_TOKEN", "").strip()
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
-GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "").strip()  # owner/repo
-GITHUB_RUN_ID = os.environ.get("GITHUB_RUN_ID", "").strip()
 
 # Paths
 PATH_SOLARSYSTEMS = "data/sde/solarsystems.jsonl.gz"
 PATH_STARGATES = "data/sde/stargates.jsonl.gz"
 PATH_STATIONS = "data/sde/stations.jsonl.gz"
-PATH_GANKS = "data/sde/ganksystems.txt"
+PATH_GANKS = "data/sde/ganksystems.txt"  # tu repo lo tiene en .txt
 
 OUT_ROUTES = "data/sde/routes.jsonl.gz"
 STATE_ROUTES = "states/routes.json"
 
-# Destination fixed station (as in your current builder)
+# Destination fixed station
 DEST_STATION_ID = 60003760
 DEST_STATION_NAME = "Jita IV - Moon 4 - Caldari Navy"
 
 LOWSEC_THRESHOLD = 0.45
 HISEC_THRESHOLD = 0.65
 
-# Cyno parameters (your latest spec)
+# Cyno parameters (tus valores)
 MAX_CYNO_DIST_M = 94_600_000_000_000_000  # 94600000000000000 m
 ISO_NUM = 16565
 ISO_DEN = 9_460_000_000_000_000  # 9460000000000000
-
 
 EDGE_STARGATE = "stargate"
 EDGE_CYNO = "cynoJump"
@@ -86,6 +64,10 @@ CYNO_GRADE_RANK: Dict[str, int] = {
 }
 CYNO_RANK_GRADE = {v: k for k, v in CYNO_GRADE_RANK.items()}
 
+ETAG_FILES = [PATH_SOLARSYSTEMS, PATH_STARGATES, PATH_STATIONS, PATH_GANKS]
+
+WORMHOLE_REGION_RE = re.compile(r"^[A-Z]-R\d{5}$")
+
 
 def die(msg: str, code: int = 2) -> None:
     print(f"ERROR: {msg}", file=sys.stderr)
@@ -93,7 +75,7 @@ def die(msg: str, code: int = 2) -> None:
 
 
 # -----------------------------
-# Sheets helpers (official REST)
+# Sheets helpers (REST)
 # -----------------------------
 
 def sheets_a1(col_letter: str, row: int) -> str:
@@ -101,13 +83,13 @@ def sheets_a1(col_letter: str, row: int) -> str:
 
 
 def sheets_serial_utc(epoch_seconds: float) -> float:
-    # Google Sheets/Excel serial date: days since 1899-12-30
+    # serial days since 1899-12-30
     return epoch_seconds / 86400.0 + 25569.0
 
 
 def sheets_get_value(a1_range: str) -> Optional[str]:
     if not GOOGLE_OAUTH_ACCESS_TOKEN:
-        die("GOOGLE_OAUTH_ACCESS_TOKEN missing (auth step not configured).")
+        die("GOOGLE_OAUTH_ACCESS_TOKEN missing.")
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEETS_ID}/values/{urllib.parse.quote(a1_range)}"
     req = urllib.request.Request(
         url,
@@ -129,23 +111,13 @@ def sheets_get_value(a1_range: str) -> Optional[str]:
 
 
 def sheets_update_values(updates: Dict[str, Any]) -> None:
-    """
-    updates: { "workflows!B10": "RUNNING", "workflows!D10": 46054.9, ... }
-    Uses spreadsheets.values.batchUpdate (official).
-    """
     if not GOOGLE_OAUTH_ACCESS_TOKEN:
-        die("GOOGLE_OAUTH_ACCESS_TOKEN missing (auth step not configured).")
+        die("GOOGLE_OAUTH_ACCESS_TOKEN missing.")
 
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEETS_ID}/values:batchUpdate"
-    data = []
-    for rng, v in updates.items():
-        # Sheets API wants a 2D array for values
-        data.append({"range": rng, "values": [[v]]})
+    data = [{"range": rng, "values": [[v]]} for rng, v in updates.items()]
 
-    payload = {
-        "valueInputOption": "RAW",
-        "data": data,
-    }
+    payload = {"valueInputOption": "RAW", "data": data}
     raw = json.dumps(payload).encode("utf-8")
 
     req = urllib.request.Request(
@@ -169,14 +141,6 @@ def sheets_update_values(updates: Dict[str, Any]) -> None:
 
 def set_status(status: str) -> None:
     sheets_update_values({sheets_a1("B", SHEETS_WORKFLOW_ROW): status})
-
-
-def set_next_run(serial: float) -> None:
-    sheets_update_values({sheets_a1("D", SHEETS_WORKFLOW_ROW): serial})
-
-
-def set_last_modified(serial: float) -> None:
-    sheets_update_values({sheets_a1("I", SHEETS_WORKFLOW_ROW): serial})
 
 
 def set_status_next(status: str, next_serial: float) -> None:
@@ -213,8 +177,8 @@ def git_pull_rebase() -> None:
 
 def git_commit_push(paths: List[str], message: str) -> None:
     run(["git", "add", "--"] + paths)
-    # If nothing staged, do nothing
-    st = run(["git", "status", "--porcelain"] , check=True).stdout
+    st = run(["git", "status", "--porcelain"], check=True).stdout
+    # si nada staged (o no aparece en status), no commit
     if not any(p in st for p in paths):
         return
     run(["git", "commit", "-m", message])
@@ -222,11 +186,8 @@ def git_commit_push(paths: List[str], message: str) -> None:
 
 
 # -----------------------------
-# ETag state
+# ETag state (pretty JSON)
 # -----------------------------
-
-ETAG_FILES = [PATH_SOLARSYSTEMS, PATH_STARGATES, PATH_STATIONS, PATH_GANKS]
-
 
 def sha256_file(path: str) -> str:
     h = hashlib.sha256()
@@ -251,22 +212,17 @@ def write_state_etags_atomic(path: str, etags: Dict[str, str]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
 
-    # Orden determinista por clave (evita churn innecesario en commits)
     ordered = dict(sorted(etags.items(), key=lambda x: x[0]))
 
     if os.path.exists(tmp):
         os.remove(tmp)
 
     with open(tmp, "wt", encoding="utf-8", newline="\n") as f:
-        json.dump(
-            {"etag": ordered},
-            f,
-            ensure_ascii=False,
-            indent=2,          # <-- INDENTACIÓN LEGIBLE
-        )
-        f.write("\n")          # newline final estilo UNIX
+        json.dump({"etag": ordered}, f, ensure_ascii=False, indent=2)
+        f.write("\n")
 
     os.replace(tmp, path)
+
 
 def compute_current_etags() -> Dict[str, str]:
     out: Dict[str, str] = {}
@@ -310,8 +266,7 @@ class System:
     cyno_jump_security: str
     region: str
     constellation: str
-    # If present in SDE; otherwise empty
-    solar_system_type: str
+    solar_system_type: str  # opcional; si no existe queda ""
 
 
 @dataclass(frozen=True)
@@ -344,9 +299,7 @@ def load_systems(solarsystems_gz: str) -> Tuple[Dict[int, System], Dict[str, int
             system_id=sid,
             name=name,
             sec=sec,
-            x=x,
-            y=y,
-            z=z,
+            x=x, y=y, z=z,
             faction=faction if faction is not None else None,
             cyno_jump_security=cyno,
             region=region,
@@ -369,7 +322,6 @@ def load_stations(stations_gz: str) -> Tuple[Dict[str, List[Station]], Dict[int,
         sysname = str(row["solarSystem"]).strip()
         cds = norm_cyno_grade(str(row.get("cynoDockSecurity", "no jump")))
         st = Station(station_id=sid, name=name, system_name=sysname, cyno_dock_security=cds)
-
         by_sys.setdefault(sysname, []).append(st)
         by_id[sid] = st
 
@@ -495,11 +447,10 @@ def load_ganksystems_ids_txt(ganksystems_txt: str, name_to_id: Dict[str, int]) -
 
 
 # -----------------------------
-# Base routeSDEsafe100 flags (as in your current code)
+# routeSDEsafe100 (base)
 # -----------------------------
 
 def safer_cost(sec_to: float, penalty_cost: float) -> float:
-    # CCP guide behaviour (Safer) is the model; we keep your existing function. :contentReference[oaicite:6]{index=6}
     if sec_to <= 0.0:
         return 2.0 * penalty_cost
     if sec_to < LOWSEC_THRESHOLD:
@@ -512,7 +463,7 @@ def dijkstra_route_sde_safer100(
     gate_adj: Dict[int, List[int]],
     dest_id: int,
 ) -> Dict[int, int]:
-    penalty_cost = math.exp(0.15 * 100.0)  # security_penalty=100
+    penalty_cost = math.exp(0.15 * 100.0)
 
     INF = float("inf")
     dist: Dict[int, Tuple[float, int]] = {dest_id: (0.0, 0)}
@@ -607,12 +558,7 @@ def compute_base_has_lowsec_and_min_id(
 
 
 # -----------------------------
-# Type sets and routing logic (your tested logic retained, but:
-# - ISO formula updated
-# - Cyno destination constraints updated (sec<0.45 + safe/risky + no (sec<=0 & faction null))
-# - gank lowsec origins allowed but forced cyno (implemented by disallowing stargate exits)
-# - routExpanded origin removed
-# - Output solarSystemClass added
+# Types + Cyno edges
 # -----------------------------
 
 def is_lowsec(sec: float) -> bool:
@@ -620,7 +566,6 @@ def is_lowsec(sec: float) -> bool:
 
 
 def fuel_for_distance_m(dist_m: float) -> int:
-    # ceil(dist_m * ISO_NUM / ISO_DEN)
     f = int(math.ceil(dist_m * ISO_NUM / ISO_DEN))
     return 1 if f < 1 else f
 
@@ -631,14 +576,16 @@ def build_reverse_cyno_edges_grid(
 ) -> Dict[int, List[Tuple[int, int, bool]]]:
     """
     rev[dest] = [(origin, fuel, dest_is_risky), ...]
-    - Destino cyno permitido:
-        sec < 0.45
-        cyno grade in {safe,risky}
-        NOT (sec <=0 and faction is null)
-    - Origen cyno: no lo restringimos aquí; tu algoritmo ya decide.
-    - Optimizado con grid de celda = MAX_CYNO_DIST_M
+
+    Destino cyno permitido:
+      - sec < 0.45
+      - grade in {safe,risky}
+      - NO (sec <= 0 AND faction is null)
+
+    ORIGEN cyno permitido (nuevo requisito):
+      - SOLO desde sistemas con sec < 0.45
     """
-    eligible: List[Tuple[int, float, float, float, bool]] = []
+    eligible_dests: List[Tuple[int, float, float, float, bool]] = []
     for s in systems.values():
         if s.sec >= LOWSEC_THRESHOLD:
             continue
@@ -647,7 +594,7 @@ def build_reverse_cyno_edges_grid(
             continue
         if s.sec <= 0.0 and s.faction is None:
             continue
-        eligible.append((s.system_id, s.x, s.y, s.z, grade == "risky"))
+        eligible_dests.append((s.system_id, s.x, s.y, s.z, grade == "risky"))
 
     cell = float(MAX_CYNO_DIST_M)
     r2 = cell * cell
@@ -656,17 +603,21 @@ def build_reverse_cyno_edges_grid(
         return (int(math.floor(x / cell)), int(math.floor(y / cell)), int(math.floor(z / cell)))
 
     grid: Dict[Tuple[int, int, int], List[Tuple[int, float, float, float, bool]]] = {}
-    for did, x, y, z, is_risky in eligible:
+    for did, x, y, z, is_risky in eligible_dests:
         grid.setdefault(cell_key(x, y, z), []).append((did, x, y, z, is_risky))
 
-    rev: Dict[int, List[Tuple[int, int, bool]]] = {did: [] for (did, *_rest) in eligible}
+    rev: Dict[int, List[Tuple[int, int, bool]]] = {did: [] for (did, *_rest) in eligible_dests}
 
+    # ORIGENES: solo sec < 0.45 (nuevo requisito)
     for o in systems.values():
+        if o.sec >= LOWSEC_THRESHOLD:
+            continue
+
         oid = o.system_id
         ok = cell_key(o.x, o.y, o.z)
         ox, oy, oz = o.x, o.y, o.z
-
         cx, cy, cz = ok
+
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 for dz in (-1, 0, 1):
@@ -710,6 +661,7 @@ def build_type_sets(
     for sid, s in systems.items():
         if sid in has_gate and s.sec <= 1.0:
             S.add(sid)
+
         if s.sec < LOWSEC_THRESHOLD:
             NL.add(sid)
 
@@ -740,51 +692,19 @@ def build_type_sets(
     }
 
 
-# Cost tuple: your priority order is already encoded in your existing code.
-# Keep it stable; add base_min_id as last tie-break (already).
+# -----------------------------
+# FINAL selection criteria (new order)
+# -----------------------------
+# 1) cynoJumps
+# 2) fuel
+# 3) risky_present (0 => only-safe/none; 1 => some risky)  (rule #3)
+# 4) low2high
+# 5) gank_hi_entries
+# 6) neg_minGateSec  (maximize min gate security)
+# 7) stargates
+# 8) intermediates
+# 9) base_min_id
 Cost = Tuple[int, int, int, int, int, float, int, int, int]
-# (cynoJumps, fuel, risky_present, low2high, gank_hi_entries, neg_minGateSec, stargates, intermediates, base_min_id)
-
-
-def dijkstra_final_routes_two_pass(
-    systems: Dict[int, System],
-    gate_adj: Dict[int, List[int]],
-    rev_cyno: Dict[int, List[Tuple[int, int, bool]]],
-    dest_id: int,
-    type_sets: Dict[str, Set[int]],
-    gank_ids: Set[int],
-    base_min_id: Dict[int, int],
-) -> Tuple[Dict[int, Cost], Dict[int, Tuple[int, str, int]]]:
-    """
-    Two-pass:
-      - Pass A: disallow risky cyno destinations
-      - Pass B: allow risky
-    For each origin, choose A if reachable, else B.
-    """
-    bestA, nxtA = dijkstra_final_routes(
-        systems, gate_adj, rev_cyno, dest_id, type_sets, gank_ids, base_min_id, allow_risky=False
-    )
-    bestB, nxtB = dijkstra_final_routes(
-        systems, gate_adj, rev_cyno, dest_id, type_sets, gank_ids, base_min_id, allow_risky=True
-    )
-
-    best: Dict[int, Cost] = {}
-    nxt: Dict[int, Tuple[int, str, int]] = {}
-
-    for sid in set(bestA.keys()).union(bestB.keys()):
-        if sid in bestA:
-            best[sid] = bestA[sid]
-            if sid in nxtA:
-                nxt[sid] = nxtA[sid]
-        else:
-            best[sid] = bestB[sid]
-            if sid in nxtB:
-                nxt[sid] = nxtB[sid]
-
-    # For next pointers we need per-node mapping; reconstruct will follow from origin using nxt.
-    # We keep nxt from chosen pass only; reconstruct() relies on nxt per node.
-    # For nodes only in B, nxt is from B; for A nodes, from A.
-    return best, (nxtA | nxtB)  # safe: reconstruct uses entries created by the chosen traversal
 
 
 def dijkstra_final_routes(
@@ -795,7 +715,6 @@ def dijkstra_final_routes(
     type_sets: Dict[str, Set[int]],
     gank_ids: Set[int],
     base_min_id: Dict[int, int],
-    allow_risky: bool,
 ) -> Tuple[Dict[int, Cost], Dict[int, Tuple[int, str, int]]]:
     has_gate = type_sets["has_gate"]
     S = type_sets["S"]
@@ -812,22 +731,24 @@ def dijkstra_final_routes(
     def inf_cost() -> Cost:
         return (INF_INT, INF_INT, INF_INT, INF_INT, INF_INT, INF_FLOAT, INF_INT, INF_INT, INF_ID)
 
-    # gank lowsec origins: can be origin, but must exit via cyno.
+    # gank lowsec origins: permitidos como origen, pero no pueden salir por gate (solo cyno)
     forced_cyno_origins = {sid for sid in gank_ids if systems[sid].sec < LOWSEC_THRESHOLD}
 
     def gate_allowed(p: int, u: int) -> bool:
         if p in forced_cyno_origins:
             return False
+
         if p not in has_gate or u not in has_gate:
             return False
 
-        # Your existing S/NL/I/LDg/Lg/Hg rule blocks special lowsec transitions.
+        # Reglas especiales lowsec<->hisec basadas en base_has_lowsec y LDg/Lg/Hg (idénticas a tu lógica previa)
         if (p in S) and (u in NL):
             return (p in I) and (u in LDg)
+
         if (p in NL) and (u in S):
             return (p in Lg) and (u in Hg)
 
-        # Hard bans:
+        # BANS duros:
         su = systems[u]
         if su.sec <= 0.0:
             return False
@@ -838,6 +759,7 @@ def dijkstra_final_routes(
     best: Dict[int, Cost] = {}
     nxt_step: Dict[int, Tuple[int, str, int]] = {}
 
+    # neg_minGateSec arranca en -1.0 (seguridad min inicial)
     start: Cost = (0, 0, 0, 0, 0, -1.0, 0, 0, base_min_id.get(dest_id, INF_ID))
     best[dest_id] = start
 
@@ -863,12 +785,26 @@ def dijkstra_final_routes(
             inter2 = inter + (0 if u == dest_id else 1)
 
             low2high2 = low2high + (1 if (sec_p < LOWSEC_THRESHOLD and sec_u >= LOWSEC_THRESHOLD) else 0)
+
+            # criterio #5: contar nodos intermedios ganksec (sec>=0.45 y en lista gank)
             gank_hi2 = gank_hi + (1 if (u != dest_id and (u in gank_ids) and (sec_u >= LOWSEC_THRESHOLD)) else 0)
 
+            # criterio #6: max min gate security (usamos -minSec para min lexicográfico)
             neg_min2 = max(neg_min, -round(sec_u, 6))
+
             bm_p = base_min_id.get(p, INF_ID)
 
-            cand: Cost = (cyno_j, fuel, risky_present, low2high2, gank_hi2, neg_min2, gates2, inter2, bm_p)
+            cand: Cost = (
+                cyno_j,
+                fuel,
+                risky_present,
+                low2high2,
+                gank_hi2,
+                neg_min2,
+                gates2,
+                inter2,
+                bm_p,
+            )
             old = best.get(p, inf_cost())
             if cand < old or (cand == old and u < nxt_step.get(p, (2**31 - 1, "", 0))[0]):
                 best[p] = cand
@@ -877,9 +813,6 @@ def dijkstra_final_routes(
 
         # Cyno predecessors (p -> u)
         for (p, fuel_edge, dest_is_risky) in rev_cyno.get(u, []):
-            if dest_is_risky and not allow_risky:
-                continue
-
             cyno_j, fuel, risky_present, low2high, gank_hi, neg_min, gates, inter, _bm = cost_u
             bm_p = base_min_id.get(p, INF_ID)
 
@@ -904,6 +837,10 @@ def dijkstra_final_routes(
 
     return best, nxt_step
 
+
+# -----------------------------
+# Route reconstruction / formatting
+# -----------------------------
 
 def reconstruct_raw_edges(
     dest_id: int,
@@ -958,13 +895,9 @@ def make_compact_route_with_stations(
 def make_route_expanded(
     systems: Dict[int, System],
     station_name_by_system_id: Dict[int, str],
-    origin_id: int,
     raw_edges: List[Tuple[str, int, int]],
 ) -> List[str]:
-    """
-    Requisito nuevo:
-      - routExpanded NO incluye el sistema de origen (excepto Jita case).
-    """
+    # Requisito: NO incluir el sistema origen.
     expanded: List[str] = []
 
     i = 0
@@ -993,10 +926,6 @@ def make_route_expanded(
 
     return expanded
 
-
-# -----------------------------
-# routeType helper (unchanged)
-# -----------------------------
 
 _ROMAN_MAP = [
     (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
@@ -1041,7 +970,7 @@ def build_route_type(
     has_route: bool,
     origin_is_jita: bool,
     compact_route: List[List[Any]],
-    cyno_risky_count: int,
+    risky_present: int,
     stargates_lowsec_count: int,
     stargates_ganksec_count: int,
     stargates_total: int,
@@ -1062,7 +991,7 @@ def build_route_type(
         roman = normalize_roman_for_route_type(cyno_run_signature(compact_route))
 
     prefixes: List[str] = []
-    if has_cyno and cyno_risky_count > 0:
+    if has_cyno and risky_present > 0:
         prefixes.append("risky")
 
     if stargates_lowsec_count > 0:
@@ -1079,13 +1008,6 @@ def build_route_type(
     return " ".join(parts)
 
 
-# -----------------------------
-# solarSystemClass (new)
-# -----------------------------
-
-WORMHOLE_REGION_RE = re.compile(r"^[A-Z]-R\d{5}$")
-
-
 def solar_system_class(
     s: System,
     *,
@@ -1093,7 +1015,6 @@ def solar_system_class(
     has_gate: bool,
     base_has_lowsec: bool,
 ) -> str:
-    # Explicit region-based
     if s.region == "Pochven":
         return "pochven"
     if s.region == "Yasna Zakh":
@@ -1101,36 +1022,30 @@ def solar_system_class(
     if s.region in ("A821-A", "J7HZ-F", "UUA-F4"):
         return "jove"
 
-    # Wormhole: heuristic by region format or explicit type field if present
     if s.solar_system_type == "wormhole":
         return "wormhole"
     if WORMHOLE_REGION_RE.match(s.region or ""):
         return "wormhole"
 
-    # Gank-based
     if in_gank and s.sec < LOWSEC_THRESHOLD:
         return "campsec"
     if in_gank and s.sec >= LOWSEC_THRESHOLD and has_gate:
         return "ganksec"
 
-    # Nullsec split
     if s.sec <= 0.0 and not in_gank:
         if s.faction is not None:
             return "npcnull"
         return "sovnull"
 
-    # Lowsec (non gank)
     if 0.0 < s.sec < LOWSEC_THRESHOLD and not in_gank:
         return "lowsec"
 
-    # Islands (hisland/midsland) only if not gank
     if not in_gank and base_has_lowsec:
         if s.sec >= HISEC_THRESHOLD:
             return "hisland"
         if LOWSEC_THRESHOLD <= s.sec < HISEC_THRESHOLD:
             return "midsland"
 
-    # hisec/midsec (non gank)
     if not in_gank:
         if s.sec >= HISEC_THRESHOLD:
             return "hisec"
@@ -1140,10 +1055,6 @@ def solar_system_class(
     return "unknown"
 
 
-# -----------------------------
-# Output writer
-# -----------------------------
-
 def write_jsonl_gz_atomic(path: str, rows: Iterable[dict]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
@@ -1151,7 +1062,6 @@ def write_jsonl_gz_atomic(path: str, rows: Iterable[dict]) -> None:
         os.remove(tmp)
 
     with open(tmp, "wb") as raw:
-        # deterministic gzip
         with gzip.GzipFile(filename="routes.jsonl", fileobj=raw, mode="wb", mtime=0) as gz:
             with io.TextIOWrapper(gz, encoding="utf-8", newline="\n") as f:
                 for obj in rows:
@@ -1162,7 +1072,7 @@ def write_jsonl_gz_atomic(path: str, rows: Iterable[dict]) -> None:
 
 
 # -----------------------------
-# Main build function
+# Build routes
 # -----------------------------
 
 def build_routes() -> None:
@@ -1174,26 +1084,25 @@ def build_routes() -> None:
     if dest_station is None:
         die(f"Destination station {DEST_STATION_ID} not found in {PATH_STATIONS}.")
 
-    dest_system_name = dest_station.system_name
-    dest_id = name_to_id.get(dest_system_name)
-    if dest_id is None:
-        die(f"Destination system '{dest_system_name}' not found in solarsystems.")
+    dest_system_id = name_to_id.get(dest_station.system_name)
+    if dest_system_id is None:
+        die(f"Destination system '{dest_station.system_name}' not found in solarsystems.")
 
     station_name_by_system_id = precompute_station_name_by_system_id(
         systems=systems,
         system_cyno_grade=system_cyno_grade,
         stations_by_sysname=stations_by_sysname,
-        dest_system_id=dest_id,
+        dest_system_id=dest_system_id,
         dest_station_name=DEST_STATION_NAME,
     )
 
     gate_adj = load_stargates_graph(PATH_STARGATES, name_to_id)
-    origin_ids = sorted(gate_adj.keys())  # only systems with stargates
+    origin_ids = sorted(gate_adj.keys())
 
     gank_ids = load_ganksystems_ids_txt(PATH_GANKS, name_to_id)
 
-    base_next = dijkstra_route_sde_safer100(systems, gate_adj, dest_id)
-    base_has_lowsec, base_min_id = compute_base_has_lowsec_and_min_id(systems, base_next, dest_id)
+    base_next = dijkstra_route_sde_safer100(systems, gate_adj, dest_system_id)
+    base_has_lowsec, base_min_id = compute_base_has_lowsec_and_min_id(systems, base_next, dest_system_id)
 
     type_sets = build_type_sets(
         systems=systems,
@@ -1203,22 +1112,19 @@ def build_routes() -> None:
         base_has_lowsec=base_has_lowsec,
     )
 
-    # Cyno adjacency
     rev_cyno = build_reverse_cyno_edges_grid(systems, system_cyno_grade)
 
-    bestA, nxtA = dijkstra_final_routes(
-        systems, gate_adj, rev_cyno, dest_id, type_sets, gank_ids, base_min_id, allow_risky=False
-    )
-    bestB, nxtB = dijkstra_final_routes(
-        systems, gate_adj, rev_cyno, dest_id, type_sets, gank_ids, base_min_id, allow_risky=True
+    best, nxt = dijkstra_final_routes(
+        systems=systems,
+        gate_adj=gate_adj,
+        rev_cyno=rev_cyno,
+        dest_id=dest_system_id,
+        type_sets=type_sets,
+        gank_ids=gank_ids,
+        base_min_id=base_min_id,
     )
 
-    def choose_pass(oid: int) -> Tuple[Optional[Cost], Optional[Dict[int, Tuple[int, str, int]]]]:
-        if oid in bestA:
-            return bestA[oid], nxtA
-        if oid in bestB:
-            return bestB[oid], nxtB
-        return None, None
+    has_gate = type_sets["has_gate"]
 
     def compute_counts_from_raw_edges(raw_edges: List[Tuple[str, int, int]]) -> Tuple[int, int, int, int, int, int]:
         safe_c = 0
@@ -1249,17 +1155,18 @@ def build_routes() -> None:
 
         return safe_c, risky_c, hisec, midsec, ganksec, lowsec
 
-    has_gate = type_sets["has_gate"]
-
     def row_for_origin(oid: int) -> dict:
         o = systems[oid]
         in_gank = oid in gank_ids
 
-        # Jita row
-        if oid == dest_id:
-            cls = solar_system_class(
-                o, in_gank=in_gank, has_gate=(oid in has_gate), base_has_lowsec=base_has_lowsec.get(oid, False)
-            )
+        cls = solar_system_class(
+            o,
+            in_gank=in_gank,
+            has_gate=(oid in has_gate),
+            base_has_lowsec=base_has_lowsec.get(oid, False),
+        )
+
+        if oid == dest_system_id:
             return {
                 "solarSystem": o.name,
                 "solarSystemClass": cls,
@@ -1271,11 +1178,7 @@ def build_routes() -> None:
                 "routExpanded": [DEST_STATION_NAME],
             }
 
-        cost, nxt = choose_pass(oid)
-        if cost is None or nxt is None:
-            cls = solar_system_class(
-                o, in_gank=in_gank, has_gate=(oid in has_gate), base_has_lowsec=base_has_lowsec.get(oid, False)
-            )
+        if oid not in best:
             return {
                 "solarSystem": o.name,
                 "solarSystemClass": cls,
@@ -1287,13 +1190,12 @@ def build_routes() -> None:
                 "routExpanded": [],
             }
 
-        raw_edges = reconstruct_raw_edges(dest_id=dest_id, origin_id=oid, nxt_step=nxt)
+        raw_edges = reconstruct_raw_edges(dest_id=dest_system_id, origin_id=oid, nxt_step=nxt)
         compact_route = make_compact_route_with_stations(station_name_by_system_id, raw_edges)
-        expanded = make_route_expanded(systems, station_name_by_system_id, oid, raw_edges)
+        expanded = make_route_expanded(systems, station_name_by_system_id, raw_edges)
 
-        cyno_count, fuel, _risky_present, _low2high, _gank_hi, _neg_min, st_total, _inter, _bm = cost
+        cyno_j, fuel, risky_present, _low2high, _gank_hi, _neg_min, st_total, _inter, _bm = best[oid]
 
-        # jumpFuel doubled globally (kept from your current code)
         jump_fuel = int(fuel) * 2
 
         safe_c, risky_c, hisec, midsec, ganksec, lowsec = compute_counts_from_raw_edges(raw_edges)
@@ -1306,7 +1208,7 @@ def build_routes() -> None:
             "lowsec": int(lowsec),
         }
         cj_obj = {
-            "count": int(cyno_count),
+            "count": int(cyno_j),
             "safe": int(safe_c),
             "risky": int(risky_c),
         }
@@ -1315,14 +1217,10 @@ def build_routes() -> None:
             has_route=True,
             origin_is_jita=False,
             compact_route=compact_route,
-            cyno_risky_count=risky_c,
-            stargates_lowsec_count=lowsec,
-            stargates_ganksec_count=ganksec,
+            risky_present=int(risky_present),
+            stargates_lowsec_count=int(lowsec),
+            stargates_ganksec_count=int(ganksec),
             stargates_total=int(st_total),
-        )
-
-        cls = solar_system_class(
-            o, in_gank=in_gank, has_gate=(oid in has_gate), base_has_lowsec=base_has_lowsec.get(oid, False)
         )
 
         return {
@@ -1336,7 +1234,6 @@ def build_routes() -> None:
             "routExpanded": expanded,
         }
 
-    # Rebuild output
     if os.path.exists(OUT_ROUTES):
         try:
             os.remove(OUT_ROUTES)
@@ -1345,21 +1242,21 @@ def build_routes() -> None:
 
     write_jsonl_gz_atomic(OUT_ROUTES, (row_for_origin(oid) for oid in origin_ids))
 
-    # Validate gzip
+    # quick gzip validate
     with gzip.open(OUT_ROUTES, "rb") as f:
         _ = f.read(1)
 
 
 # -----------------------------
-# Orchestration (lock + etag + build + commit + next_run logic)
+# Orchestration (lock + etag + build + commit + next_run)
+# status(B10): in_progress / completed / failed
 # -----------------------------
 
 def main() -> int:
     now = time.time()
     now_serial = sheets_serial_utc(now)
 
-    # Read current next_run from Sheets (anti-queue).
-    # If next_run is in the future -> skip immediately without touching it.
+    # Anti-colas: si next_run ya está en el futuro, salir sin tocar nada
     existing_next_raw = sheets_get_value(sheets_a1("D", SHEETS_WORKFLOW_ROW))
     try:
         existing_next = float(existing_next_raw) if existing_next_raw else 0.0
@@ -1367,55 +1264,42 @@ def main() -> int:
         existing_next = 0.0
 
     if existing_next > now_serial:
-        # Another run already set next_run; exit without work.
-        # We can update status if you want visibility; but to avoid churn, only set if it changes.
         set_status("completed")
         return 0
 
-    # Lock immediately (now + LOCK_TIME seconds) + status RUNNING
+    # Lock inicial + status in_progress
     lock_serial = sheets_serial_utc(now + float(LOCK_TIME))
     set_status_next("in_progress", lock_serial)
 
-    # Compare etags
     prev_etags = load_state_etags(STATE_ROUTES)
     cur_etags = compute_current_etags()
 
-    changed = False
-    for p in ETAG_FILES:
-        if prev_etags.get(p) != cur_etags.get(p):
-            changed = True
-            break
+    changed = any(prev_etags.get(p) != cur_etags.get(p) for p in ETAG_FILES)
 
     if not changed:
-        # No work needed; successful
         next6h = sheets_serial_utc(now + 6 * 3600.0)
         set_status_next("completed", next6h)
         return 0
 
-    # Build attempt
     try:
         build_routes()
     except Exception as e:
-        # Failure: next_run = now + 10 minutes
         next10m = sheets_serial_utc(time.time() + 10 * 60.0)
         set_status_next("failed", next10m)
-        # Let the run fail in GitHub as well
         print(f"Build failed: {e}", file=sys.stderr)
         return 1
 
-    # Build OK -> update state etags
+    # Build OK -> write pretty state
     write_state_etags_atomic(STATE_ROUTES, cur_etags)
 
-    # Commit routes + state in ONE commit
+    # One commit (routes + state)
     git_config_bot()
-    # If main moved, rebase
     git_pull_rebase()
     git_commit_push(
         paths=[OUT_ROUTES, STATE_ROUTES],
-        message="sde: rebuild routes.jsonl.gz (lock+etag, solarSystemClass, routExpanded)",
+        message="sde: rebuild routes.jsonl.gz (criteria update, no-cyno-from-hisec)",
     )
 
-    # Success final phase:
     now2 = time.time()
     next6h = sheets_serial_utc(now2 + 6 * 3600.0)
     last_mod = sheets_serial_utc(now2)
