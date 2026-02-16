@@ -1,4 +1,4 @@
-name: SDE Routes (SDE → GH) — routes.jsonl.gz
+name: SDE Routes (SDE → GH)
 
 on:
   workflow_dispatch:
