@@ -1,4 +1,4 @@
-name: Add Autopilot Waypoints (manual token, from file)
+name: Add Autopilot Waypoints (manual token, from file, rate-limit safe)
 
 on:
   workflow_dispatch:
@@ -13,9 +13,14 @@ on:
         default: true
         type: boolean
       delay_ms:
-        description: "Delay entre inserciones (ms)"
+        description: "Delay base entre inserciones (ms)"
         required: true
         default: "300"
+        type: string
+      max_retries:
+        description: "Reintentos máximos por waypoint (para 429/420/5xx)"
+        required: true
+        default: "10"
         type: string
 
 permissions:
@@ -28,14 +33,13 @@ concurrency:
 jobs:
   add-waypoints:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     env:
       CHAR_ID: "2124070822"
       ROUTE_FILE: "test/routes_ap.txt"
       ESI_BASE: "https://esi.evetech.net/latest"
-      # Ajusta si quieres un User-Agent más descriptivo
-      USER_AGENT: "landu-eou/eou-waypoints-gha (manual-token; contact: you@example.com)"
+      USER_AGENT: "landu-eou/eou-waypoints-gha (manual-token)"
 
     steps:
       - name: Checkout
@@ -50,68 +54,178 @@ jobs:
             exit 1
           fi
           echo "OK: Encontrado ${ROUTE_FILE}"
-          echo "Primeras 10 líneas (para sanity-check):"
+          echo "Primeras 10 líneas (sanity-check):"
           head -n 10 "${ROUTE_FILE}" || true
 
-      - name: Add waypoints in order (300ms delay)
+      - name: Add waypoints in order (rate-limit aware)
         shell: bash
         env:
           ACCESS_TOKEN: ${{ inputs.access_token }}
           CLEAR_FIRST: ${{ inputs.clear_existing_waypoints }}
           DELAY_MS: ${{ inputs.delay_ms }}
+          MAX_RETRIES: ${{ inputs.max_retries }}
         run: |
           set -euo pipefail
 
           # Enmascara el token en logs (por si algo lo imprime accidentalmente)
           echo "::add-mask::${ACCESS_TOKEN}"
 
-          # Validación mínima del delay
+          # Validaciones mínimas
           if ! [[ "${DELAY_MS}" =~ ^[0-9]+$ ]]; then
             echo "ERROR: delay_ms debe ser numérico (ms). Valor recibido: ${DELAY_MS}"
             exit 1
           fi
-          SLEEP_SEC="$(python3 - << 'PY'
+          if ! [[ "${MAX_RETRIES}" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: max_retries debe ser numérico. Valor recibido: ${MAX_RETRIES}"
+            exit 1
+          fi
+
+          BASE_SLEEP_SEC="$(python3 - << 'PY'
           import os
           ms = int(os.environ["DELAY_MS"])
           print(ms/1000)
           PY
           )"
 
-          # Función para hacer POST a ESI
-          post_waypoint() {
+          # Parse de header "Retry-After" (si existe). Devuelve segundos (entero) o vacío.
+          get_retry_after_sec() {
+            local header_file="$1"
+            # Busca "Retry-After:" case-insensitive
+            local ra
+            ra="$(awk 'BEGIN{IGNORECASE=1} /^Retry-After:/{sub(/\r$/,""); print $2}' "${header_file}" | tail -n 1 || true)"
+            if [[ -n "${ra}" && "${ra}" =~ ^[0-9]+$ ]]; then
+              echo "${ra}"
+            else
+              echo ""
+            fi
+          }
+
+          # ESI suele mandar estos headers: X-Esi-Error-Limit-Remain / X-Esi-Error-Limit-Reset
+          # Si el error-limit está bajo, dormimos hasta Reset.
+          maybe_sleep_on_error_limit() {
+            local header_file="$1"
+
+            local remain reset
+            remain="$(awk 'BEGIN{IGNORECASE=1} /^X-Esi-Error-Limit-Remain:/{sub(/\r$/,""); print $2}' "${header_file}" | tail -n 1 || true)"
+            reset="$(awk 'BEGIN{IGNORECASE=1} /^X-Esi-Error-Limit-Reset:/{sub(/\r$/,""); print $2}' "${header_file}" | tail -n 1 || true)"
+
+            if [[ "${remain}" =~ ^[0-9]+$ && "${reset}" =~ ^[0-9]+$ ]]; then
+              # Si te estás quedando sin "error budget", espera a que se resetee.
+              # Umbral conservador: <= 3
+              if (( remain <= 3 )); then
+                local wait_sec=$(( reset + 1 ))
+                echo "INFO: X-Esi-Error-Limit-Remain=${remain} (bajo). Durmiendo ${wait_sec}s (Reset=${reset})."
+                sleep "${wait_sec}"
+              fi
+            fi
+          }
+
+          # POST waypoint con control de rate-limit y backoff.
+          # Devuelve 0 si OK (204), 1 si fallo definitivo.
+          post_waypoint_with_retry() {
             local dest_id="$1"
             local clear="$2"   # "true" o "false"
 
-            # add_to_beginning=false => mantiene el orden de inserción (va al final)
-            # clear_other_waypoints=true solo para el primero si lo has pedido
             local url="${ESI_BASE}/ui/autopilot/waypoint/?add_to_beginning=false&clear_other_waypoints=${clear}&destination_id=${dest_id}"
 
-            # -sS: silencioso pero muestra errores
-            # -o /dev/null: no cuerpo
-            # -w '%{http_code}': captura código
-            http_code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${url}" \
-              -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-              -H "Accept: application/json" \
-              -H "User-Agent: ${USER_AGENT}")"
+            local attempt=0
+            local backoff=1
 
-            echo "${http_code}"
+            while (( attempt <= MAX_RETRIES )); do
+              attempt=$((attempt+1))
+
+              local hdr tmp_body http_code
+              hdr="$(mktemp)"
+              tmp_body="$(mktemp)"
+
+              # -D hdr: guarda headers
+              # -o body: guarda body por si hay error útil
+              # -w code: captura status
+              http_code="$(curl -sS -D "${hdr}" -o "${tmp_body}" -w '%{http_code}' -X POST "${url}" \
+                -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+                -H "Accept: application/json" \
+                -H "User-Agent: ${USER_AGENT}" || echo "000")"
+
+              # Si estamos cerca del error limit, dormimos preventivamente.
+              maybe_sleep_on_error_limit "${hdr}"
+
+              if [[ "${http_code}" == "204" ]]; then
+                rm -f "${hdr}" "${tmp_body}"
+                return 0
+              fi
+
+              # Token malo / sin scope / caducado → no reintentar infinito
+              if [[ "${http_code}" == "401" || "${http_code}" == "403" ]]; then
+                echo "ERROR: HTTP ${http_code} (auth). destination_id=${dest_id}"
+                echo "Body:"
+                sed -e 's/./&/g' "${tmp_body}" | head -n 50 || true
+                rm -f "${hdr}" "${tmp_body}"
+                return 1
+              fi
+
+              # 400: suele ser parámetros inválidos (destination_id raro) → no vale la pena reintentar
+              if [[ "${http_code}" == "400" ]]; then
+                echo "ERROR: HTTP 400 (bad request). destination_id=${dest_id} ¿ID inválido?"
+                echo "Body:"
+                cat "${tmp_body}" | head -n 80 || true
+                rm -f "${hdr}" "${tmp_body}"
+                return 1
+              fi
+
+              # Rate limit / error limit / server busy: reintentar con espera
+              if [[ "${http_code}" == "429" || "${http_code}" == "420" || "${http_code}" == "500" || "${http_code}" == "502" || "${http_code}" == "503" || "${http_code}" == "504" || "${http_code}" == "000" ]]; then
+                local ra wait_sec
+                ra="$(get_retry_after_sec "${hdr}")"
+
+                if [[ -n "${ra}" ]]; then
+                  wait_sec=$(( ra + 1 ))
+                  echo "WARN: HTTP ${http_code} destination_id=${dest_id} attempt=${attempt}/${MAX_RETRIES}. Retry-After=${ra}s → sleep ${wait_sec}s"
+                else
+                  # backoff exponencial suave, cap 30s
+                  wait_sec="${backoff}"
+                  if (( wait_sec > 30 )); then wait_sec=30; fi
+                  echo "WARN: HTTP ${http_code} destination_id=${dest_id} attempt=${attempt}/${MAX_RETRIES}. No Retry-After → backoff sleep ${wait_sec}s"
+                fi
+
+                # Muestra una pista del body (sin spamear)
+                if [[ -s "${tmp_body}" ]]; then
+                  echo "Body (primeras líneas):"
+                  head -n 20 "${tmp_body}" || true
+                fi
+
+                rm -f "${hdr}" "${tmp_body}"
+                sleep "${wait_sec}"
+
+                # incrementa backoff si no había Retry-After (o incluso si lo había, pero suave)
+                backoff=$(( backoff * 2 ))
+                if (( backoff > 30 )); then backoff=30; fi
+                continue
+              fi
+
+              # Otros códigos: fallo definitivo (para no “banear” por insistir)
+              echo "ERROR: HTTP ${http_code} inesperado. destination_id=${dest_id} attempt=${attempt}/${MAX_RETRIES}"
+              echo "Body:"
+              cat "${tmp_body}" | head -n 80 || true
+              rm -f "${hdr}" "${tmp_body}"
+              return 1
+            done
+
+            echo "ERROR: Superado max_retries=${MAX_RETRIES} para destination_id=${dest_id}"
+            return 1
           }
 
           i=0
           cleared_once="false"
 
           echo "== Insertando waypoints para CHAR_ID=${CHAR_ID} desde ${ROUTE_FILE} =="
-          echo "Delay: ${DELAY_MS} ms (${SLEEP_SEC} s)"
+          echo "Delay base: ${DELAY_MS} ms (${BASE_SLEEP_SEC} s)"
+          echo "max_retries por waypoint: ${MAX_RETRIES}"
           echo "clear_existing_waypoints (solo 1ª inserción): ${CLEAR_FIRST}"
           echo
 
-          # Lee el fichero línea a línea:
-          # - soporta CRLF
-          # - ignora líneas vacías
-          # - ignora comentarios que empiecen por '#'
           while IFS= read -r raw || [[ -n "${raw}" ]]; do
-            line="${raw//$'\r'/}"           # quita CR
-            line="$(echo "${line}" | xargs)" # trim
+            line="${raw//$'\r'/}"
+            line="$(echo "${line}" | xargs)"
 
             [[ -z "${line}" ]] && continue
             [[ "${line}" =~ ^# ]] && continue
@@ -131,17 +245,14 @@ jobs:
             fi
 
             echo "[$i] destination_id=${dest_id} clear_other_waypoints=${clear_flag}"
-            code="$(post_waypoint "${dest_id}" "${clear_flag}")"
 
-            # 204 es OK para este endpoint (No Content).
-            if [[ "${code}" != "204" ]]; then
-              echo "ERROR: ESI devolvió HTTP ${code} en destination_id=${dest_id}"
-              echo "Consejo: revisa que el token tenga scope esi-ui.write_waypoint.v1 y no esté caducado."
+            if ! post_waypoint_with_retry "${dest_id}" "${clear_flag}"; then
+              echo "ERROR: Falló la inserción del waypoint [$i] destination_id=${dest_id}"
               exit 1
             fi
 
-            # Espera entre inserciones (300ms por defecto), excepto si quieres también después del último
-            sleep "${SLEEP_SEC}"
+            # Delay base entre inserciones (además de waits por rate-limit si han ocurrido)
+            sleep "${BASE_SLEEP_SEC}"
 
           done < "${ROUTE_FILE}"
 
