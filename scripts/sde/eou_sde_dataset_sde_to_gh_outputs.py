@@ -5,13 +5,14 @@ Genera (sobrescribe) en el directorio de salida:
 
   - regions.jsonl.gz
   - constellations.jsonl.gz
-  - solarsystems.jsonl.gz   (position [x,y,z], faction, securityStatus rounded, counts, cynoJumpSecurity)
-  - stations.jsonl.gz       (owner, cynoJumpSecurity copied from solarsystems, cynoDockSecurity, service booleans)
+  - solarsystems.jsonl.gz
+  - stations.jsonl.gz
   - stargates.jsonl.gz
-  - types.jsonl.gz
+  - types.jsonl.gz        (incluye packagedVolume desde ESI)
   - corporations.jsonl.gz
 
-Solo usa el ZIP oficial CCP SDE JSONL (no ESI, no "extended").
+SDE: ZIP oficial CCP JSONL.
+ESI: excepción SOLO para packagedVolume (universe/types/{type_id}).
 """
 
 from __future__ import annotations
@@ -19,10 +20,16 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
-from pathlib import Path
+import io
+import json
+import os
 import re
 import sys
+import time
+from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import zipfile
 
@@ -45,6 +52,103 @@ _Q6 = Decimal("0.000001")
 def round6(x: float) -> float:
     """Round to 6 decimals deterministically (Decimal, HALF_UP)."""
     return float(Decimal(str(x)).quantize(_Q6, rounding=ROUND_HALF_UP))
+
+
+# -----------------------------
+# ESI packagedVolume fetch
+# -----------------------------
+
+def _http_get_json(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 30) -> Tuple[int, Dict, Dict[str, str]]:
+    req = Request(url, method="GET")
+    h = headers or {}
+    for k, v in h.items():
+        req.add_header(k, v)
+    with urlopen(req, timeout=timeout) as resp:
+        status = int(getattr(resp, "status", 200))
+        raw = resp.read()
+        txt = raw.decode("utf-8", errors="replace")
+        data = json.loads(txt) if txt else {}
+        resp_headers = {k: v for k, v in resp.headers.items()}
+        return status, data, resp_headers
+
+
+def fetch_packaged_volume(type_id: int, esi_base: str, max_attempts: int = 8) -> Optional[float]:
+    """
+    Get packaged_volume from ESI universe/types/{type_id}.
+
+    Recommended status handling:
+      - 200: parse packaged_volume
+      - 404: return None
+      - 429: honor Retry-After then retry
+      - 5xx: retry with backoff
+      - other 4xx: return None (avoid hammering)
+    CCP rate-limiting docs recommend respecting Retry-After for 429. :contentReference[oaicite:4]{index=4}
+    """
+    url = f"{esi_base.rstrip('/')}/universe/types/{int(type_id)}/"
+    # CCP asks for descriptive User-Agent in ESI requests (good practice).
+    # (Not strictly required, but helps operationally.)
+    ua = os.environ.get("EOU_USER_AGENT", "eou-sde-dataset/1.0 (contact: unknown)")
+    headers = {"Accept": "application/json", "User-Agent": ua}
+
+    backoff = 1.0
+    for attempt in range(1, max_attempts + 1):
+        try:
+            status, data, resp_headers = _http_get_json(url, headers=headers, timeout=30)
+            if status == 200:
+                pv = data.get("packaged_volume")
+                if pv is None:
+                    return None
+                try:
+                    return float(pv)
+                except Exception:
+                    return None
+
+            if status == 404:
+                return None
+
+            if status == 429:
+                ra = resp_headers.get("Retry-After")
+                sleep_s = float(ra) if ra and ra.strip().isdigit() else max(5.0, backoff)
+                time.sleep(sleep_s)
+                backoff = min(backoff * 2.0, 60.0)
+                continue
+
+            # Other 4xx: do not retry aggressively
+            if 400 <= status < 500:
+                return None
+
+            # 5xx: retry
+            if 500 <= status < 600:
+                time.sleep(backoff)
+                backoff = min(backoff * 2.0, 60.0)
+                continue
+
+            # Unknown status
+            return None
+
+        except HTTPError as e:
+            status = int(getattr(e, "code", 0) or 0)
+            if status == 404:
+                return None
+            if status == 429:
+                ra = e.headers.get("Retry-After") if e.headers else None
+                sleep_s = float(ra) if ra and ra.strip().isdigit() else max(5.0, backoff)
+                time.sleep(sleep_s)
+                backoff = min(backoff * 2.0, 60.0)
+                continue
+            if 500 <= status < 600:
+                time.sleep(backoff)
+                backoff = min(backoff * 2.0, 60.0)
+                continue
+            return None
+        except (URLError, TimeoutError):
+            time.sleep(backoff)
+            backoff = min(backoff * 2.0, 60.0)
+            continue
+        except Exception:
+            return None
+
+    return None
 
 
 # -----------------------------
@@ -78,17 +182,6 @@ def _read_factions(zf: zipfile.ZipFile) -> Dict[int, str]:
 
 
 def _read_solarsystems(zf: zipfile.ZipFile) -> Dict[int, Dict]:
-    """
-    solarSystemID -> dict with:
-      - name: str
-      - constellationID: int
-      - regionID: int
-      - position: [x,y,z]   (array as requested)
-      - securityStatus: float
-      - factionID: Optional[int]
-      - planets: int
-      - stargates: int
-    """
     systems: Dict[int, Dict] = {}
     for obj in iter_jsonl_from_zip(zf, "mapSolarSystems.jsonl"):
         sid = int(obj.get("_key"))
@@ -230,6 +323,7 @@ def _read_station_operations(zf: zipfile.ZipFile, service_keys: Dict[int, str]) 
                     svc_set.add(key)
 
         ops[oid] = {"operationName": name, "useOperationName": use_op, "services": svc_set}
+
     return ops
 
 
@@ -324,14 +418,6 @@ def build_stations_out(
     moon_orbits: Dict[int, str],
     type_names: Dict[int, str],
 ) -> Tuple[List[Dict], Dict[int, Set[Optional[str]]], Dict[int, int]]:
-    """
-    Build stations WITHOUT cynoJumpSecurity first, then we will inject cynoJumpSecurity later.
-
-    Returns:
-      rows (with internal _solarSystemID),
-      system_station_cyno_labels: solarSystemID -> set(labels)
-      stations_count: solarSystemID -> count
-    """
     rows: List[Dict] = []
     system_cyno_labels: Dict[int, Set[Optional[str]]] = defaultdict(set)
     stations_count: Dict[int, int] = defaultdict(int)
@@ -383,13 +469,13 @@ def build_stations_out(
 
         rows.append(
             {
-                "_solarSystemID": solar_system_id,  # internal only
+                "_solarSystemID": solar_system_id,  # internal
                 "stationID": station_id,
                 "station": station_name,
                 "stationType": station_type,
                 "solarSystem": ss_name,
                 "owner": owner,
-                # cynoJumpSecurity will be injected later
+                # cynoJumpSecurity injected later
                 "cynoDockSecurity": dock_label,
                 "docking": docking,
                 "market": market,
@@ -477,13 +563,27 @@ def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Dict]) -> List[D
     return rows
 
 
-def build_types_out(zf: zipfile.ZipFile) -> List[Dict]:
+def build_types_out(zf: zipfile.ZipFile, esi_base: str) -> List[Dict]:
+    """
+    types.jsonl.gz (AHORA ENRIQUECIDO):
+      - typeID
+      - type
+      - packagedVolume   (ESI packaged_volume)
+      - group
+      - category
+      - marketGroup
+      - is_contraband
+      - is_gategank
+
+    published-only (como antes).
+    """
     groups_meta = _read_groups_meta(zf)
     categories = _read_categories(zf)
     marketgroup_names = _read_marketgroup_names(zf)
     contraband = _read_contraband_set(zf)
 
     rows: List[Dict] = []
+
     for obj in iter_jsonl_from_zip(zf, "types.jsonl"):
         if not _get_bool(obj, "published", default=False):
             continue
@@ -505,10 +605,14 @@ def build_types_out(zf: zipfile.ZipFile) -> List[Dict]:
         mgid = _get_int(obj, "marketGroupID", "market_group_id", "marketGroupId")
         mgname = marketgroup_names.get(mgid, str(mgid)) if mgid is not None else ""
 
+        # ESI packagedVolume (exception)
+        pv = fetch_packaged_volume(tid, esi_base=esi_base)
+
         rows.append(
             {
                 "typeID": tid,
                 "type": tname,
+                "packagedVolume": pv,
                 "group": gname,
                 "category": cname,
                 "marketGroup": mgname,
@@ -521,11 +625,19 @@ def build_types_out(zf: zipfile.ZipFile) -> List[Dict]:
     return rows
 
 
+def build_corporations_out(corp_names: Dict[int, str]) -> List[Dict]:
+    rows: List[Dict] = [{"corporationID": cid, "corporation": name} for cid, name in corp_names.items()]
+    rows.sort(key=lambda r: r["corporationID"])
+    return rows
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--zip", required=True, help="Path to CCP SDE JSONL ZIP")
     ap.add_argument("--out", required=True, help="Output directory (will be created)")
     args = ap.parse_args()
+
+    esi_base = os.environ.get("ESI_BASE", "https://esi.evetech.net/latest")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -549,7 +661,6 @@ def main() -> int:
         planet_orbits = _read_planet_orbit_names(zf, systems)
         moon_orbits = _read_moon_orbit_names(zf, planet_orbits)
 
-        # 1) Build stations first (collect labels + counts)
         stations_rows, system_station_labels, stations_count = build_stations_out(
             zf=zf,
             systems=systems,
@@ -560,24 +671,19 @@ def main() -> int:
             type_names=type_names,
         )
 
-        # 2) Derive system cynoJumpSecurity
         system_cyno_jump: Dict[int, str] = {}
         for sid in systems.keys():
             labels = system_station_labels.get(sid, set())
             scount = int(stations_count.get(sid, 0))
             system_cyno_jump[sid] = system_cyno(labels, scount)
 
-        # 3) Inject cynoJumpSecurity into each station row (copy from system)
         for row in stations_rows:
             sid = int(row.get("_solarSystemID", -1))
             row["cynoJumpSecurity"] = system_cyno_jump.get(sid, "no jump")
-            # remove internal key
             row.pop("_solarSystemID", None)
 
-        # Now write stations with the requested schema order
         write_jsonl_gz(out_dir / "stations.jsonl.gz", stations_rows)
 
-        # 4) Build solarsystems including cynoJumpSecurity
         moons_count = _count_moons_by_system(zf)
         belts_count = _count_asteroid_belts_by_system(zf)
 
@@ -594,7 +700,9 @@ def main() -> int:
         write_jsonl_gz(out_dir / "solarsystems.jsonl.gz", solarsystems_rows)
 
         write_jsonl_gz(out_dir / "stargates.jsonl.gz", build_stargates_out(zf, systems))
-        write_jsonl_gz(out_dir / "types.jsonl.gz", build_types_out(zf))
+
+        # types (ESI packagedVolume)
+        write_jsonl_gz(out_dir / "types.jsonl.gz", build_types_out(zf, esi_base=esi_base))
 
     expected = [
         "regions.jsonl.gz",
