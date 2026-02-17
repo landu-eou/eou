@@ -4,63 +4,19 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  actions: read
-  id-token: write
+  contents: read
 
 concurrency:
   group: eou_sde_routes_sde-gh
   cancel-in-progress: false
 
-env:
-  WORKFLOW_FILE: eou_sde_routes_sde-gh.yml
-  SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
-  SHEET_TAB: workflows
-  SHEETS_WORKFLOW_ROW: "10"
-  LOCK_TIME: "60"
-
 jobs:
-  run:
+  noop:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 5
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 2
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Auth to Google (WIF) for Sheets
-        id: gauth
-        uses: google-github-actions/auth@v2
-        with:
-          token_format: access_token
-          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-          access_token_scopes: |
-            https://www.googleapis.com/auth/spreadsheets
-
-      - name: Build & publish routes (lock + etag + commit)
-        shell: bash
-        env:
-          GOOGLE_OAUTH_ACCESS_TOKEN: ${{ steps.gauth.outputs.access_token }}
-          GITHUB_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
+      - name: No-op
         run: |
-          set -euo pipefail
-          python -u scripts/sde/eou_sde_routes_sde-gh.py
-
-      - name: Validate output (only if present)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f data/sde/routes.jsonl.gz ]; then
-            gzip -t data/sde/routes.jsonl.gz
-          fi
+          echo "eou_sde_routes_sde-gh.yml triggered successfully."
+          echo "This is a placeholder workflow."
