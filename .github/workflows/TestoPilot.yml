@@ -1,0 +1,154 @@
+name: Add Autopilot Waypoints (manual token, from file)
+
+on:
+  workflow_dispatch:
+    inputs:
+      access_token:
+        description: "ESI access_token (scope: esi-ui.write_waypoint.v1). Pégalo aquí (sin 'Bearer ')."
+        required: true
+        type: string
+      clear_existing_waypoints:
+        description: "Borrar waypoints existentes antes de insertar la ruta (solo en el primer destino)"
+        required: true
+        default: true
+        type: boolean
+      delay_ms:
+        description: "Delay entre inserciones (ms)"
+        required: true
+        default: "300"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eou_add_waypoints_manual
+  cancel-in-progress: false
+
+jobs:
+  add-waypoints:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      CHAR_ID: "2124070822"
+      ROUTE_FILE: "test/routes_ap.txt"
+      ESI_BASE: "https://esi.evetech.net/latest"
+      # Ajusta si quieres un User-Agent más descriptivo
+      USER_AGENT: "landu-eou/eou-waypoints-gha (manual-token; contact: you@example.com)"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate route file exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f "${ROUTE_FILE}" ]]; then
+            echo "ERROR: No existe ${ROUTE_FILE} en el repo."
+            exit 1
+          fi
+          echo "OK: Encontrado ${ROUTE_FILE}"
+          echo "Primeras 10 líneas (para sanity-check):"
+          head -n 10 "${ROUTE_FILE}" || true
+
+      - name: Add waypoints in order (300ms delay)
+        shell: bash
+        env:
+          ACCESS_TOKEN: ${{ inputs.access_token }}
+          CLEAR_FIRST: ${{ inputs.clear_existing_waypoints }}
+          DELAY_MS: ${{ inputs.delay_ms }}
+        run: |
+          set -euo pipefail
+
+          # Enmascara el token en logs (por si algo lo imprime accidentalmente)
+          echo "::add-mask::${ACCESS_TOKEN}"
+
+          # Validación mínima del delay
+          if ! [[ "${DELAY_MS}" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: delay_ms debe ser numérico (ms). Valor recibido: ${DELAY_MS}"
+            exit 1
+          fi
+          SLEEP_SEC="$(python3 - << 'PY'
+          import os
+          ms = int(os.environ["DELAY_MS"])
+          print(ms/1000)
+          PY
+          )"
+
+          # Función para hacer POST a ESI
+          post_waypoint() {
+            local dest_id="$1"
+            local clear="$2"   # "true" o "false"
+
+            # add_to_beginning=false => mantiene el orden de inserción (va al final)
+            # clear_other_waypoints=true solo para el primero si lo has pedido
+            local url="${ESI_BASE}/ui/autopilot/waypoint/?add_to_beginning=false&clear_other_waypoints=${clear}&destination_id=${dest_id}"
+
+            # -sS: silencioso pero muestra errores
+            # -o /dev/null: no cuerpo
+            # -w '%{http_code}': captura código
+            http_code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${url}" \
+              -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+              -H "Accept: application/json" \
+              -H "User-Agent: ${USER_AGENT}")"
+
+            echo "${http_code}"
+          }
+
+          i=0
+          cleared_once="false"
+
+          echo "== Insertando waypoints para CHAR_ID=${CHAR_ID} desde ${ROUTE_FILE} =="
+          echo "Delay: ${DELAY_MS} ms (${SLEEP_SEC} s)"
+          echo "clear_existing_waypoints (solo 1ª inserción): ${CLEAR_FIRST}"
+          echo
+
+          # Lee el fichero línea a línea:
+          # - soporta CRLF
+          # - ignora líneas vacías
+          # - ignora comentarios que empiecen por '#'
+          while IFS= read -r raw || [[ -n "${raw}" ]]; do
+            line="${raw//$'\r'/}"           # quita CR
+            line="$(echo "${line}" | xargs)" # trim
+
+            [[ -z "${line}" ]] && continue
+            [[ "${line}" =~ ^# ]] && continue
+
+            if ! [[ "${line}" =~ ^[0-9]+$ ]]; then
+              echo "ERROR: Línea inválida (no numérica): '${line}'"
+              exit 1
+            fi
+
+            dest_id="${line}"
+            i=$((i+1))
+
+            clear_flag="false"
+            if [[ "${CLEAR_FIRST}" == "true" && "${cleared_once}" == "false" ]]; then
+              clear_flag="true"
+              cleared_once="true"
+            fi
+
+            echo "[$i] destination_id=${dest_id} clear_other_waypoints=${clear_flag}"
+            code="$(post_waypoint "${dest_id}" "${clear_flag}")"
+
+            # 204 es OK para este endpoint (No Content).
+            if [[ "${code}" != "204" ]]; then
+              echo "ERROR: ESI devolvió HTTP ${code} en destination_id=${dest_id}"
+              echo "Consejo: revisa que el token tenga scope esi-ui.write_waypoint.v1 y no esté caducado."
+              exit 1
+            fi
+
+            # Espera entre inserciones (300ms por defecto), excepto si quieres también después del último
+            sleep "${SLEEP_SEC}"
+
+          done < "${ROUTE_FILE}"
+
+          if [[ "${i}" -eq 0 ]]; then
+            echo "ERROR: No se encontraron destination_id válidos en ${ROUTE_FILE}"
+            exit 1
+          fi
+
+          echo
+          echo "OK: Insertados ${i} waypoints en orden."
