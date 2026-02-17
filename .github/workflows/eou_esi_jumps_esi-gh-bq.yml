@@ -11,7 +11,6 @@
 # states/
 #   system_jumps.json
 
-
 name: ESI System Jumps (ESI → GH → BQ)
 
 on:
