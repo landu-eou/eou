@@ -1,3 +1,34 @@
+# FILE TREE — RQ Gate Kills (RQ → GH → BQ)
+# .
+# ├── .github/
+# │   └── workflows/
+# │       └── eou_gate_kills_rq-gh-bq.yml
+# │
+# ├── data/
+# │   ├── rq/
+# │   │   └── raw_kills.jsonl                # Cola duradera (NDJSON, append + rewrite por enrich)
+# │   │
+# │   └── sde/
+# │       ├── stargates.jsonl.gz             # Mapa stargateID → (stargate, group, solarSystem)
+# │       └── types.jsonl.gz                 # typeID → (group, category, is_gategank)
+# │
+# ├── scripts/
+# │   └── rq/
+# │       ├── eou_gate_kills_poll.py         # RedisQ poller → filtra + flush a raw_kills.jsonl
+# │       ├── eou_gate_kills_enrich.py       # ESI enrich 1x1 → NDJSON batch + requeue RAW
+# │       ├── eou_gate_kills_load.py         # Dedupe + bq load (1 job)
+# │       ├── eou_gate_kills_sheets_write.py # Sheets status/next_run/last_modified
+# │       └── eou_gate_kills_ship_class.py   # Mapeo category/group → ship_class
+# │
+# └── (temporal en runtime)
+#     ├── /tmp/gate_kills_batch.ndjson
+#     ├── /tmp/gate_kills_enrich_pending.ndjson
+#     ├── /tmp/gate_kills_enrich_post_poll.ndjson
+#     ├── /tmp/gate_kills_to_load.ndjson
+#     └── /tmp/gate_kills_schema.json
+#
+
+
 name: RQ Gate Kills (RQ → GH → BQ)
 
 on:
