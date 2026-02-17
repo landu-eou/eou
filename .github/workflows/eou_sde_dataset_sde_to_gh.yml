@@ -8,6 +8,11 @@ on:
         required: false
         type: boolean
         default: false
+      reset_etags:
+        description: "Resetear etags de types (solo Ship/Module/Celestial; re-escanea ESI y guarda etag solo si packagedVolume != volume SDE)"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: eou_sde_dataset_sde_to_gh
@@ -224,9 +229,11 @@ jobs:
       # =====================================================================
       # 6) Build (solo si needs_update=true)
       # =====================================================================
-      - name: Build outputs (SDE → data/sde/*.jsonl.gz + data/sdesi/types.jsonl.gz)
+      - name: Build outputs (SDE → GH + types SDE+ESI)
         if: steps.decide.outputs.needs_update == 'true'
         id: build
+        env:
+          RESET_ETAGS: ${{ github.event.inputs.reset_etags }}
         run: |
           set -euo pipefail
 
@@ -236,6 +243,7 @@ jobs:
             -L -o .tmp/sde/sde.zip \
             "${SDE_URL}"
 
+          # Pasamos el modo reset_etags vía ENV (RESET_ETAGS)
           python scripts/sde/eou_sde_dataset_sde_to_gh_outputs.py \
             --zip .tmp/sde/sde.zip \
             --out .tmp/sde/out
@@ -247,7 +255,7 @@ jobs:
             mv -f ".tmp/sde/out/${f}.jsonl.gz" "data/sde/${f}.jsonl.gz"
           done
 
-          # types goes to data/sdesi/
+          # types -> data/sdesi/
           mv -f ".tmp/sde/out/sdesi/types.jsonl.gz" "data/sdesi/types.jsonl.gz"
 
           echo "updated=true" >> "$GITHUB_OUTPUT"
@@ -289,9 +297,10 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "${api}" \
             -d '{"ref":"main"}'
+          # REST "workflow dispatch" es oficial y soporta workflow file name. :contentReference[oaicite:2]{index=2}
 
       # =====================================================================
-      # 7) Finalize (Sheets) - (igual que tenías)
+      # 7) Finalize (Sheets) - (igual que tu lógica actual)
       # =====================================================================
       - name: Sheets - finalize (completed)
         if: success()
