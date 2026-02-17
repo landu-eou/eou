@@ -1,3 +1,24 @@
+# Árbol de archivos utilizado por este workflow
+#
+# .github/
+#   workflows/
+#     eou_structures_esi-gh-bq.yml        # Este workflow
+#
+# scripts/
+#   esi/
+#     eou_structures_run.py               # Pipeline principal (ESI → GH → BQ)
+#
+# data/
+#   esi/
+#     structures.jsonl.gz                 # Cache persistente de estructuras (con etag por registro)
+#   sde/
+#     solarsystems.jsonl.gz               # SDE (resolución solarSystemID → nombre)
+#     types.jsonl.gz                      # SDE (resolución typeID → nombre)
+#
+# states/
+#   structures.json                       # ETag global del listado /universe/structures
+#
+
 name: ESI Structures (ESI → GH → BQ)
 
 on:
