@@ -29,7 +29,6 @@
 name: SDE Dataset (SDE → GH)
 
 on:
-  # Disparo manual (lo llama tu cron externo vía workflow_dispatch)
   workflow_dispatch:
     inputs:
       force_refresh:
@@ -38,18 +37,14 @@ on:
         type: boolean
         default: false
 
-# Candado oficial de GitHub: evita ejecución paralela del mismo workflow.
-# cancel-in-progress:false => el nuevo run NO cancela al que está trabajando; el guard de abajo evita colas “inútiles”.
 concurrency:
   group: eou_sde_dataset_sde_to_gh
   cancel-in-progress: false
 
 permissions:
-  # Necesario para consultar runs del workflow vía REST API (guard)
-  actions: read
-  # Necesario para hacer commit/push de outputs + state
+  # OJO: ahora necesitamos write para disparar otro workflow por workflow_dispatch (REST)
+  actions: write
   contents: write
-  # Necesario para OIDC/WIF (Google auth)
   id-token: write
 
 jobs:
@@ -57,24 +52,16 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Identidad del workflow (para consultar runs del mismo .yml)
       WORKFLOW_FILE: eou_sde_dataset_sde_to_gh.yml
 
-      # Google Sheets (estado compartido)
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "4"
 
-      # “Lock” inicial: next_run = now + LOCK_TIME
       LOCK_TIME: 120
-
-      # SDE oficial (CCP) — short-hand que redirige al ZIP final
       SDE_URL: https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip
 
     steps:
-      # =====================================================================
-      # 0) Guard anti-cola / anti-solapamiento
-      # =====================================================================
       - name: Guard (skip duplicates)
         id: guard
         env:
@@ -104,7 +91,6 @@ jobs:
             this_created="$(jq -r '.created_at' <<< "$this")"
             this_num="$(jq -r '.run_number' <<< "$this")"
 
-            # ¿Había un run anterior “vivo” cuando se creó este?
             alive_at_creation="$(jq --arg rid "$RUN_ID" --arg tc "$this_created" '
               (.workflow_runs // [])
               | map(
@@ -118,7 +104,6 @@ jobs:
             if [ "$alive_at_creation" -gt 0 ]; then
               proceed="false"
             else
-              # Si hay cola: el líder es el menor run_number entre queued/in_progress
               leader="$(jq '
                 (.workflow_runs // [])
                 | map(select(.status=="queued" or .status=="in_progress"))
@@ -140,9 +125,6 @@ jobs:
           echo "Skipped due to overlapping run"
           exit 0
 
-      # =====================================================================
-      # 1) Auth Google (WIF/OIDC) para escribir estado en Sheets
-      # =====================================================================
       - name: Auth to Google (WIF)
         id: gcp_auth
         uses: google-github-actions/auth@v2
@@ -153,9 +135,6 @@ jobs:
           access_token_scopes: |
             https://www.googleapis.com/auth/spreadsheets
 
-      # =====================================================================
-      # 2) Lock inicial en Sheets (in_progress + next_run=now+LOCK_TIME)
-      # =====================================================================
       - name: Sheets - initial lock
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
@@ -164,7 +143,6 @@ jobs:
           row="${SHEETS_WORKFLOW_ROW}"
 
           epoch="$(date -u -d "+${LOCK_TIME} seconds" +%s)"
-          # Serial Sheets: epoch/86400 + 25569 (base 1899-12-30)
           serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
 
           curl -fsSL -X POST \
@@ -179,9 +157,6 @@ jobs:
               ]
             }"
 
-      # =====================================================================
-      # 3) Checkout + Python
-      # =====================================================================
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -192,9 +167,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      # =====================================================================
-      # 4) Leer headers del SDE final (ETag + Last-Modified)
-      # =====================================================================
       - name: SDE - fetch headers (etag + last-modified)
         id: sde_headers
         run: |
@@ -233,9 +205,6 @@ jobs:
           echo "etag=$etag" >> "$GITHUB_OUTPUT"
           echo "last_modified_epoch=$lm_epoch" >> "$GITHUB_OUTPUT"
 
-      # =====================================================================
-      # 5) Decisión de update
-      # =====================================================================
       - name: Decide update (etag compare or force)
         id: decide
         run: |
@@ -262,9 +231,6 @@ jobs:
           fi
           echo "forced=false" >> "$GITHUB_OUTPUT"
 
-      # =====================================================================
-      # 6) Build (solo si needs_update=true)
-      # =====================================================================
       - name: Build outputs (SDE → data/sde/*.jsonl.gz)
         if: steps.decide.outputs.needs_update == 'true'
         id: build
@@ -281,10 +247,8 @@ jobs:
             --zip .tmp/sde/sde.zip \
             --out .tmp/sde/out
 
-          # state: persistimos el ETag que acabamos de volcar correctamente
           jq -n --arg etag "${{ steps.sde_headers.outputs.etag }}" '{etag:$etag}' > states/sde.json
 
-          # replace: sobrescritura única (evita commits parciales)
           for f in regions constellations solarsystems stations stargates types corporations; do
             mv -f ".tmp/sde/out/${f}.jsonl.gz" "data/sde/${f}.jsonl.gz"
           done
@@ -308,9 +272,23 @@ jobs:
           git pull --rebase --autostash
           git push
 
-      # =====================================================================
-      # 7) Finalize (Sheets)
-      # =====================================================================
+      # ==========================================================
+      # NUEVO: Disparar workflow de rutas en caso de éxito
+      # ==========================================================
+      - name: Dispatch routes workflow (main)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPO}/actions/workflows/eou_sde_routes_sde-gh.yml/dispatches" \
+            -d '{"ref":"main"}'
+
       - name: Sheets - finalize (completed)
         if: success()
         env:
@@ -325,7 +303,6 @@ jobs:
           now_epoch="$(date -u +%s)"
           now_hour="$(date -u +%H)"
 
-          # cand_epoch = próxima fecha futura con hh:mm:ss = (last_modified + 30m)
           t_hms="$(date -u -d "@$((${LM_EPOCH}+1800))" +%H:%M:%S)"
           today="$(date -u +%Y-%m-%d)"
           cand_epoch="$(date -u -d "${today}T${t_hms}Z" +%s)"
@@ -414,3 +391,4 @@ jobs:
                 {\"range\":\"${SHEET_TAB}!D${row}\",\"values\":[[${next_serial}]]}
               ]
             }"
+
