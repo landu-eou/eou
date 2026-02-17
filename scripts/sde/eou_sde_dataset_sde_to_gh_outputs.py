@@ -5,8 +5,8 @@ Genera (sobrescribe) en el directorio de salida:
 
   - regions.jsonl.gz
   - constellations.jsonl.gz
-  - solarsystems.jsonl.gz   (NOW adds: solarSystemClass, routeType; preserved from previous if possible)
-  - stations.jsonl.gz       (NOW copies: solarSystemClass, routeType, cynoJumpSecurity from solarsystems)
+  - solarsystems.jsonl.gz   (position [x,y,z], faction, securityStatus rounded, counts, cynoJumpSecurity)
+  - stations.jsonl.gz       (owner, cynoJumpSecurity copied from solarsystems, cynoDockSecurity, service booleans)
   - stargates.jsonl.gz
   - types.jsonl.gz
   - corporations.jsonl.gz
@@ -19,12 +19,10 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
-import gzip
-import json
 from pathlib import Path
 import re
 import sys
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import zipfile
 
@@ -47,47 +45,6 @@ _Q6 = Decimal("0.000001")
 def round6(x: float) -> float:
     """Round to 6 decimals deterministically (Decimal, HALF_UP)."""
     return float(Decimal(str(x)).quantize(_Q6, rounding=ROUND_HALF_UP))
-
-
-# -----------------------------
-# Preserve previous solarsystems meta (solarSystemClass/routeType)
-# -----------------------------
-
-def _read_previous_system_tags(path: Path) -> Dict[int, Tuple[Optional[str], Optional[str]]]:
-    """
-    Read existing data/sde/solarsystems.jsonl.gz from repo (if present) to preserve:
-      - solarSystemClass
-      - routeType
-
-    If file missing/unreadable, returns {}.
-
-    Expected JSONL rows contain solarSystemID and may contain the two fields.
-    """
-    tags: Dict[int, Tuple[Optional[str], Optional[str]]] = {}
-    try:
-        if not path.exists():
-            return tags
-        with gzip.open(path, "rt", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                obj = json.loads(line)
-                sid = obj.get("solarSystemID")
-                if sid is None:
-                    continue
-                try:
-                    sid_i = int(sid)
-                except Exception:
-                    continue
-                sclass = obj.get("solarSystemClass")
-                rtype = obj.get("routeType")
-                tags[sid_i] = (sclass if isinstance(sclass, str) or sclass is None else None,
-                               rtype if isinstance(rtype, str) or rtype is None else None)
-    except Exception:
-        # Conservador: si no se puede leer, no preservamos (todo null).
-        return {}
-    return tags
 
 
 # -----------------------------
@@ -121,6 +78,17 @@ def _read_factions(zf: zipfile.ZipFile) -> Dict[int, str]:
 
 
 def _read_solarsystems(zf: zipfile.ZipFile) -> Dict[int, Dict]:
+    """
+    solarSystemID -> dict with:
+      - name: str
+      - constellationID: int
+      - regionID: int
+      - position: [x,y,z]   (array as requested)
+      - securityStatus: float
+      - factionID: Optional[int]
+      - planets: int
+      - stargates: int
+    """
     systems: Dict[int, Dict] = {}
     for obj in iter_jsonl_from_zip(zf, "mapSolarSystems.jsonl"):
         sid = int(obj.get("_key"))
@@ -129,11 +97,11 @@ def _read_solarsystems(zf: zipfile.ZipFile) -> Dict[int, Dict]:
         region_id = int(obj.get("regionID"))
 
         pos = obj.get("position") or {}
-        position = {
-            "x": float(pos.get("x", 0.0)),
-            "y": float(pos.get("y", 0.0)),
-            "z": float(pos.get("z", 0.0)),
-        }
+        position = [
+            float(pos.get("x", 0.0)),
+            float(pos.get("y", 0.0)),
+            float(pos.get("z", 0.0)),
+        ]
 
         sec = obj.get("securityStatus")
         security_status = float(sec) if sec is not None else 0.0
@@ -238,6 +206,7 @@ def _read_station_services(zf: zipfile.ZipFile) -> Dict[int, str]:
         en = en if isinstance(en, str) else str(sid)
         key = normalize(en)
         out[sid] = CANONICAL.get(key, key)
+
     return out
 
 
@@ -323,7 +292,7 @@ def _get_bool(obj: Dict, *keys: str, default: bool = False) -> bool:
 
 
 # -----------------------------
-# Builders
+# Builders de outputs
 # -----------------------------
 
 def build_regions_out(regions: Dict[int, str]) -> List[Dict]:
@@ -346,7 +315,7 @@ def build_corporations_out(corp_names: Dict[int, str]) -> List[Dict]:
     return rows
 
 
-def build_stations_base(
+def build_stations_out(
     zf: zipfile.ZipFile,
     systems: Dict[int, Dict],
     corp_names: Dict[int, str],
@@ -354,19 +323,18 @@ def build_stations_base(
     planet_orbits: Dict[int, str],
     moon_orbits: Dict[int, str],
     type_names: Dict[int, str],
-) -> Tuple[List[Dict], Dict[int, Set[Optional[str]]], Dict[int, int], Dict[int, str]]:
+) -> Tuple[List[Dict], Dict[int, Set[Optional[str]]], Dict[int, int]]:
     """
-    Build stations rows WITHOUT the "copied from solarsystems" fields yet.
+    Build stations WITHOUT cynoJumpSecurity first, then we will inject cynoJumpSecurity later.
+
     Returns:
-      - station rows (base)
-      - system_station_cyno_labels (for system aggregation)
-      - stations_count by system
-      - stationID -> solarSystemName (handy, but not mandatory)
+      rows (with internal _solarSystemID),
+      system_station_cyno_labels: solarSystemID -> set(labels)
+      stations_count: solarSystemID -> count
     """
     rows: List[Dict] = []
     system_cyno_labels: Dict[int, Set[Optional[str]]] = defaultdict(set)
     stations_count: Dict[int, int] = defaultdict(int)
-    station_to_system_name: Dict[int, str] = {}
 
     orbit_names: Dict[int, str] = {}
     orbit_names.update(planet_orbits)
@@ -378,7 +346,6 @@ def build_stations_base(
         solar_system_id = _get_int(obj, "solarSystemID") or -1
         stations_count[solar_system_id] += 1
         ss_name = systems.get(solar_system_id, {"name": str(solar_system_id)}).get("name", str(solar_system_id))
-        station_to_system_name[station_id] = ss_name
 
         orbit_id = _get_int(obj, "orbitID")
         orbit_name = orbit_names.get(orbit_id, ss_name) if orbit_id is not None else ss_name
@@ -411,16 +378,18 @@ def build_stations_base(
         cloning = "cloning" in services
         jump_clone = "jump-clone-facility" in services
 
-        _lvl, dock_label = station_cyno(station_type if station_type else None, docking)
+        _level, dock_label = station_cyno(station_type if station_type else None, docking)
         system_cyno_labels[solar_system_id].add(dock_label)
 
         rows.append(
             {
+                "_solarSystemID": solar_system_id,  # internal only
                 "stationID": station_id,
                 "station": station_name,
                 "stationType": station_type,
                 "solarSystem": ss_name,
                 "owner": owner,
+                # cynoJumpSecurity will be injected later
                 "cynoDockSecurity": dock_label,
                 "docking": docking,
                 "market": market,
@@ -433,7 +402,7 @@ def build_stations_base(
         )
 
     rows.sort(key=lambda r: r["stationID"])
-    return rows, dict(system_cyno_labels), dict(stations_count), station_to_system_name
+    return rows, dict(system_cyno_labels), dict(stations_count)
 
 
 def build_solarsystems_out(
@@ -445,21 +414,13 @@ def build_solarsystems_out(
     belts_count: Dict[int, int],
     stations_count: Dict[int, int],
     system_cyno_jump: Dict[int, str],
-    previous_tags: Dict[int, Tuple[Optional[str], Optional[str]]],
-) -> Tuple[List[Dict], Dict[str, Dict]]:
-    """
-    Returns:
-      - solarsystems rows (with solarSystemClass/routeType preserved)
-      - system_name -> meta dict {solarSystemClass, routeType, cynoJumpSecurity}
-        (for enriching stations by solarSystem name)
-    """
+) -> List[Dict]:
     rows: List[Dict] = []
-    system_name_meta: Dict[str, Dict] = {}
-
     for sid, s in systems.items():
         sname = s["name"]
         cid = int(s["constellationID"])
         rid = int(s["regionID"])
+
         cname = consts.get(cid, (str(cid), 0))[0]
         rname = regions.get(rid, str(rid))
 
@@ -467,77 +428,27 @@ def build_solarsystems_out(
         faction = factions.get(int(fid)) if fid is not None and int(fid) in factions else None
 
         sec = round6(float(s.get("securityStatus", 0.0)))
-        planets = int(s.get("planets", 0))
-        stargates = int(s.get("stargates", 0))
-        moons = int(moons_count.get(sid, 0))
-        asteroid_belts = int(belts_count.get(sid, 0))
-        stations = int(stations_count.get(sid, 0))
-        cyno_jump = system_cyno_jump.get(sid, "no jump")
 
-        prev_class, prev_route = previous_tags.get(sid, (None, None))
-
-        row = {
-            "solarSystemID": sid,
-            "solarSystem": sname,
-            "constellation": cname,
-            "region": rname,
-            "position": s.get("position", {"x": 0.0, "y": 0.0, "z": 0.0}),
-            "faction": faction,
-            "securityStatus": sec,
-            "solarSystemClass": prev_class,
-            "routeType": prev_route,
-            "planets": planets,
-            "moons": moons,
-            "asteroid_belts": asteroid_belts,
-            "stargates": stargates,
-            "stations": stations,
-            "cynoJumpSecurity": cyno_jump,
-        }
-        rows.append(row)
-
-        system_name_meta[sname] = {
-            "solarSystemClass": prev_class,
-            "routeType": prev_route,
-            "cynoJumpSecurity": cyno_jump,
-        }
+        rows.append(
+            {
+                "solarSystemID": sid,
+                "solarSystem": sname,
+                "constellation": cname,
+                "region": rname,
+                "position": s.get("position", [0.0, 0.0, 0.0]),
+                "faction": faction,
+                "securityStatus": sec,
+                "planets": int(s.get("planets", 0)),
+                "moons": int(moons_count.get(sid, 0)),
+                "asteroid_belts": int(belts_count.get(sid, 0)),
+                "stargates": int(s.get("stargates", 0)),
+                "stations": int(stations_count.get(sid, 0)),
+                "cynoJumpSecurity": system_cyno_jump.get(sid, "no jump"),
+            }
+        )
 
     rows.sort(key=lambda r: r["solarSystemID"])
-    return rows, system_name_meta
-
-
-def enrich_stations_with_system_meta(stations_rows: List[Dict], system_name_meta: Dict[str, Dict]) -> List[Dict]:
-    """
-    stations.jsonl.gz must copy:
-      - solarSystemClass
-      - routeType
-      - cynoJumpSecurity
-    from solarsystems output (keyed by solarSystem name).
-    """
-    out: List[Dict] = []
-    for r in stations_rows:
-        ss = r.get("solarSystem", "")
-        meta = system_name_meta.get(ss, {})
-        row = {
-            "stationID": r["stationID"],
-            "station": r["station"],
-            "stationType": r["stationType"],
-            "solarSystem": ss,
-            "solarSystemClass": meta.get("solarSystemClass"),
-            "routeType": meta.get("routeType"),
-            "owner": r["owner"],
-            "cynoJumpSecurity": meta.get("cynoJumpSecurity"),
-            "cynoDockSecurity": r.get("cynoDockSecurity"),
-            "docking": r["docking"],
-            "market": r["market"],
-            "storage": r["storage"],
-            "repair": r["repair"],
-            "fitting": r["fitting"],
-            "cloning": r["cloning"],
-            "jump-clone": r["jump-clone"],
-        }
-        out.append(row)
-    out.sort(key=lambda x: x["stationID"])
-    return out
+    return rows
 
 
 def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Dict]) -> List[Dict]:
@@ -558,7 +469,10 @@ def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Dict]) -> List[D
         hi_name = systems.get(hi_id, {"name": str(hi_id)}).get("name", str(hi_id))
         stargate_group = f"{lo_name} ↔ {hi_name}"
 
-        rows.append({"stargateID": gid, "stargate": stargate_value, "stargateGroup": stargate_group, "solarSystem": src_name})
+        rows.append(
+            {"stargateID": gid, "stargate": stargate_value, "stargateGroup": stargate_group, "solarSystem": src_name}
+        )
+
     rows.sort(key=lambda r: r["stargateID"])
     return rows
 
@@ -576,6 +490,7 @@ def build_types_out(zf: zipfile.ZipFile) -> List[Dict]:
 
         tid = int(obj.get("_key"))
         tname = safe_en_name(obj, fallback=str(tid))
+
         gid = _get_int(obj, "group_id", "groupID")
 
         gname = ""
@@ -606,10 +521,6 @@ def build_types_out(zf: zipfile.ZipFile) -> List[Dict]:
     return rows
 
 
-# -----------------------------
-# Main
-# -----------------------------
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--zip", required=True, help="Path to CCP SDE JSONL ZIP")
@@ -618,10 +529,6 @@ def main() -> int:
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # read previous solarsystems (repo) to preserve two fields
-    repo_prev_solarsystems = Path("data/sde/solarsystems.jsonl.gz")
-    previous_tags = _read_previous_system_tags(repo_prev_solarsystems)
 
     with zipfile.ZipFile(args.zip) as zf:
         regions = _read_regions(zf)
@@ -642,8 +549,8 @@ def main() -> int:
         planet_orbits = _read_planet_orbit_names(zf, systems)
         moon_orbits = _read_moon_orbit_names(zf, planet_orbits)
 
-        # Build stations base first to compute cynoJumpSecurity per system
-        stations_base_rows, system_station_labels, stations_count, _ = build_stations_base(
+        # 1) Build stations first (collect labels + counts)
+        stations_rows, system_station_labels, stations_count = build_stations_out(
             zf=zf,
             systems=systems,
             corp_names=corp_names,
@@ -653,18 +560,28 @@ def main() -> int:
             type_names=type_names,
         )
 
-        moons_count = _count_moons_by_system(zf)
-        belts_count = _count_asteroid_belts_by_system(zf)
-
-        # Derive cynoJumpSecurity per system
+        # 2) Derive system cynoJumpSecurity
         system_cyno_jump: Dict[int, str] = {}
         for sid in systems.keys():
             labels = system_station_labels.get(sid, set())
             scount = int(stations_count.get(sid, 0))
             system_cyno_jump[sid] = system_cyno(labels, scount)
 
-        # Build solarsystems with preserved tags (and create system meta for station enrichment)
-        solarsystems_rows, system_name_meta = build_solarsystems_out(
+        # 3) Inject cynoJumpSecurity into each station row (copy from system)
+        for row in stations_rows:
+            sid = int(row.get("_solarSystemID", -1))
+            row["cynoJumpSecurity"] = system_cyno_jump.get(sid, "no jump")
+            # remove internal key
+            row.pop("_solarSystemID", None)
+
+        # Now write stations with the requested schema order
+        write_jsonl_gz(out_dir / "stations.jsonl.gz", stations_rows)
+
+        # 4) Build solarsystems including cynoJumpSecurity
+        moons_count = _count_moons_by_system(zf)
+        belts_count = _count_asteroid_belts_by_system(zf)
+
+        solarsystems_rows = build_solarsystems_out(
             systems=systems,
             consts=consts,
             regions=regions,
@@ -673,13 +590,8 @@ def main() -> int:
             belts_count=belts_count,
             stations_count=stations_count,
             system_cyno_jump=system_cyno_jump,
-            previous_tags=previous_tags,
         )
         write_jsonl_gz(out_dir / "solarsystems.jsonl.gz", solarsystems_rows)
-
-        # Enrich stations by copying from solarsystems output
-        stations_rows = enrich_stations_with_system_meta(stations_base_rows, system_name_meta)
-        write_jsonl_gz(out_dir / "stations.jsonl.gz", stations_rows)
 
         write_jsonl_gz(out_dir / "stargates.jsonl.gz", build_stargates_out(zf, systems))
         write_jsonl_gz(out_dir / "types.jsonl.gz", build_types_out(zf))
