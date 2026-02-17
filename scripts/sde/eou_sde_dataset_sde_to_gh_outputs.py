@@ -2,17 +2,29 @@
 EOU · SDE Dataset (SDE → GH) — build outputs
 
 Genera (sobrescribe) en el directorio de salida:
-
   - regions.jsonl.gz
   - constellations.jsonl.gz
   - solarsystems.jsonl.gz
   - stations.jsonl.gz
   - stargates.jsonl.gz
   - corporations.jsonl.gz
-  - sdesi/types.jsonl.gz  (MOVED + enriched with ESI packagedVolume + etag)
+  - sdesi/types.jsonl.gz   (MOVED + packagedVolume enrichment)
 
-Solo usa el ZIP oficial CCP SDE JSONL para todo, EXCEPTO:
-  - packagedVolume de types: ESI GET /universe/types/{type_id}/ (cached with If-None-Match + ETag)
+Regla de packagedVolume:
+  - Sin ESI: packagedVolume = volume (SDE)
+  - Con ESI: packagedVolume = packaged_volume (ESI) si existe, si no, fallback volume(SDE)
+
+Regla de ETag:
+  - RESET_ETAGS=true:
+      * categorías != Ship/Module/Celestial: etag=null siempre
+      * categorías Ship/Module/Celestial: llamar ESI y guardar etag SOLO si packagedVolume(ESI) != volume(SDE)
+  - RESET_ETAGS=false:
+      * llamar ESI SOLO si etag previo != null
+      * + discovery de NUEVOS types (no existían antes) en Ship/Module/Celestial
+      * si ESI devuelve 200 y packagedVolume(ESI) == volume(SDE), entonces etag se limpia a null
+
+ESI caching: If-None-Match + 304 Not Modified (sin body) está recomendado por CCP. :contentReference[oaicite:8]{index=8}
+ESI rate limiting: 429 + Retry-After, y bucket tokens por status code. :contentReference[oaicite:9]{index=9}
 
 No usa dependencias externas (stdlib only).
 """
@@ -21,8 +33,9 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 import json
+import os
 import re
 import sys
 import time
@@ -43,18 +56,7 @@ from eou_sde_dataset_sde_to_gh_cynodock import station_cyno, system_cyno  # noqa
 
 
 # -----------------------------
-# Numeric helpers
-# -----------------------------
-
-_Q6 = Decimal("0.000001")
-
-
-def round6(x: float) -> float:
-    return float(Decimal(str(x)).quantize(_Q6, rounding=ROUND_HALF_UP))
-
-
-# -----------------------------
-# ESI helpers (packagedVolume + ETag caching)
+# ESI helpers (packaged_volume + ETag caching)
 # -----------------------------
 
 ESI_TYPE_URL = "https://esi.evetech.net/latest/universe/types/{type_id}/?datasource=tranquility"
@@ -83,204 +85,204 @@ def _http_get_json(url: str, headers: Dict[str, str], timeout: int = 30) -> Tupl
             except Exception:
                 obj = None
         return status, hdrs, obj
-    except URLError as e:
-        # network issue -> represent as 0
+    except URLError:
         return 0, {}, None
 
 
-def fetch_packaged_volume_with_cache(
+def _to_decimal(x: Optional[float]) -> Optional[Decimal]:
+    if x is None:
+        return None
+    try:
+        return Decimal(str(x))
+    except Exception:
+        return None
+
+
+def _vol_equal(a: Optional[float], b: Optional[float]) -> bool:
+    """
+    Comparación exacta por representación decimal (evita sorpresas de float).
+    Si alguno es None => no iguales.
+    """
+    da = _to_decimal(a)
+    db = _to_decimal(b)
+    if da is None or db is None:
+        return False
+    return da == db
+
+
+def fetch_packaged_volume(
     type_id: int,
     prev_etag: Optional[str],
-    prev_packaged_volume: Optional[float],
-    max_attempts: int = 6,
-) -> Tuple[Optional[float], Optional[str], int]:
+    use_if_none_match: bool,
+    max_attempts: int = 8,
+) -> Tuple[int, Optional[float], Optional[str], Dict[str, str]]:
     """
-    Fetch packaged_volume for a typeID from ESI, using If-None-Match with stored ETag.
-
-    Returns: (packagedVolume, etag, http_status)
-      - On 304 -> returns (prev_packaged_volume, prev_etag, 304)
-      - On 200 -> returns (new_packaged_volume, new_etag, 200)
-      - On errors -> returns (prev_packaged_volume, prev_etag, status) if we can keep old
+    Returns: (status, packaged_volume_or_none, etag_or_none, headers_lower)
+    Handles:
+      - 429: respects Retry-After (seconds) :contentReference[oaicite:10]{index=10}
+      - error-limit headers (X-ESI-Error-Limit-*) :contentReference[oaicite:11]{index=11}
+      - 5xx/network: backoff retry
     """
     url = ESI_TYPE_URL.format(type_id=type_id)
 
-    # Minimal but explicit UA helps CCP support & debugging.
-    base_headers = {
+    headers = {
         "Accept": "application/json",
-        "User-Agent": "EOU-SDE-Dataset/1.0 (GitHub Actions; contact: none)",
+        "User-Agent": "EOU-SDE-Dataset/1.0 (GitHub Actions)",
     }
-    if prev_etag:
-        base_headers["If-None-Match"] = prev_etag
+    if use_if_none_match and prev_etag:
+        headers["If-None-Match"] = prev_etag
 
     attempt = 0
     backoff = 1.0
 
     while attempt < max_attempts:
         attempt += 1
-        status, hdrs, obj = _http_get_json(url, base_headers)
+        status, hdrs, obj = _http_get_json(url, headers=headers)
 
-        etag = hdrs.get("etag") or prev_etag
+        # Normalize common headers for decisions/logging
+        etag = hdrs.get("etag") or (prev_etag if status == 304 else None)
+        retry_after = hdrs.get("retry-after")
+        err_rem = hdrs.get("x-esi-error-limit-remain")
+        err_reset = hdrs.get("x-esi-error-limit-reset")
 
-        # Log per request (requested by user)
-        ra = hdrs.get("retry-after")
-        remain = hdrs.get("x-ratelimit-remaining")
-        reset = hdrs.get("x-esi-error-limit-reset") or hdrs.get("x-esi-error-limit-reset".lower())
-        print(
-            f"[ESI] typeID={type_id} attempt={attempt}/{max_attempts} status={status} "
-            f"etag={'yes' if etag else 'no'} retry_after={ra or '-'} ratelimit_remain={remain or '-'} "
-            f"error_reset={reset or '-'}"
-        )
-
-        if status == 304:
-            # Not modified -> keep cached volume/etag
-            return prev_packaged_volume, prev_etag, 304
-
-        if status == 200 and isinstance(obj, dict):
-            pv = obj.get("packaged_volume")
-            # packaged_volume should be numeric; keep None if absent
-            try:
-                pv_f = float(pv) if pv is not None else None
-            except Exception:
-                pv_f = None
-            return pv_f, etag, 200
-
-        if status in (420, 429):
-            # Respect Retry-After when present; else exponential backoff.
-            # ESI docs: 429 returns Retry-After when rate-limited. :contentReference[oaicite:6]{index=6}
+        # Control HTTP (429)
+        if status == 429:
             wait_s = None
-            if ra is not None:
+            if retry_after:
                 try:
-                    wait_s = float(ra)
+                    wait_s = float(retry_after)
                 except Exception:
                     wait_s = None
             if wait_s is None:
                 wait_s = backoff
                 backoff = min(backoff * 2.0, 60.0)
-            time.sleep(max(0.5, min(wait_s, 120.0)))
+            time.sleep(max(0.5, min(wait_s, 180.0)))
+            continue
+
+        # Error-limit triggered (legacy): often 420 elsewhere; we treat any non-2xx/3xx burst carefully.
+        if status == 420:
+            # If CCP sends reset seconds, respect it; else backoff.
+            wait_s = None
+            if err_reset:
+                try:
+                    wait_s = float(err_reset)
+                except Exception:
+                    wait_s = None
+            if wait_s is None:
+                wait_s = max(10.0, backoff)
+                backoff = min(backoff * 2.0, 120.0)
+            time.sleep(min(wait_s, 300.0))
             continue
 
         if status == 0:
-            # transient network -> retry with backoff
             time.sleep(backoff)
             backoff = min(backoff * 2.0, 60.0)
             continue
 
         if 500 <= status <= 599:
-            # server error -> retry (cost 0 tokens per ESI rate doc, but still be gentle)
             time.sleep(backoff)
             backoff = min(backoff * 2.0, 60.0)
             continue
 
-        # 4xx (except 429/420): usually user-error or not found. Keep previous if we have it.
-        return prev_packaged_volume, prev_etag, status
+        if status == 304:
+            return 304, None, etag, hdrs
 
-    # attempts exhausted -> keep previous if any
-    return prev_packaged_volume, prev_etag, 0
+        if status == 200 and isinstance(obj, dict):
+            pv = obj.get("packaged_volume")
+            pv_f: Optional[float]
+            try:
+                pv_f = float(pv) if pv is not None else None
+            except Exception:
+                pv_f = None
+            return 200, pv_f, etag, hdrs
+
+        # Other 4xx -> do not hammer; stop.
+        return status, None, etag, hdrs
+
+    return 0, None, prev_etag, {}
 
 
-def load_types_cache_from_repo(repo_types_path: Path) -> Dict[int, Tuple[Optional[float], Optional[str]]]:
+def load_repo_types_cache(repo_types_path: Path) -> Dict[int, Dict]:
     """
-    Load prior packagedVolume + etag from the repo file (data/sdesi/types.jsonl.gz) if present.
+    Load previous data from data/sdesi/types.jsonl.gz
+
+    Stored fields of interest:
+      - typeID
+      - packagedVolume
+      - etag
     """
-    cache: Dict[int, Tuple[Optional[float], Optional[str]]] = {}
+    cache: Dict[int, Dict] = {}
     for row in read_jsonl_gz(repo_types_path):
         try:
             tid = int(row.get("typeID"))
         except Exception:
             continue
+
         pv = row.get("packagedVolume")
         et = row.get("etag")
+
         try:
             pv_f = float(pv) if pv is not None else None
         except Exception:
             pv_f = None
-        et_s = str(et) if isinstance(et, str) and et else None
-        cache[tid] = (pv_f, et_s)
+
+        et_s = et if isinstance(et, str) and et else None
+
+        cache[tid] = {"packagedVolume": pv_f, "etag": et_s}
     return cache
 
 
 # -----------------------------
-# Helpers de lectura (SDE)
+# Helpers SDE (lecturas)
 # -----------------------------
 
 def _read_regions(zf: zipfile.ZipFile) -> Dict[int, str]:
-    regions: Dict[int, str] = {}
+    out: Dict[int, str] = {}
     for obj in iter_jsonl_from_zip(zf, "mapRegions.jsonl"):
         rid = int(obj.get("_key"))
-        regions[rid] = safe_en_name(obj, fallback=str(rid))
-    return regions
-
-
-def _read_constellations(zf: zipfile.ZipFile) -> Dict[int, Tuple[str, int]]:
-    consts: Dict[int, Tuple[str, int]] = {}
-    for obj in iter_jsonl_from_zip(zf, "mapConstellations.jsonl"):
-        cid = int(obj.get("_key"))
-        name = safe_en_name(obj, fallback=str(cid))
-        region_id = int(obj.get("regionID"))
-        consts[cid] = (name, region_id)
-    return consts
-
-
-def _read_factions(zf: zipfile.ZipFile) -> Dict[int, str]:
-    out: Dict[int, str] = {}
-    for obj in iter_jsonl_from_zip(zf, "factions.jsonl"):
-        fid = int(obj.get("_key"))
-        out[fid] = safe_en_name(obj, fallback=str(fid))
+        out[rid] = safe_en_name(obj, fallback=str(rid))
     return out
 
 
-def _read_solarsystems(zf: zipfile.ZipFile) -> Dict[int, Dict]:
-    systems: Dict[int, Dict] = {}
+def _read_constellations(zf: zipfile.ZipFile) -> Dict[int, Tuple[str, int]]:
+    out: Dict[int, Tuple[str, int]] = {}
+    for obj in iter_jsonl_from_zip(zf, "mapConstellations.jsonl"):
+        cid = int(obj.get("_key"))
+        name = safe_en_name(obj, fallback=str(cid))
+        rid = int(obj.get("regionID"))
+        out[cid] = (name, rid)
+    return out
+
+
+def _read_solarsystems(zf: zipfile.ZipFile) -> Dict[int, Tuple[str, int, int]]:
+    out: Dict[int, Tuple[str, int, int]] = {}
     for obj in iter_jsonl_from_zip(zf, "mapSolarSystems.jsonl"):
         sid = int(obj.get("_key"))
         name = safe_en_name(obj, fallback=str(sid))
-        constellation_id = int(obj.get("constellationID"))
-        region_id = int(obj.get("regionID"))
-
-        pos = obj.get("position") or {}
-        position = [
-            float(pos.get("x", 0.0)),
-            float(pos.get("y", 0.0)),
-            float(pos.get("z", 0.0)),
-        ]
-
-        sec = obj.get("securityStatus")
-        security_status = float(sec) if sec is not None else 0.0
-
-        faction_id = obj.get("factionID")
-        faction_id_int: Optional[int] = int(faction_id) if faction_id is not None else None
-
-        planet_ids = obj.get("planetIDs")
-        planets = len(planet_ids) if isinstance(planet_ids, list) else 0
-
-        stargate_ids = obj.get("stargateIDs")
-        stargates = len(stargate_ids) if isinstance(stargate_ids, list) else 0
-
-        systems[sid] = {
-            "name": name,
-            "constellationID": constellation_id,
-            "regionID": region_id,
-            "position": position,
-            "securityStatus": security_status,
-            "factionID": faction_id_int,
-            "planets": planets,
-            "stargates": stargates,
-        }
-    return systems
+        cid = int(obj.get("constellationID"))
+        rid = int(obj.get("regionID"))
+        out[sid] = (name, cid, rid)
+    return out
 
 
-def _read_planet_orbit_names(zf: zipfile.ZipFile, systems: Dict[int, Dict]) -> Dict[int, str]:
+def _read_planet_orbit_names(
+    zf: zipfile.ZipFile,
+    systems: Dict[int, Tuple[str, int, int]],
+) -> Dict[int, str]:
     out: Dict[int, str] = {}
     for obj in iter_jsonl_from_zip(zf, "mapPlanets.jsonl"):
         pid = int(obj.get("_key"))
         solar_system_id = int(obj.get("solarSystemID"))
-        ss_name = systems.get(solar_system_id, {"name": str(solar_system_id)}).get("name", str(solar_system_id))
+        ss_name = systems.get(solar_system_id, (str(solar_system_id), 0, 0))[0]
         cidx = int(obj.get("celestialIndex"))
         out[pid] = planet_name(ss_name, cidx)
     return out
 
 
-def _read_moon_orbit_names(zf: zipfile.ZipFile, planet_orbits: Dict[int, str]) -> Dict[int, str]:
+def _read_moon_orbit_names(
+    zf: zipfile.ZipFile,
+    planet_orbits: Dict[int, str],
+) -> Dict[int, str]:
     out: Dict[int, str] = {}
     for obj in iter_jsonl_from_zip(zf, "mapMoons.jsonl"):
         mid = int(obj.get("_key"))
@@ -291,30 +293,12 @@ def _read_moon_orbit_names(zf: zipfile.ZipFile, planet_orbits: Dict[int, str]) -
     return out
 
 
-def _count_moons_by_system(zf: zipfile.ZipFile) -> Dict[int, int]:
-    counts: Dict[int, int] = defaultdict(int)
-    for obj in iter_jsonl_from_zip(zf, "mapMoons.jsonl"):
-        sid = int(obj.get("solarSystemID"))
-        counts[sid] += 1
-    return dict(counts)
-
-
-def _count_asteroid_belts_by_system(zf: zipfile.ZipFile) -> Dict[int, int]:
-    counts: Dict[int, int] = defaultdict(int)
-    for obj in iter_jsonl_from_zip(zf, "mapPlanets.jsonl"):
-        sid = int(obj.get("solarSystemID"))
-        belts = obj.get("asteroidBeltIDs")
-        if isinstance(belts, list):
-            counts[sid] += len(belts)
-    return dict(counts)
-
-
 def _read_corporations(zf: zipfile.ZipFile) -> Dict[int, str]:
-    corps: Dict[int, str] = {}
+    out: Dict[int, str] = {}
     for obj in iter_jsonl_from_zip(zf, "npcCorporations.jsonl"):
         cid = int(obj.get("_key"))
-        corps[cid] = safe_en_name(obj, fallback=str(cid))
-    return corps
+        out[cid] = safe_en_name(obj, fallback=str(cid))
+    return out
 
 
 def _read_station_services(zf: zipfile.ZipFile) -> Dict[int, str]:
@@ -432,8 +416,18 @@ def _get_bool(obj: Dict, *keys: str, default: bool = False) -> bool:
     return default
 
 
+def _get_float(obj: Dict, *keys: str) -> Optional[float]:
+    for k in keys:
+        if k in obj and obj[k] is not None:
+            try:
+                return float(obj[k])
+            except Exception:
+                return None
+    return None
+
+
 # -----------------------------
-# Builders
+# Builders (outputs)
 # -----------------------------
 
 def build_regions_out(regions: Dict[int, str]) -> List[Dict]:
@@ -450,6 +444,28 @@ def build_constellations_out(consts: Dict[int, Tuple[str, int]], regions: Dict[i
     return rows
 
 
+def build_solarsystems_out(
+    systems: Dict[int, Tuple[str, int, int]],
+    consts: Dict[int, Tuple[str, int]],
+    regions: Dict[int, str],
+    system_cyno_jump: Dict[int, str],
+) -> List[Dict]:
+    rows: List[Dict] = []
+    for sid, (sname, cid, rid) in systems.items():
+        cname = consts.get(cid, (str(cid), 0))[0]
+        rows.append(
+            {
+                "solarSystemID": sid,
+                "solarSystem": sname,
+                "constellation": cname,
+                "region": regions.get(rid, str(rid)),
+                "cynoJumpSecurity": system_cyno_jump.get(sid, "no jump"),
+            }
+        )
+    rows.sort(key=lambda r: r["solarSystemID"])
+    return rows
+
+
 def build_corporations_out(corp_names: Dict[int, str]) -> List[Dict]:
     rows: List[Dict] = [{"corporationID": cid, "corporation": name} for cid, name in corp_names.items()]
     rows.sort(key=lambda r: r["corporationID"])
@@ -458,16 +474,15 @@ def build_corporations_out(corp_names: Dict[int, str]) -> List[Dict]:
 
 def build_stations_out(
     zf: zipfile.ZipFile,
-    systems: Dict[int, Dict],
+    systems: Dict[int, Tuple[str, int, int]],
     corp_names: Dict[int, str],
     operations: Dict[int, Dict],
     planet_orbits: Dict[int, str],
     moon_orbits: Dict[int, str],
     type_names: Dict[int, str],
-) -> Tuple[List[Dict], Dict[int, Set[Optional[str]]], Dict[int, int]]:
+) -> Tuple[List[Dict], Dict[int, Set[Optional[str]]]]:
     rows: List[Dict] = []
-    system_cyno_labels: Dict[int, Set[Optional[str]]] = defaultdict(set)
-    stations_count: Dict[int, int] = defaultdict(int)
+    sys_labels: Dict[int, Set[Optional[str]]] = defaultdict(set)
 
     orbit_names: Dict[int, str] = {}
     orbit_names.update(planet_orbits)
@@ -475,10 +490,8 @@ def build_stations_out(
 
     for obj in iter_jsonl_from_zip(zf, "npcStations.jsonl"):
         station_id = int(obj.get("_key"))
-
         solar_system_id = _get_int(obj, "solarSystemID") or -1
-        stations_count[solar_system_id] += 1
-        ss_name = systems.get(solar_system_id, {"name": str(solar_system_id)}).get("name", str(solar_system_id))
+        ss_name = systems.get(solar_system_id, (str(solar_system_id), 0, 0))[0]
 
         orbit_id = _get_int(obj, "orbitID")
         orbit_name = orbit_names.get(orbit_id, ss_name) if orbit_id is not None else ss_name
@@ -511,18 +524,18 @@ def build_stations_out(
         cloning = "cloning" in services
         jump_clone = "jump-clone-facility" in services
 
-        _level, dock_label = station_cyno(station_type if station_type else None, docking)
-        system_cyno_labels[solar_system_id].add(dock_label)
+        _lvl, dock_label = station_cyno(station_type if station_type else None, docking)
+        sys_labels[solar_system_id].add(dock_label)
 
         rows.append(
             {
-                "_solarSystemID": solar_system_id,  # internal
+                "_solarSystemID": solar_system_id,
                 "stationID": station_id,
                 "station": station_name,
                 "stationType": station_type,
                 "solarSystem": ss_name,
                 "owner": owner,
-                # cynoJumpSecurity injected later
+                "cynoJumpSecurity": None,  # fill later from systems
                 "cynoDockSecurity": dock_label,
                 "docking": docking,
                 "market": market,
@@ -535,56 +548,10 @@ def build_stations_out(
         )
 
     rows.sort(key=lambda r: r["stationID"])
-    return rows, dict(system_cyno_labels), dict(stations_count)
+    return rows, dict(sys_labels)
 
 
-def build_solarsystems_out(
-    systems: Dict[int, Dict],
-    consts: Dict[int, Tuple[str, int]],
-    regions: Dict[int, str],
-    factions: Dict[int, str],
-    moons_count: Dict[int, int],
-    belts_count: Dict[int, int],
-    stations_count: Dict[int, int],
-    system_cyno_jump: Dict[int, str],
-) -> List[Dict]:
-    rows: List[Dict] = []
-    for sid, s in systems.items():
-        sname = s["name"]
-        cid = int(s["constellationID"])
-        rid = int(s["regionID"])
-
-        cname = consts.get(cid, (str(cid), 0))[0]
-        rname = regions.get(rid, str(rid))
-
-        fid = s.get("factionID")
-        faction = factions.get(int(fid)) if fid is not None and int(fid) in factions else None
-
-        sec = round6(float(s.get("securityStatus", 0.0)))
-
-        rows.append(
-            {
-                "solarSystemID": sid,
-                "solarSystem": sname,
-                "constellation": cname,
-                "region": rname,
-                "position": s.get("position", [0.0, 0.0, 0.0]),
-                "faction": faction,
-                "securityStatus": sec,
-                "planets": int(s.get("planets", 0)),
-                "moons": int(moons_count.get(sid, 0)),
-                "asteroid_belts": int(belts_count.get(sid, 0)),
-                "stargates": int(s.get("stargates", 0)),
-                "stations": int(stations_count.get(sid, 0)),
-                "cynoJumpSecurity": system_cyno_jump.get(sid, "no jump"),
-            }
-        )
-
-    rows.sort(key=lambda r: r["solarSystemID"])
-    return rows
-
-
-def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Dict]) -> List[Dict]:
+def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Tuple[str, int, int]]) -> List[Dict]:
     rows: List[Dict] = []
     for obj in iter_jsonl_from_zip(zf, "mapStargates.jsonl"):
         gid = int(obj.get("_key"))
@@ -592,54 +559,77 @@ def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Dict]) -> List[D
         dest = obj.get("destination") or {}
         dst_id = int(dest.get("solarSystemID"))
 
-        src_name = systems.get(src_id, {"name": str(src_id)}).get("name", str(src_id))
-        dst_name = systems.get(dst_id, {"name": str(dst_id)}).get("name", str(dst_id))
+        src_name = systems.get(src_id, (str(src_id), 0, 0))[0]
+        dst_name = systems.get(dst_id, (str(dst_id), 0, 0))[0]
 
         stargate_value = f"{src_name} → {dst_name}"
 
         lo_id, hi_id = (src_id, dst_id) if src_id <= dst_id else (dst_id, src_id)
-        lo_name = systems.get(lo_id, {"name": str(lo_id)}).get("name", str(lo_id))
-        hi_name = systems.get(hi_id, {"name": str(hi_id)}).get("name", str(hi_id))
+        lo_name = systems.get(lo_id, (str(lo_id), 0, 0))[0]
+        hi_name = systems.get(hi_id, (str(hi_id), 0, 0))[0]
         stargate_group = f"{lo_name} ↔ {hi_name}"
 
-        rows.append(
-            {"stargateID": gid, "stargate": stargate_value, "stargateGroup": stargate_group, "solarSystem": src_name}
-        )
+        rows.append({"stargateID": gid, "stargate": stargate_value, "stargateGroup": stargate_group, "solarSystem": src_name})
 
     rows.sort(key=lambda r: r["stargateID"])
     return rows
 
 
-def build_types_out_sdesi(zf: zipfile.ZipFile, repo_types_cache: Dict[int, Tuple[Optional[float], Optional[str]]]) -> List[Dict]:
+def build_types_out_sdesi(
+    zf: zipfile.ZipFile,
+    repo_cache: Dict[int, Dict],
+    reset_etags: bool,
+) -> List[Dict]:
     """
     Output: sdesi/types.jsonl.gz
 
     Fields (ordered):
       - typeID
       - type
-      - packagedVolume (from ESI; cached with ETag)
+      - packagedVolume  (default volume SDE; optional ESI override)
       - group
       - category
       - marketGroup
       - is_contraband
       - is_gategank
-      - etag (from ESI for this type)
+      - etag            (only when packagedVolume != volume SDE; else null)
     """
     groups_meta = _read_groups_meta(zf)
     categories = _read_categories(zf)
     marketgroup_names = _read_marketgroup_names(zf)
     contraband = _read_contraband_set(zf)
 
+    CANDIDATE_CATEGORIES = {"Ship", "Module", "Celestial"}
+
+    # metrics for log (aggregate)
+    m_total = 0
+    m_candidates = 0
+    m_calls = 0
+    m_200 = 0
+    m_304 = 0
+    m_429 = 0
+    m_420 = 0
+    m_err = 0
+    m_store = 0
+    m_clear = 0
+    m_discovery = 0
+    start = time.time()
+
     rows: List[Dict] = []
 
-    # We will iterate published types from SDE and enrich from ESI.
-    # Use ETag caching to avoid unnecessary transfers/processing. :contentReference[oaicite:7]{index=7}
     for obj in iter_jsonl_from_zip(zf, "types.jsonl"):
         if not _get_bool(obj, "published", default=False):
             continue
 
+        m_total += 1
+
         tid = int(obj.get("_key"))
         tname = safe_en_name(obj, fallback=str(tid))
+
+        # SDE volume (base)
+        vol_sde = _get_float(obj, "volume")
+        if vol_sde is None:
+            vol_sde = 0.0  # ensure non-null number<double>
 
         gid = _get_int(obj, "group_id", "groupID")
 
@@ -655,29 +645,121 @@ def build_types_out_sdesi(zf: zipfile.ZipFile, repo_types_cache: Dict[int, Tuple
         mgid = _get_int(obj, "marketGroupID", "market_group_id", "marketGroupId")
         mgname = marketgroup_names.get(mgid, str(mgid)) if mgid is not None else ""
 
-        prev_pv, prev_etag = repo_types_cache.get(tid, (None, None))
+        is_candidate = cname in CANDIDATE_CATEGORIES
+        if is_candidate:
+            m_candidates += 1
 
-        pv, etag, status = fetch_packaged_volume_with_cache(
-            type_id=tid,
-            prev_etag=prev_etag,
-            prev_packaged_volume=prev_pv,
-        )
+        prev = repo_cache.get(tid)
+        prev_etag = prev.get("etag") if prev else None
+        prev_pv = prev.get("packagedVolume") if prev else None
+        is_new = prev is None
+
+        # Default outputs without ESI:
+        out_pv = vol_sde
+        out_etag: Optional[str] = None
+
+        # --- Mode decision ---
+        do_call = False
+        use_if_none_match = False
+
+        if reset_etags:
+            # RESET MODE: candidates -> call ESI; non-candidates never call ESI and etag forced null
+            if is_candidate:
+                do_call = True
+                use_if_none_match = False  # reset wants a fresh 200 when possible
+            else:
+                do_call = False
+                out_etag = None
+                out_pv = vol_sde
+        else:
+            # NORMAL MODE:
+            # 1) If prev etag exists -> refresh it (If-None-Match)
+            if prev_etag:
+                do_call = True
+                use_if_none_match = True
+            # 2) discovery: new types in candidate categories (no prev record)
+            elif is_new and is_candidate:
+                do_call = True
+                use_if_none_match = False
+                m_discovery += 1
+            else:
+                do_call = False
+
+        if do_call:
+            m_calls += 1
+            status, pv_esi, etag_resp, hdrs = fetch_packaged_volume(
+                type_id=tid,
+                prev_etag=prev_etag,
+                use_if_none_match=use_if_none_match,
+            )
+
+            if status == 304:
+                m_304 += 1
+                # Keep previous if present; otherwise fallback SDE
+                out_pv = prev_pv if prev_pv is not None else vol_sde
+                out_etag = prev_etag  # still non-null
+            elif status == 200:
+                m_200 += 1
+                # ESI packaged_volume may be missing; treat as equals->clear etag
+                pv_effective = pv_esi if pv_esi is not None else vol_sde
+
+                if not _vol_equal(pv_effective, vol_sde):
+                    out_pv = pv_effective
+                    out_etag = etag_resp
+                    if out_etag:
+                        m_store += 1
+                else:
+                    out_pv = vol_sde
+                    out_etag = None
+                    if prev_etag:
+                        m_clear += 1
+            else:
+                # classify a bit
+                if status == 429:
+                    m_429 += 1
+                elif status == 420:
+                    m_420 += 1
+                elif status != 0:
+                    m_err += 1
+                else:
+                    m_err += 1
+
+                # On error: preserve previous "best known"
+                # - If prev had etag (meaning historically differed), keep prev values
+                # - else fallback to SDE volume / etag null
+                if prev_etag:
+                    out_etag = prev_etag
+                    out_pv = prev_pv if prev_pv is not None else vol_sde
+                else:
+                    out_etag = None
+                    out_pv = vol_sde
 
         rows.append(
             {
                 "typeID": tid,
                 "type": tname,
-                "packagedVolume": pv,
+                "packagedVolume": out_pv,
                 "group": gname,
                 "category": cname,
                 "marketGroup": mgname,
                 "is_contraband": tid in contraband,
                 "is_gategank": gname == "Smart Bomb",
-                "etag": etag,
+                "etag": out_etag,
             }
         )
 
     rows.sort(key=lambda r: r["typeID"])
+
+    elapsed = time.time() - start
+    # Aggregate log (legible)
+    print(
+        "[TYPES:ESI] "
+        f"reset_etags={reset_etags} total_published={m_total} candidates={m_candidates} "
+        f"calls={m_calls} discovery_new={m_discovery} "
+        f"200={m_200} 304={m_304} 429={m_429} 420={m_420} err={m_err} "
+        f"etag_store={m_store} etag_clear={m_clear} elapsed_s={elapsed:.1f}"
+    )
+
     return rows
 
 
@@ -694,31 +776,33 @@ def main() -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load local repo cache for types (data/sdesi/types.jsonl.gz) if present
+    reset_etags = os.environ.get("RESET_ETAGS", "").strip().lower() == "true"
+
+    # Load repo cache (previous types) to control ESI calls in NORMAL mode
     repo_types_path = Path("data/sdesi/types.jsonl.gz")
-    repo_types_cache = load_types_cache_from_repo(repo_types_path)
+    repo_cache = load_repo_types_cache(repo_types_path)
 
     with zipfile.ZipFile(args.zip) as zf:
         regions = _read_regions(zf)
         consts = _read_constellations(zf)
-        factions = _read_factions(zf)
         systems = _read_solarsystems(zf)
 
+        # Base geo
         write_jsonl_gz(out_dir / "regions.jsonl.gz", build_regions_out(regions))
         write_jsonl_gz(out_dir / "constellations.jsonl.gz", build_constellations_out(consts, regions))
 
+        # Corporations
         corp_names = _read_corporations(zf)
         write_jsonl_gz(out_dir / "corporations.jsonl.gz", build_corporations_out(corp_names))
 
-        type_names = _read_type_name_map(zf)
+        # Stations + cyno
         service_keys = _read_station_services(zf)
         operations = _read_station_operations(zf, service_keys)
-
+        type_names = _read_type_name_map(zf)
         planet_orbits = _read_planet_orbit_names(zf, systems)
         moon_orbits = _read_moon_orbit_names(zf, planet_orbits)
 
-        # Stations first (for cynoJumpSecurity)
-        stations_rows, system_station_labels, stations_count = build_stations_out(
+        stations_rows, sys_labels = build_stations_out(
             zf=zf,
             systems=systems,
             corp_names=corp_names,
@@ -728,40 +812,33 @@ def main() -> int:
             type_names=type_names,
         )
 
+        # system cynoJumpSecurity computed from station dock labels
         system_cyno_jump: Dict[int, str] = {}
         for sid in systems.keys():
-            labels = system_station_labels.get(sid, set())
-            scount = int(stations_count.get(sid, 0))
-            system_cyno_jump[sid] = system_cyno(labels, scount)
+            labels = sys_labels.get(sid, set())
+            station_count = len([1 for r in stations_rows if r.get("_solarSystemID") == sid])
+            system_cyno_jump[sid] = system_cyno(labels, station_count)
 
-        for row in stations_rows:
-            sid = int(row.get("_solarSystemID", -1))
-            row["cynoJumpSecurity"] = system_cyno_jump.get(sid, "no jump")
-            row.pop("_solarSystemID", None)
+        # inject cynoJumpSecurity into stations (copy from solarsystems)
+        for r in stations_rows:
+            sid = int(r.get("_solarSystemID", -1))
+            r["cynoJumpSecurity"] = system_cyno_jump.get(sid, "no jump")
+            r.pop("_solarSystemID", None)
 
         write_jsonl_gz(out_dir / "stations.jsonl.gz", stations_rows)
 
-        moons_count = _count_moons_by_system(zf)
-        belts_count = _count_asteroid_belts_by_system(zf)
+        # solar systems output (includes cynoJumpSecurity)
+        write_jsonl_gz(out_dir / "solarsystems.jsonl.gz", build_solarsystems_out(systems, consts, regions, system_cyno_jump))
 
-        solarsystems_rows = build_solarsystems_out(
-            systems=systems,
-            consts=consts,
-            regions=regions,
-            factions=factions,
-            moons_count=moons_count,
-            belts_count=belts_count,
-            stations_count=stations_count,
-            system_cyno_jump=system_cyno_jump,
-        )
-        write_jsonl_gz(out_dir / "solarsystems.jsonl.gz", solarsystems_rows)
-
+        # Stargates
         write_jsonl_gz(out_dir / "stargates.jsonl.gz", build_stargates_out(zf, systems))
 
-        # Types (SDE+ESI) -> out/sdesi/types.jsonl.gz
-        types_rows = build_types_out_sdesi(zf, repo_types_cache)
+        # Types SDE+ESI -> out/sdesi/types.jsonl.gz
+        types_rows = build_types_out_sdesi(zf, repo_cache, reset_etags=reset_etags)
+        (out_dir / "sdesi").mkdir(parents=True, exist_ok=True)
         write_jsonl_gz(out_dir / "sdesi/types.jsonl.gz", types_rows)
 
+    # Sanity check
     expected = [
         "regions.jsonl.gz",
         "constellations.jsonl.gz",
