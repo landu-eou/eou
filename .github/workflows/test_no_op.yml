@@ -1,0 +1,22 @@
+name: TEST (no op)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eou_sde_routes_sde-gh
+  cancel-in-progress: false
+
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: No-op
+        run: |
+          echo "eou_sde_routes_sde-gh.yml triggered successfully."
+          echo "This is a placeholder workflow."
