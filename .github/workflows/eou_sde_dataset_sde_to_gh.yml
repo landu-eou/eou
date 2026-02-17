@@ -1,3 +1,31 @@
+# -----------------------------------------------------------------------------
+# File tree used by this workflow (SDE → GH)
+#
+# .github/
+#   workflows/
+#     eou_sde_dataset_sde_to_gh.yml
+#
+# scripts/
+#   sde/
+#     eou_sde_dataset_sde_to_gh_outputs.py
+#     eou_sde_dataset_sde_to_gh_io.py
+#     eou_sde_dataset_sde_to_gh_names.py
+#     eou_sde_dataset_sde_to_gh_cynodock.py
+#
+# data/
+#   sde/
+#     regions.jsonl.gz
+#     constellations.jsonl.gz
+#     solarsystems.jsonl.gz
+#     stations.jsonl.gz
+#     stargates.jsonl.gz
+#     types.jsonl.gz
+#     corporations.jsonl.gz
+#
+# states/
+#   sde.json
+# -----------------------------------------------------------------------------
+
 name: SDE Dataset (SDE → GH)
 
 on:
