@@ -57,6 +57,7 @@ def read_jsonl_gz(path: str | Path) -> Iterator[Dict]:
     p = Path(path)
     if not p.exists():
         return iter(())
+
     def _iter() -> Iterator[Dict]:
         with gzip.open(p, mode="rt", encoding="utf-8") as f:
             for line in f:
@@ -64,6 +65,7 @@ def read_jsonl_gz(path: str | Path) -> Iterator[Dict]:
                 if not line:
                     continue
                 yield json.loads(line)
+
     return _iter()
 
 
