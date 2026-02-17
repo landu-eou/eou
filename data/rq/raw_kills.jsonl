@@ -183,3 +183,13 @@
 {"killID":133457087,"zkb":{"hash":"7904ccf9d5fa12fa25c73ef55902325852b493d2","locationID":50016529,"labels":["tz:eu","cat:6","#:1","pvp"]},"rearm":0}
 {"killID":133457034,"zkb":{"hash":"73cb08db8d5d6e6cbd5d5c691288fa6fc0a75f44","locationID":50016529,"labels":["tz:eu","cat:6","solo","pvp"]},"rearm":0}
 {"killID":133457257,"zkb":{"hash":"a23157972569c9d3fce10cf771a84f2876f3007e","locationID":50016546,"labels":["tz:eu","cat:6","solo","pvp"]},"rearm":0}
+{"killID":133457285,"zkb":{"hash":"4a5ba5e0b7751811ca2ad46c8833b9232aa1451e","locationID":50002573,"labels":["tz:eu","cat:6","#:5+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133457237,"zkb":{"hash":"6f82eeb308440ea05ea154aef4b8fa65246c8217","locationID":50014044,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133457287,"zkb":{"hash":"244d03f8610e546e9be6e07d4da92b4158404a32","locationID":50013135,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133457312,"zkb":{"hash":"a2178b60fb111bc45d1732a245e078da4a62f020","locationID":50013135,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133457263,"zkb":{"hash":"095b45a34e0bdb4f1fd1db7b421d896a9340fab3","locationID":50007189,"labels":["tz:eu","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133457309,"zkb":{"hash":"669c3e1cd396230b2e8ae73f63c42a93df489c99","locationID":50007189,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133457302,"zkb":{"hash":"deb16957bd0370f9fecc1dfc43d21b2cf7612341","locationID":50016298,"labels":["tz:eu","cat:6","#:1","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133457329,"zkb":{"hash":"9d80284b16fd955df57d6f52c12a909357176449","locationID":50012925,"labels":["tz:eu","cat:6","#:10+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133457228,"zkb":{"hash":"0cc03ba7bb4abd82aee5690779a6adbb44c4bb97","locationID":50006849,"labels":["tz:eu","cat:6","#:10+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133457240,"zkb":{"hash":"e7970b185edf69c381917166c9ac17ec43e623a9","locationID":50006849,"labels":["tz:eu","cat:6","#:10+","pvp","loc:lowsec","fw:minmatar","fw:amamin"]},"rearm":0}
