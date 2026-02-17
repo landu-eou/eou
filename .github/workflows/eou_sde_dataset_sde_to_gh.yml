@@ -1,31 +1,3 @@
-# -----------------------------------------------------------------------------
-# File tree used by this workflow (SDE → GH)
-#
-# .github/
-#   workflows/
-#     eou_sde_dataset_sde_to_gh.yml
-#
-# scripts/
-#   sde/
-#     eou_sde_dataset_sde_to_gh_outputs.py
-#     eou_sde_dataset_sde_to_gh_io.py
-#     eou_sde_dataset_sde_to_gh_names.py
-#     eou_sde_dataset_sde_to_gh_cynodock.py
-#
-# data/
-#   sde/
-#     regions.jsonl.gz
-#     constellations.jsonl.gz
-#     solarsystems.jsonl.gz
-#     stations.jsonl.gz
-#     stargates.jsonl.gz
-#     types.jsonl.gz
-#     corporations.jsonl.gz
-#
-# states/
-#   sde.json
-# -----------------------------------------------------------------------------
-
 name: SDE Dataset (SDE → GH)
 
 on:
@@ -42,12 +14,8 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  # Necesario para consultar runs del workflow vía REST API (guard)
-  # y para disparar otro workflow vía workflow_dispatch (Actions: write).
   actions: write
-  # Necesario para hacer commit/push de outputs + state
   contents: write
-  # Necesario para OIDC/WIF (Google auth)
   id-token: write
 
 jobs:
@@ -64,6 +32,9 @@ jobs:
       LOCK_TIME: 120
 
       SDE_URL: https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip
+
+      # ESI (solo para packagedVolume)
+      ESI_BASE: https://esi.evetech.net/latest
 
     steps:
       # =====================================================================
@@ -256,27 +227,34 @@ jobs:
       # =====================================================================
       # 6) Build (solo si needs_update=true)
       # =====================================================================
-      - name: Build outputs (SDE → data/sde/*.jsonl.gz)
+      - name: Build outputs (SDE → data/sde + data/sdesi)
         if: steps.decide.outputs.needs_update == 'true'
         id: build
+        env:
+          ESI_BASE: ${{ env.ESI_BASE }}
         run: |
           set -euo pipefail
 
-          mkdir -p .tmp/sde/out data/sde states
+          mkdir -p .tmp/sde/out data/sde data/sdesi states
 
           curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused \
             -L -o .tmp/sde/sde.zip \
             "${SDE_URL}"
 
+          # ESI_BASE se pasa por env; el builder lo usa para packagedVolume
           python scripts/sde/eou_sde_dataset_sde_to_gh_outputs.py \
             --zip .tmp/sde/sde.zip \
             --out .tmp/sde/out
 
           jq -n --arg etag "${{ steps.sde_headers.outputs.etag }}" '{etag:$etag}' > states/sde.json
 
-          for f in regions constellations solarsystems stations stargates types corporations; do
+          # data/sde (todo menos types)
+          for f in regions constellations solarsystems stations stargates corporations; do
             mv -f ".tmp/sde/out/${f}.jsonl.gz" "data/sde/${f}.jsonl.gz"
           done
+
+          # types -> data/sdesi
+          mv -f ".tmp/sde/out/types.jsonl.gz" "data/sdesi/types.jsonl.gz"
 
           echo "updated=true" >> "$GITHUB_OUTPUT"
 
@@ -288,7 +266,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add data/sde/*.jsonl.gz states/sde.json
+          git add data/sde/*.jsonl.gz data/sdesi/types.jsonl.gz states/sde.json
           if git diff --cached --quiet; then
             exit 0
           fi
@@ -298,7 +276,7 @@ jobs:
           git push
 
       # =====================================================================
-      # 6.5) Trigger routes workflow (solo en éxito y solo si hubo update/force)
+      # 6.5) Trigger routes workflow (main) — solo si hubo update/force
       # =====================================================================
       - name: Trigger routes workflow (main)
         if: success() && (steps.build.outputs.updated == 'true' || steps.decide.outputs.forced == 'true')
@@ -307,7 +285,6 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-
           wf="eou_sde_routes_sde-gh.yml"
           api="https://api.github.com/repos/${REPO}/actions/workflows/${wf}/dispatches"
 
@@ -319,7 +296,7 @@ jobs:
             -d '{"ref":"main"}'
 
       # =====================================================================
-      # 7) Finalize (Sheets)
+      # 7) Finalize (Sheets) — (sin cambios)
       # =====================================================================
       - name: Sheets - finalize (completed)
         if: success()
@@ -423,4 +400,3 @@ jobs:
                 {\"range\":\"${SHEET_TAB}!D${row}\",\"values\":[[${next_serial}]]}
               ]
             }"
-
