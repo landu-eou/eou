@@ -33,9 +33,6 @@ jobs:
 
       SDE_URL: https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip
 
-      # ESI (solo para packagedVolume)
-      ESI_BASE: https://esi.evetech.net/latest
-
     steps:
       # =====================================================================
       # 0) Guard anti-cola / anti-solapamiento
@@ -227,11 +224,9 @@ jobs:
       # =====================================================================
       # 6) Build (solo si needs_update=true)
       # =====================================================================
-      - name: Build outputs (SDE → data/sde + data/sdesi)
+      - name: Build outputs (SDE → data/sde/*.jsonl.gz + data/sdesi/types.jsonl.gz)
         if: steps.decide.outputs.needs_update == 'true'
         id: build
-        env:
-          ESI_BASE: ${{ env.ESI_BASE }}
         run: |
           set -euo pipefail
 
@@ -241,20 +236,19 @@ jobs:
             -L -o .tmp/sde/sde.zip \
             "${SDE_URL}"
 
-          # ESI_BASE se pasa por env; el builder lo usa para packagedVolume
           python scripts/sde/eou_sde_dataset_sde_to_gh_outputs.py \
             --zip .tmp/sde/sde.zip \
             --out .tmp/sde/out
 
           jq -n --arg etag "${{ steps.sde_headers.outputs.etag }}" '{etag:$etag}' > states/sde.json
 
-          # data/sde (todo menos types)
+          # data/sde outputs
           for f in regions constellations solarsystems stations stargates corporations; do
             mv -f ".tmp/sde/out/${f}.jsonl.gz" "data/sde/${f}.jsonl.gz"
           done
 
-          # types -> data/sdesi
-          mv -f ".tmp/sde/out/types.jsonl.gz" "data/sdesi/types.jsonl.gz"
+          # types goes to data/sdesi/
+          mv -f ".tmp/sde/out/sdesi/types.jsonl.gz" "data/sdesi/types.jsonl.gz"
 
           echo "updated=true" >> "$GITHUB_OUTPUT"
 
@@ -276,7 +270,7 @@ jobs:
           git push
 
       # =====================================================================
-      # 6.5) Trigger routes workflow (main) — solo si hubo update/force
+      # 6.5) Trigger routes workflow (main)
       # =====================================================================
       - name: Trigger routes workflow (main)
         if: success() && (steps.build.outputs.updated == 'true' || steps.decide.outputs.forced == 'true')
@@ -285,6 +279,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+
           wf="eou_sde_routes_sde-gh.yml"
           api="https://api.github.com/repos/${REPO}/actions/workflows/${wf}/dispatches"
 
@@ -296,7 +291,7 @@ jobs:
             -d '{"ref":"main"}'
 
       # =====================================================================
-      # 7) Finalize (Sheets) — (sin cambios)
+      # 7) Finalize (Sheets) - (igual que tenías)
       # =====================================================================
       - name: Sheets - finalize (completed)
         if: success()
