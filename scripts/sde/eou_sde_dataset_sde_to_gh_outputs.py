@@ -8,11 +8,13 @@ Genera (sobrescribe) en el directorio de salida:
   - solarsystems.jsonl.gz
   - stations.jsonl.gz
   - stargates.jsonl.gz
-  - types.jsonl.gz        (incluye packagedVolume desde ESI)
   - corporations.jsonl.gz
+  - sdesi/types.jsonl.gz  (MOVED + enriched with ESI packagedVolume + etag)
 
-SDE: ZIP oficial CCP JSONL.
-ESI: excepción SOLO para packagedVolume (universe/types/{type_id}).
+Solo usa el ZIP oficial CCP SDE JSONL para todo, EXCEPTO:
+  - packagedVolume de types: ESI GET /universe/types/{type_id}/ (cached with If-None-Match + ETag)
+
+No usa dependencias externas (stdlib only).
 """
 
 from __future__ import annotations
@@ -20,9 +22,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
-import io
 import json
-import os
 import re
 import sys
 import time
@@ -37,7 +37,7 @@ THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 
-from eou_sde_dataset_sde_to_gh_io import iter_jsonl_from_zip, write_jsonl_gz  # noqa: E402
+from eou_sde_dataset_sde_to_gh_io import iter_jsonl_from_zip, read_jsonl_gz, write_jsonl_gz  # noqa: E402
 from eou_sde_dataset_sde_to_gh_names import moon_name, planet_name, safe_en_name  # noqa: E402
 from eou_sde_dataset_sde_to_gh_cynodock import station_cyno, system_cyno  # noqa: E402
 
@@ -50,105 +50,153 @@ _Q6 = Decimal("0.000001")
 
 
 def round6(x: float) -> float:
-    """Round to 6 decimals deterministically (Decimal, HALF_UP)."""
     return float(Decimal(str(x)).quantize(_Q6, rounding=ROUND_HALF_UP))
 
 
 # -----------------------------
-# ESI packagedVolume fetch
+# ESI helpers (packagedVolume + ETag caching)
 # -----------------------------
 
-def _http_get_json(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 30) -> Tuple[int, Dict, Dict[str, str]]:
-    req = Request(url, method="GET")
-    h = headers or {}
-    for k, v in h.items():
-        req.add_header(k, v)
-    with urlopen(req, timeout=timeout) as resp:
-        status = int(getattr(resp, "status", 200))
-        raw = resp.read()
-        txt = raw.decode("utf-8", errors="replace")
-        data = json.loads(txt) if txt else {}
-        resp_headers = {k: v for k, v in resp.headers.items()}
-        return status, data, resp_headers
+ESI_TYPE_URL = "https://esi.evetech.net/latest/universe/types/{type_id}/?datasource=tranquility"
 
 
-def fetch_packaged_volume(type_id: int, esi_base: str, max_attempts: int = 8) -> Optional[float]:
+def _http_get_json(url: str, headers: Dict[str, str], timeout: int = 30) -> Tuple[int, Dict[str, str], Optional[Dict]]:
     """
-    Get packaged_volume from ESI universe/types/{type_id}.
-
-    Recommended status handling:
-      - 200: parse packaged_volume
-      - 404: return None
-      - 429: honor Retry-After then retry
-      - 5xx: retry with backoff
-      - other 4xx: return None (avoid hammering)
-    CCP rate-limiting docs recommend respecting Retry-After for 429. :contentReference[oaicite:4]{index=4}
+    Returns: (status_code, response_headers_lower, json_obj_or_none)
     """
-    url = f"{esi_base.rstrip('/')}/universe/types/{int(type_id)}/"
-    # CCP asks for descriptive User-Agent in ESI requests (good practice).
-    # (Not strictly required, but helps operationally.)
-    ua = os.environ.get("EOU_USER_AGENT", "eou-sde-dataset/1.0 (contact: unknown)")
-    headers = {"Accept": "application/json", "User-Agent": ua}
+    req = Request(url, headers=headers, method="GET")
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            status = int(getattr(resp, "status", 200))
+            hdrs = {k.lower(): v for (k, v) in resp.headers.items()}
+            body = resp.read()
+            obj = json.loads(body.decode("utf-8")) if body else None
+            return status, hdrs, obj
+    except HTTPError as e:
+        status = int(e.code)
+        hdrs = {k.lower(): v for (k, v) in (e.headers.items() if e.headers else [])}
+        body = e.read() if hasattr(e, "read") else b""
+        obj = None
+        if body:
+            try:
+                obj = json.loads(body.decode("utf-8"))
+            except Exception:
+                obj = None
+        return status, hdrs, obj
+    except URLError as e:
+        # network issue -> represent as 0
+        return 0, {}, None
 
+
+def fetch_packaged_volume_with_cache(
+    type_id: int,
+    prev_etag: Optional[str],
+    prev_packaged_volume: Optional[float],
+    max_attempts: int = 6,
+) -> Tuple[Optional[float], Optional[str], int]:
+    """
+    Fetch packaged_volume for a typeID from ESI, using If-None-Match with stored ETag.
+
+    Returns: (packagedVolume, etag, http_status)
+      - On 304 -> returns (prev_packaged_volume, prev_etag, 304)
+      - On 200 -> returns (new_packaged_volume, new_etag, 200)
+      - On errors -> returns (prev_packaged_volume, prev_etag, status) if we can keep old
+    """
+    url = ESI_TYPE_URL.format(type_id=type_id)
+
+    # Minimal but explicit UA helps CCP support & debugging.
+    base_headers = {
+        "Accept": "application/json",
+        "User-Agent": "EOU-SDE-Dataset/1.0 (GitHub Actions; contact: none)",
+    }
+    if prev_etag:
+        base_headers["If-None-Match"] = prev_etag
+
+    attempt = 0
     backoff = 1.0
-    for attempt in range(1, max_attempts + 1):
-        try:
-            status, data, resp_headers = _http_get_json(url, headers=headers, timeout=30)
-            if status == 200:
-                pv = data.get("packaged_volume")
-                if pv is None:
-                    return None
+
+    while attempt < max_attempts:
+        attempt += 1
+        status, hdrs, obj = _http_get_json(url, base_headers)
+
+        etag = hdrs.get("etag") or prev_etag
+
+        # Log per request (requested by user)
+        ra = hdrs.get("retry-after")
+        remain = hdrs.get("x-ratelimit-remaining")
+        reset = hdrs.get("x-esi-error-limit-reset") or hdrs.get("x-esi-error-limit-reset".lower())
+        print(
+            f"[ESI] typeID={type_id} attempt={attempt}/{max_attempts} status={status} "
+            f"etag={'yes' if etag else 'no'} retry_after={ra or '-'} ratelimit_remain={remain or '-'} "
+            f"error_reset={reset or '-'}"
+        )
+
+        if status == 304:
+            # Not modified -> keep cached volume/etag
+            return prev_packaged_volume, prev_etag, 304
+
+        if status == 200 and isinstance(obj, dict):
+            pv = obj.get("packaged_volume")
+            # packaged_volume should be numeric; keep None if absent
+            try:
+                pv_f = float(pv) if pv is not None else None
+            except Exception:
+                pv_f = None
+            return pv_f, etag, 200
+
+        if status in (420, 429):
+            # Respect Retry-After when present; else exponential backoff.
+            # ESI docs: 429 returns Retry-After when rate-limited. :contentReference[oaicite:6]{index=6}
+            wait_s = None
+            if ra is not None:
                 try:
-                    return float(pv)
+                    wait_s = float(ra)
                 except Exception:
-                    return None
-
-            if status == 404:
-                return None
-
-            if status == 429:
-                ra = resp_headers.get("Retry-After")
-                sleep_s = float(ra) if ra and ra.strip().isdigit() else max(5.0, backoff)
-                time.sleep(sleep_s)
+                    wait_s = None
+            if wait_s is None:
+                wait_s = backoff
                 backoff = min(backoff * 2.0, 60.0)
-                continue
+            time.sleep(max(0.5, min(wait_s, 120.0)))
+            continue
 
-            # Other 4xx: do not retry aggressively
-            if 400 <= status < 500:
-                return None
-
-            # 5xx: retry
-            if 500 <= status < 600:
-                time.sleep(backoff)
-                backoff = min(backoff * 2.0, 60.0)
-                continue
-
-            # Unknown status
-            return None
-
-        except HTTPError as e:
-            status = int(getattr(e, "code", 0) or 0)
-            if status == 404:
-                return None
-            if status == 429:
-                ra = e.headers.get("Retry-After") if e.headers else None
-                sleep_s = float(ra) if ra and ra.strip().isdigit() else max(5.0, backoff)
-                time.sleep(sleep_s)
-                backoff = min(backoff * 2.0, 60.0)
-                continue
-            if 500 <= status < 600:
-                time.sleep(backoff)
-                backoff = min(backoff * 2.0, 60.0)
-                continue
-            return None
-        except (URLError, TimeoutError):
+        if status == 0:
+            # transient network -> retry with backoff
             time.sleep(backoff)
             backoff = min(backoff * 2.0, 60.0)
             continue
-        except Exception:
-            return None
 
-    return None
+        if 500 <= status <= 599:
+            # server error -> retry (cost 0 tokens per ESI rate doc, but still be gentle)
+            time.sleep(backoff)
+            backoff = min(backoff * 2.0, 60.0)
+            continue
+
+        # 4xx (except 429/420): usually user-error or not found. Keep previous if we have it.
+        return prev_packaged_volume, prev_etag, status
+
+    # attempts exhausted -> keep previous if any
+    return prev_packaged_volume, prev_etag, 0
+
+
+def load_types_cache_from_repo(repo_types_path: Path) -> Dict[int, Tuple[Optional[float], Optional[str]]]:
+    """
+    Load prior packagedVolume + etag from the repo file (data/sdesi/types.jsonl.gz) if present.
+    """
+    cache: Dict[int, Tuple[Optional[float], Optional[str]]] = {}
+    for row in read_jsonl_gz(repo_types_path):
+        try:
+            tid = int(row.get("typeID"))
+        except Exception:
+            continue
+        pv = row.get("packagedVolume")
+        et = row.get("etag")
+        try:
+            pv_f = float(pv) if pv is not None else None
+        except Exception:
+            pv_f = None
+        et_s = str(et) if isinstance(et, str) and et else None
+        cache[tid] = (pv_f, et_s)
+    return cache
 
 
 # -----------------------------
@@ -323,7 +371,6 @@ def _read_station_operations(zf: zipfile.ZipFile, service_keys: Dict[int, str]) 
                     svc_set.add(key)
 
         ops[oid] = {"operationName": name, "useOperationName": use_op, "services": svc_set}
-
     return ops
 
 
@@ -386,7 +433,7 @@ def _get_bool(obj: Dict, *keys: str, default: bool = False) -> bool:
 
 
 # -----------------------------
-# Builders de outputs
+# Builders
 # -----------------------------
 
 def build_regions_out(regions: Dict[int, str]) -> List[Dict]:
@@ -563,19 +610,20 @@ def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Dict]) -> List[D
     return rows
 
 
-def build_types_out(zf: zipfile.ZipFile, esi_base: str) -> List[Dict]:
+def build_types_out_sdesi(zf: zipfile.ZipFile, repo_types_cache: Dict[int, Tuple[Optional[float], Optional[str]]]) -> List[Dict]:
     """
-    types.jsonl.gz (AHORA ENRIQUECIDO):
+    Output: sdesi/types.jsonl.gz
+
+    Fields (ordered):
       - typeID
       - type
-      - packagedVolume   (ESI packaged_volume)
+      - packagedVolume (from ESI; cached with ETag)
       - group
       - category
       - marketGroup
       - is_contraband
       - is_gategank
-
-    published-only (como antes).
+      - etag (from ESI for this type)
     """
     groups_meta = _read_groups_meta(zf)
     categories = _read_categories(zf)
@@ -584,6 +632,8 @@ def build_types_out(zf: zipfile.ZipFile, esi_base: str) -> List[Dict]:
 
     rows: List[Dict] = []
 
+    # We will iterate published types from SDE and enrich from ESI.
+    # Use ETag caching to avoid unnecessary transfers/processing. :contentReference[oaicite:7]{index=7}
     for obj in iter_jsonl_from_zip(zf, "types.jsonl"):
         if not _get_bool(obj, "published", default=False):
             continue
@@ -605,8 +655,13 @@ def build_types_out(zf: zipfile.ZipFile, esi_base: str) -> List[Dict]:
         mgid = _get_int(obj, "marketGroupID", "market_group_id", "marketGroupId")
         mgname = marketgroup_names.get(mgid, str(mgid)) if mgid is not None else ""
 
-        # ESI packagedVolume (exception)
-        pv = fetch_packaged_volume(tid, esi_base=esi_base)
+        prev_pv, prev_etag = repo_types_cache.get(tid, (None, None))
+
+        pv, etag, status = fetch_packaged_volume_with_cache(
+            type_id=tid,
+            prev_etag=prev_etag,
+            prev_packaged_volume=prev_pv,
+        )
 
         rows.append(
             {
@@ -618,6 +673,7 @@ def build_types_out(zf: zipfile.ZipFile, esi_base: str) -> List[Dict]:
                 "marketGroup": mgname,
                 "is_contraband": tid in contraband,
                 "is_gategank": gname == "Smart Bomb",
+                "etag": etag,
             }
         )
 
@@ -625,11 +681,9 @@ def build_types_out(zf: zipfile.ZipFile, esi_base: str) -> List[Dict]:
     return rows
 
 
-def build_corporations_out(corp_names: Dict[int, str]) -> List[Dict]:
-    rows: List[Dict] = [{"corporationID": cid, "corporation": name} for cid, name in corp_names.items()]
-    rows.sort(key=lambda r: r["corporationID"])
-    return rows
-
+# -----------------------------
+# Main
+# -----------------------------
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -637,10 +691,12 @@ def main() -> int:
     ap.add_argument("--out", required=True, help="Output directory (will be created)")
     args = ap.parse_args()
 
-    esi_base = os.environ.get("ESI_BASE", "https://esi.evetech.net/latest")
-
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load local repo cache for types (data/sdesi/types.jsonl.gz) if present
+    repo_types_path = Path("data/sdesi/types.jsonl.gz")
+    repo_types_cache = load_types_cache_from_repo(repo_types_path)
 
     with zipfile.ZipFile(args.zip) as zf:
         regions = _read_regions(zf)
@@ -661,6 +717,7 @@ def main() -> int:
         planet_orbits = _read_planet_orbit_names(zf, systems)
         moon_orbits = _read_moon_orbit_names(zf, planet_orbits)
 
+        # Stations first (for cynoJumpSecurity)
         stations_rows, system_station_labels, stations_count = build_stations_out(
             zf=zf,
             systems=systems,
@@ -701,8 +758,9 @@ def main() -> int:
 
         write_jsonl_gz(out_dir / "stargates.jsonl.gz", build_stargates_out(zf, systems))
 
-        # types (ESI packagedVolume)
-        write_jsonl_gz(out_dir / "types.jsonl.gz", build_types_out(zf, esi_base=esi_base))
+        # Types (SDE+ESI) -> out/sdesi/types.jsonl.gz
+        types_rows = build_types_out_sdesi(zf, repo_types_cache)
+        write_jsonl_gz(out_dir / "sdesi/types.jsonl.gz", types_rows)
 
     expected = [
         "regions.jsonl.gz",
@@ -710,8 +768,8 @@ def main() -> int:
         "solarsystems.jsonl.gz",
         "stations.jsonl.gz",
         "stargates.jsonl.gz",
-        "types.jsonl.gz",
         "corporations.jsonl.gz",
+        "sdesi/types.jsonl.gz",
     ]
     for name in expected:
         p = out_dir / name
