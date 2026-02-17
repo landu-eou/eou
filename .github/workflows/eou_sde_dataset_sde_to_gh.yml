@@ -42,9 +42,12 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  # OJO: ahora necesitamos write para disparar otro workflow por workflow_dispatch (REST)
+  # Necesario para consultar runs del workflow vía REST API (guard)
+  # y para disparar otro workflow vía workflow_dispatch (Actions: write).
   actions: write
+  # Necesario para hacer commit/push de outputs + state
   contents: write
+  # Necesario para OIDC/WIF (Google auth)
   id-token: write
 
 jobs:
@@ -59,9 +62,13 @@ jobs:
       SHEETS_WORKFLOW_ROW: "4"
 
       LOCK_TIME: 120
+
       SDE_URL: https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip
 
     steps:
+      # =====================================================================
+      # 0) Guard anti-cola / anti-solapamiento
+      # =====================================================================
       - name: Guard (skip duplicates)
         id: guard
         env:
@@ -125,6 +132,9 @@ jobs:
           echo "Skipped due to overlapping run"
           exit 0
 
+      # =====================================================================
+      # 1) Auth Google (WIF/OIDC) para escribir estado en Sheets
+      # =====================================================================
       - name: Auth to Google (WIF)
         id: gcp_auth
         uses: google-github-actions/auth@v2
@@ -135,6 +145,9 @@ jobs:
           access_token_scopes: |
             https://www.googleapis.com/auth/spreadsheets
 
+      # =====================================================================
+      # 2) Lock inicial en Sheets (in_progress + next_run=now+LOCK_TIME)
+      # =====================================================================
       - name: Sheets - initial lock
         env:
           ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
@@ -157,6 +170,9 @@ jobs:
               ]
             }"
 
+      # =====================================================================
+      # 3) Checkout + Python
+      # =====================================================================
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -167,6 +183,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      # =====================================================================
+      # 4) Leer headers del SDE final (ETag + Last-Modified)
+      # =====================================================================
       - name: SDE - fetch headers (etag + last-modified)
         id: sde_headers
         run: |
@@ -205,6 +224,9 @@ jobs:
           echo "etag=$etag" >> "$GITHUB_OUTPUT"
           echo "last_modified_epoch=$lm_epoch" >> "$GITHUB_OUTPUT"
 
+      # =====================================================================
+      # 5) Decisión de update
+      # =====================================================================
       - name: Decide update (etag compare or force)
         id: decide
         run: |
@@ -231,6 +253,9 @@ jobs:
           fi
           echo "forced=false" >> "$GITHUB_OUTPUT"
 
+      # =====================================================================
+      # 6) Build (solo si needs_update=true)
+      # =====================================================================
       - name: Build outputs (SDE → data/sde/*.jsonl.gz)
         if: steps.decide.outputs.needs_update == 'true'
         id: build
@@ -272,23 +297,30 @@ jobs:
           git pull --rebase --autostash
           git push
 
-      # ==========================================================
-      # NUEVO: Disparar workflow de rutas en caso de éxito
-      # ==========================================================
-      - name: Dispatch routes workflow (main)
-        if: success()
+      # =====================================================================
+      # 6.5) Trigger routes workflow (solo en éxito y solo si hubo update/force)
+      # =====================================================================
+      - name: Trigger routes workflow (main)
+        if: success() && (steps.build.outputs.updated == 'true' || steps.decide.outputs.forced == 'true')
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+
+          wf="eou_sde_routes_sde-gh.yml"
+          api="https://api.github.com/repos/${REPO}/actions/workflows/${wf}/dispatches"
+
           curl -fsSL -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${REPO}/actions/workflows/eou_sde_routes_sde-gh.yml/dispatches" \
+            "${api}" \
             -d '{"ref":"main"}'
 
+      # =====================================================================
+      # 7) Finalize (Sheets)
+      # =====================================================================
       - name: Sheets - finalize (completed)
         if: success()
         env:
