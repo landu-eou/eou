@@ -285,32 +285,47 @@ def load_systems(solarsystems_gz: str) -> Tuple[Dict[int, System], Dict[str, int
         sid = int(row["solarSystemID"])
         name = str(row["solarSystem"]).strip()
         sec = float(row["securityStatus"])
-        pos = row.get("position") or {}
-        x = float(pos.get("x", 0.0))
-        y = float(pos.get("y", 0.0))
-        z = float(pos.get("z", 0.0))
+
+        # -------- FIX HERE --------
+        pos = row.get("position")
+        x = y = z = 0.0
+
+        if isinstance(pos, dict):
+            x = float(pos.get("x", 0.0))
+            y = float(pos.get("y", 0.0))
+            z = float(pos.get("z", 0.0))
+        elif isinstance(pos, (list, tuple)) and len(pos) >= 3:
+            x = float(pos[0])
+            y = float(pos[1])
+            z = float(pos[2])
+        elif pos is None:
+            x = y = z = 0.0
+        else:
+            die(f"Invalid position type for solarSystemID={sid}: {type(pos).__name__}")
+        # --------------------------
+
         faction = row.get("faction", None)
         cyno = norm_cyno_grade(str(row.get("cynoJumpSecurity", "no jump")))
         region = str(row.get("region", "")).strip()
         constel = str(row.get("constellation", "")).strip()
-        sstype = str(row.get("solarSystemType", row.get("type", ""))).strip().lower()
+        sstype = str(row.get("solarSystemType", "")).strip().lower()
 
         s = System(
             system_id=sid,
             name=name,
             sec=sec,
             x=x, y=y, z=z,
-            faction=faction if faction is not None else None,
+            faction=faction,
             cyno_jump_security=cyno,
             region=region,
             constellation=constel,
             solar_system_type=sstype,
         )
+
         by_id[sid] = s
         name_to_id[name] = sid
 
     return by_id, name_to_id
-
 
 def load_stations(stations_gz: str) -> Tuple[Dict[str, List[Station]], Dict[int, Station]]:
     by_sys: Dict[str, List[Station]] = {}
