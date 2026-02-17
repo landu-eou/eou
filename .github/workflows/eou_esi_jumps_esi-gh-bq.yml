@@ -1,3 +1,17 @@
+# Repo file tree used by this workflow
+#
+# .github/
+#   workflows/
+#     eou_esi_jumps_esi-gh-bq.yml
+#
+# data/
+#   sde/
+#     solarsystems.jsonl.gz
+#
+# states/
+#   system_jumps.json
+
+
 name: ESI System Jumps (ESI → GH → BQ)
 
 on:
