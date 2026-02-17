@@ -1,3 +1,16 @@
+# Repo file tree used by this workflow
+#
+# .github/
+#   workflows/
+#     eou_esi_kills_esi-gh-bq.yml
+#
+# data/
+#   sde/
+#     solarsystems.jsonl.gz
+#
+# states/
+#   system_kills.json
+
 name: ESI System Kills (ESI → GH → BQ)
 
 on:
