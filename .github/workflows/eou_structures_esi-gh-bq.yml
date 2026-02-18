@@ -28,6 +28,8 @@ jobs:
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       BQ_DATASET: eou
       BQ_TABLE: structures
+      # Dataset está en EU (según tu captura). Esto evita “location mismatch”.
+      BQ_LOCATION: EU
 
       STATE_ETAG_PATH: states/structures.json
       DATA_STRUCTURES_PATH: data/esi/structures.jsonl.gz
@@ -143,7 +145,6 @@ jobs:
           set -euo pipefail
           python scripts/esi/eou_structures_run.py
 
-      # Diagnóstico mínimo SIEMPRE visible (no artifacts, no summary)
       - name: Debug outputs (minimal)
         if: always()
         run: |
