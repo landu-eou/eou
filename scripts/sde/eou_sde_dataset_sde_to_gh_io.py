@@ -1,5 +1,4 @@
-"""
-EOU · SDE Dataset (SDE → GH) — I/O helpers
+"""EOU · SDE Dataset (SDE → GH) — I/O helpers
 
 Only uses the official CCP SDE JSONL ZIP.
 
@@ -27,6 +26,7 @@ def find_zip_member(zf: zipfile.ZipFile, basename: str) -> str:
     candidates = [n for n in zf.namelist() if n.endswith("/" + basename) or n == basename]
     if not candidates:
         raise KeyError(f"{basename} not found in ZIP")
+    # Prefer the shortest path (usually root), else first.
     return sorted(candidates, key=len)[0]
 
 
@@ -34,6 +34,7 @@ def iter_jsonl_from_zip(zf: zipfile.ZipFile, basename: str) -> Iterator[Dict]:
     """Yield JSON objects from a JSONL file inside a ZIP."""
     member = find_zip_member(zf, basename)
     with zf.open(member, "r") as raw:
+        # CCP JSONL is UTF-8.
         text = io.TextIOWrapper(raw, encoding="utf-8")
         for line in text:
             line = line.strip()
@@ -50,23 +51,6 @@ def write_jsonl_gz(path: str | Path, rows: Iterable[Dict]) -> None:
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
             f.write("\n")
-
-
-def read_jsonl_gz(path: str | Path) -> Iterator[Dict]:
-    """Read newline-delimited JSON from a .jsonl.gz file (if it exists)."""
-    p = Path(path)
-    if not p.exists():
-        return iter(())
-
-    def _iter() -> Iterator[Dict]:
-        with gzip.open(p, mode="rt", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                yield json.loads(line)
-
-    return _iter()
 
 
 def env_bool(name: str, default: bool = False) -> bool:
