@@ -47,7 +47,7 @@ def now_epoch() -> int:
     return int(datetime.now(tz=UTC).timestamp())
 
 
-def safe_hint(s: str, max_len: int = 360) -> str:
+def safe_hint(s: str, max_len: int = 800) -> str:
     s = (s or "").replace("\n", " ").replace("\r", " ").strip()
     if len(s) > max_len:
         return s[-max_len:]
@@ -392,23 +392,52 @@ def bq_table_exists(project_id: str, dataset: str, table: str) -> bool:
     return rc == 0
 
 
-def bq_create_clustered(project_id: str, dataset: str, table: str) -> None:
-    table_ref = f"{dataset}.{table}"
-    schema = "stationID:INTEGER,station:STRING,stationType:STRING,solarSystem:STRING,dock:BOOLEAN,market:BOOLEAN"
-    rc, _, err = run_cmd_capture(
-        ["bq", f"--project_id={project_id}", "mk", "-t", f"--schema={schema}", "--clustering_fields=solarSystem", table_ref]
+def bq_ensure_table(project_id: str, location: str, dataset: str, table: str) -> None:
+    """
+    Crea la tabla si no existe mediante DDL (más robusto que bq mk),
+    y respeta CLUSTER BY solarSystem.
+    """
+    full = f"`{project_id}.{dataset}.{table}`"
+    ddl = (
+        f"CREATE TABLE IF NOT EXISTS {full} ("
+        " stationID INT64 NOT NULL,"
+        " station STRING NOT NULL,"
+        " stationType STRING NOT NULL,"
+        " solarSystem STRING NOT NULL,"
+        " dock BOOL NOT NULL,"
+        " market BOOL NOT NULL"
+        ") CLUSTER BY solarSystem"
+    )
+    rc, out, err = run_cmd_capture(
+        [
+            "bq",
+            f"--project_id={project_id}",
+            f"--location={location}",
+            "query",
+            "--use_legacy_sql=false",
+            ddl,
+        ]
     )
     if rc != 0:
-        raise RuntimeError(f"bq_mk_failed rc={rc} err={safe_hint(err)}")
+        raise RuntimeError(f"bq_ddl_failed rc={rc} out={safe_hint(out)} err={safe_hint(err)}")
 
 
-def bq_load_replace(project_id: str, dataset: str, table: str, ndjson_path: str) -> None:
+def bq_load_replace(project_id: str, location: str, dataset: str, table: str, ndjson_path: str) -> None:
     table_ref = f"{dataset}.{table}"
-    rc, _, err = run_cmd_capture(
-        ["bq", f"--project_id={project_id}", "load", "--replace", "--source_format=NEWLINE_DELIMITED_JSON", table_ref, ndjson_path]
+    rc, out, err = run_cmd_capture(
+        [
+            "bq",
+            f"--project_id={project_id}",
+            f"--location={location}",
+            "load",
+            "--replace",
+            "--source_format=NEWLINE_DELIMITED_JSON",
+            table_ref,
+            ndjson_path,
+        ]
     )
     if rc != 0:
-        raise RuntimeError(f"bq_load_failed rc={rc} err={safe_hint(err)}")
+        raise RuntimeError(f"bq_load_failed rc={rc} out={safe_hint(out)} err={safe_hint(err)}")
 
 
 def main() -> int:
@@ -441,7 +470,6 @@ def main() -> int:
         error_stage = stage
         error_hint = safe_hint(hint)
         publish_outputs()
-        # 1 línea, sin secretos, siempre visible:
         print(f"EOU_STRUCTURES_FAIL stage={error_stage} hint={error_hint}", file=sys.stderr)
         return 1
 
@@ -449,6 +477,7 @@ def main() -> int:
         project_id = _env("GCP_PROJECT_ID")
         bq_dataset = _env("BQ_DATASET")
         bq_table = _env("BQ_TABLE")
+        bq_location = _env("BQ_LOCATION", "EU")
 
         state_path = _env("STATE_ETAG_PATH")
         data_path = _env("DATA_STRUCTURES_PATH")
@@ -534,7 +563,9 @@ def main() -> int:
         temp_records: Dict[int, StructureRecord] = {sid: rec for sid, rec in old_records.items() if sid in list_set}
         for sid in list_set:
             if sid not in temp_records:
-                temp_records[sid] = StructureRecord(stationID=sid, station=None, stationType=None, solarSystem=None, dock=None, market=True, etag=None)
+                temp_records[sid] = StructureRecord(
+                    stationID=sid, station=None, stationType=None, solarSystem=None, dock=None, market=True, etag=None
+                )
 
         # Enrich
         token_idx = 0
@@ -657,7 +688,14 @@ def main() -> int:
                 if r.station is None or r.stationType is None or r.solarSystem is None or r.dock is None:
                     continue
                 rows.append(
-                    {"stationID": r.stationID, "station": r.station, "stationType": r.stationType, "solarSystem": r.solarSystem, "dock": bool(r.dock), "market": bool(r.market)}
+                    {
+                        "stationID": r.stationID,
+                        "station": r.station,
+                        "stationType": r.stationType,
+                        "solarSystem": r.solarSystem,
+                        "dock": bool(r.dock),
+                        "market": bool(r.market),
+                    }
                 )
             return rows
 
@@ -672,10 +710,7 @@ def main() -> int:
         old_bq_rows = rows_for_bq(old_records)
         new_bq_rows = rows_for_bq(temp_records)
 
-        old_data_hash = canonical_hash_records(old_records)
-        new_data_hash = canonical_hash_records(temp_records)
-        data_changed = old_data_hash != new_data_hash
-
+        data_changed = canonical_hash_records(old_records) != canonical_hash_records(temp_records)
         bq_changed = hash_rows(old_bq_rows) != hash_rows(new_bq_rows)
 
         # BigQuery rewrite (solo si corresponde)
@@ -687,10 +722,11 @@ def main() -> int:
                 for row in new_bq_rows:
                     tmpf.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
                     tmpf.write("\n")
+
             try:
                 if not bq_table_exists(project_id, bq_dataset, bq_table):
-                    bq_create_clustered(project_id, bq_dataset, bq_table)
-                bq_load_replace(project_id, bq_dataset, bq_table, ndjson_path)
+                    bq_ensure_table(project_id, bq_location, bq_dataset, bq_table)
+                bq_load_replace(project_id, bq_location, bq_dataset, bq_table, ndjson_path)
                 stage_bq = DONE_OK
             except Exception as e:
                 try:
@@ -716,17 +752,17 @@ def main() -> int:
                 return fail("write_data_gz", f"{e}", now_epoch() + 1800, write_lm=True)
 
         # STRICT state update
-        old_etag_norm = normalize_etag(old_state.get("etag") if isinstance(old_state.get("etag"), str) else None)
         etag_changed = bool(new_etag_norm) and (new_etag_norm != old_etag_norm)
-
         if etag_changed and stage_data != FAILED and stage_bq != FAILED:
             try:
-                atomic_write_text(state_path, json.dumps({"etag": str(new_etag_norm)}, ensure_ascii=False, separators=(",", ":")) + "\n")
+                atomic_write_text(
+                    state_path,
+                    json.dumps({"etag": str(new_etag_norm)}, ensure_ascii=False, separators=(",", ":")) + "\n",
+                )
                 repo_dirty = True
             except Exception as e:
                 return fail("write_state_etag", f"{e}", now_epoch() + 1800, write_lm=True)
 
-        # OK
         out_status = "completed"
         out_next = sde_next
         error_stage = ""
