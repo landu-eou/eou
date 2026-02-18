@@ -1,28 +1,4 @@
 #!/usr/bin/env python3
-"""
-EOU · ESI Structures (ESI → GH → BQ)
-
-Silencioso por defecto:
-- No imprime logs normales.
-- Si falla, emite 1 sola línea a stderr con stage + hint (sin secretos),
-  y publica outputs error_stage/error_hint para el YAML.
-
-Outputs (a $GITHUB_OUTPUT):
-  - status: completed|failed
-  - next_run_epoch: int (epoch UTC)
-  - write_last_modified: true|false
-  - last_modified_epoch: int|"" (epoch UTC si aplica)
-  - repo_dirty: true|false
-  - error_stage: string (solo útil en fallo)
-  - error_hint: string (solo útil en fallo)
-
-STRICT states update:
-- Actualiza states/structures.json SOLO si:
-  - etag cambió
-  - data stage NO falló (puede ser SKIPPED)
-  - BQ stage NO falló (puede ser SKIPPED)
-"""
-
 from __future__ import annotations
 
 import dataclasses
@@ -49,9 +25,6 @@ DONE_OK = "DONE_OK"
 FAILED = "FAILED"
 
 
-# ------------------------- helpers: env + outputs -------------------------
-
-
 def _env(name: str, default: Optional[str] = None) -> str:
     v = os.getenv(name)
     if v is None:
@@ -74,6 +47,13 @@ def now_epoch() -> int:
     return int(datetime.now(tz=UTC).timestamp())
 
 
+def safe_hint(s: str, max_len: int = 360) -> str:
+    s = (s or "").replace("\n", " ").replace("\r", " ").strip()
+    if len(s) > max_len:
+        return s[-max_len:]
+    return s
+
+
 def parse_http_date_to_epoch(http_date: Optional[str]) -> Optional[int]:
     if not http_date:
         return None
@@ -93,24 +73,7 @@ def sleep_with_jitter(seconds: int, jitter_max: int = 3) -> None:
     time.sleep(seconds + jitter)
 
 
-def safe_hint(s: str, max_len: int = 360) -> str:
-    s = (s or "").replace("\n", " ").replace("\r", " ").strip()
-    if len(s) > max_len:
-        return s[-max_len:]
-    return s
-
-
-# ------------------------- ESI throttle / rate policy -------------------------
-
-
 class RateLimiter:
-    """
-    Sliding-window max RPM limiter + dynamic slow-down.
-
-    - Base: max_rpm requests per minute
-    - Dynamic: if X-ESI-Error-Limit-Remain drops, clamp rpm lower until reset
-    """
-
     def __init__(self, max_rpm: int) -> None:
         self.base_rpm = max(1, max_rpm)
         self.window: Deque[float] = deque()
@@ -164,9 +127,6 @@ class RateLimiter:
         sleep_with_jitter(wait + 2, jitter_max=5)
 
 
-# ------------------------- HTTP (headers normalized) -------------------------
-
-
 def http_request(
     limiter: RateLimiter,
     method: str,
@@ -190,11 +150,7 @@ def http_request(
         body = e.read() if method != "HEAD" else b""
         return int(e.code), hdrs, body
     except Exception as e:
-        # Network/timeout -> treat as 503-like (mantiene lógica de 5xx)
         return 503, {}, safe_hint(str(e), 200).encode("utf-8")
-
-
-# ------------------------- ETag normalization -------------------------
 
 
 def normalize_etag(etag: Optional[str]) -> Optional[str]:
@@ -214,9 +170,6 @@ def etag_to_if_none_match(stored_etag: Optional[str]) -> Optional[str]:
     if not n:
         return None
     return f"\"{n}\""
-
-
-# ------------------------- data model -------------------------
 
 
 @dataclasses.dataclass
@@ -285,13 +238,7 @@ def write_structures_gz(path: str, records: Dict[int, StructureRecord]) -> None:
     os.close(fd)
     try:
         with open(tmp_path, "wb") as raw:
-            with gzip.GzipFile(
-                fileobj=raw,
-                mode="wb",
-                compresslevel=9,
-                mtime=0,
-                filename="structures.jsonl",
-            ) as gz:
+            with gzip.GzipFile(fileobj=raw, mode="wb", compresslevel=9, mtime=0, filename="structures.jsonl") as gz:
                 for sid in sorted(records.keys()):
                     line = json.dumps(records[sid].to_json_obj(), separators=(",", ":"), ensure_ascii=False)
                     gz.write(line.encode("utf-8"))
@@ -328,9 +275,6 @@ def atomic_write_text(path: str, text: str) -> None:
                 os.remove(tmp)
         except Exception:
             pass
-
-
-# ------------------------- SDE on-demand resolution -------------------------
 
 
 def resolve_names_on_demand(
@@ -376,9 +320,6 @@ def resolve_names_on_demand(
     return ss_map, ty_map
 
 
-# ------------------------- token selection -------------------------
-
-
 def select_access_tokens(primary_char_id: str, json1: str, json2: str) -> List[Tuple[str, str]]:
     def parse(j: str) -> Dict[str, str]:
         if not j:
@@ -404,9 +345,6 @@ def select_access_tokens(primary_char_id: str, json1: str, json2: str) -> List[T
     for cid in others:
         ordered.append((cid, tokens[cid]))
     return ordered
-
-
-# ------------------------- SDE next run -------------------------
 
 
 def compute_sde_next_run_epoch(limiter: RateLimiter, sde_url: str) -> Tuple[str, Optional[int]]:
@@ -443,9 +381,6 @@ def compute_sde_next_run_epoch(limiter: RateLimiter, sde_url: str) -> Tuple[str,
     return "err_other", None
 
 
-# ------------------------- BigQuery (drift-safe enough) -------------------------
-
-
 def run_cmd_capture(cmd: List[str]) -> Tuple[int, str, str]:
     p = subprocess.run(cmd, capture_output=True, text=True)
     return p.returncode, p.stdout or "", p.stderr or ""
@@ -461,15 +396,7 @@ def bq_create_clustered(project_id: str, dataset: str, table: str) -> None:
     table_ref = f"{dataset}.{table}"
     schema = "stationID:INTEGER,station:STRING,stationType:STRING,solarSystem:STRING,dock:BOOLEAN,market:BOOLEAN"
     rc, _, err = run_cmd_capture(
-        [
-            "bq",
-            f"--project_id={project_id}",
-            "mk",
-            "-t",
-            f"--schema={schema}",
-            "--clustering_fields=solarSystem",
-            table_ref,
-        ]
+        ["bq", f"--project_id={project_id}", "mk", "-t", f"--schema={schema}", "--clustering_fields=solarSystem", table_ref]
     )
     if rc != 0:
         raise RuntimeError(f"bq_mk_failed rc={rc} err={safe_hint(err)}")
@@ -478,21 +405,10 @@ def bq_create_clustered(project_id: str, dataset: str, table: str) -> None:
 def bq_load_replace(project_id: str, dataset: str, table: str, ndjson_path: str) -> None:
     table_ref = f"{dataset}.{table}"
     rc, _, err = run_cmd_capture(
-        [
-            "bq",
-            f"--project_id={project_id}",
-            "load",
-            "--replace",
-            "--source_format=NEWLINE_DELIMITED_JSON",
-            table_ref,
-            ndjson_path,
-        ]
+        ["bq", f"--project_id={project_id}", "load", "--replace", "--source_format=NEWLINE_DELIMITED_JSON", table_ref, ndjson_path]
     )
     if rc != 0:
         raise RuntimeError(f"bq_load_failed rc={rc} err={safe_hint(err)}")
-
-
-# ------------------------- main -------------------------
 
 
 def main() -> int:
@@ -502,7 +418,6 @@ def main() -> int:
     out_lm_epoch: Optional[int] = None
     repo_dirty = False
 
-    # diagnostic outputs
     error_stage = ""
     error_hint = ""
 
@@ -517,6 +432,18 @@ def main() -> int:
         gha_set_output("repo_dirty", "true" if repo_dirty else "false")
         gha_set_output("error_stage", error_stage)
         gha_set_output("error_hint", error_hint)
+
+    def fail(stage: str, hint: str, next_epoch: int, write_lm: bool = False) -> int:
+        nonlocal out_status, out_next, out_write_lm, error_stage, error_hint
+        out_status = "failed"
+        out_next = next_epoch
+        out_write_lm = "true" if write_lm and out_lm_epoch is not None else "false"
+        error_stage = stage
+        error_hint = safe_hint(hint)
+        publish_outputs()
+        # 1 línea, sin secretos, siempre visible:
+        print(f"EOU_STRUCTURES_FAIL stage={error_stage} hint={error_hint}", file=sys.stderr)
+        return 1
 
     try:
         project_id = _env("GCP_PROJECT_ID")
@@ -543,36 +470,20 @@ def main() -> int:
 
         tokens = select_access_tokens(primary_char_id, _env("EOU_ACCESS_TOKENS_1"), _env("EOU_ACCESS_TOKENS_2"))
         if not tokens:
-            error_stage = "token_select"
-            error_hint = "no_access_tokens"
-            out_status = "failed"
-            out_next = now_epoch() + 1800
-            publish_outputs()
-            return 1
+            return fail("token_select", "no_access_tokens", now_epoch() + 1800)
 
         ua = "landu-eou/eou (EOU structures; GitHub Actions)"
 
-        # --------------------- phase: SDE_NEXT_RUN ---------------------
-        error_stage = "sde_head"
+        # SDE_NEXT_RUN
         kind, sde_next = compute_sde_next_run_epoch(limiter, sde_url)
         if kind != "ok" or sde_next is None:
-            out_status = "failed"
             if kind == "err_420":
-                out_next = now_epoch() + 300
-                error_hint = "sde_420"
-            elif kind == "err_5xx":
-                out_next = now_epoch() + 1800
-                error_hint = "sde_5xx"
-            else:
-                out_next = now_epoch() + 1800
-                error_hint = "sde_other"
-            out_write_lm = "false"
-            out_lm_epoch = None
-            publish_outputs()
-            return 1
+                return fail("sde_head", "sde_420", now_epoch() + 300)
+            if kind == "err_5xx":
+                return fail("sde_head", "sde_5xx", now_epoch() + 1800)
+            return fail("sde_head", "sde_other", now_epoch() + 1800)
 
-        # --------------------- phase: list structures (ETag global) ---------------------
-        error_stage = "list_structures"
+        # List structures (ETag global)
         old_state = load_json_file(state_path) or {}
         old_etag_norm = normalize_etag(old_state.get("etag") if isinstance(old_state.get("etag"), str) else None)
 
@@ -599,64 +510,33 @@ def main() -> int:
             return 0
 
         if st == 420:
-            out_status = "failed"
-            out_next = now_epoch() + 300
-            error_hint = "list_420"
-            publish_outputs()
-            return 1
-
+            return fail("list_structures", "list_420", now_epoch() + 300, write_lm=True)
         if st >= 500:
-            out_status = "failed"
-            out_next = now_epoch() + 1800
-            error_hint = f"list_{st}"
-            publish_outputs()
-            return 1
-
+            return fail("list_structures", f"list_{st}", now_epoch() + 1800, write_lm=True)
         if st != 200:
-            out_status = "failed"
-            out_next = now_epoch() + 1800
-            error_hint = f"list_{st}"
-            publish_outputs()
-            return 1
+            return fail("list_structures", f"list_{st}", now_epoch() + 1800, write_lm=True)
 
         try:
             structure_list: List[int] = json.loads(body.decode("utf-8"))
-        except Exception:
-            out_status = "failed"
-            out_next = now_epoch() + 1800
-            error_hint = "list_json_decode"
-            publish_outputs()
-            return 1
+        except Exception as e:
+            return fail("list_structures", f"list_json_decode:{e}", now_epoch() + 1800, write_lm=True)
 
-        # --------------------- phase: reconcile (in memory) ---------------------
-        error_stage = "read_cache_gz"
+        # Read cache
         try:
             old_records = read_structures_gz(data_path)
         except FileNotFoundError:
             old_records = {}
         except Exception as e:
-            out_status = "failed"
-            out_next = now_epoch() + 1800
-            error_hint = f"read_cache_gz:{safe_hint(str(e))}"
-            publish_outputs()
-            return 1
+            return fail("read_cache_gz", f"{e}", now_epoch() + 1800, write_lm=True)
 
+        # Reconcile
         list_set = set(int(x) for x in structure_list)
         temp_records: Dict[int, StructureRecord] = {sid: rec for sid, rec in old_records.items() if sid in list_set}
         for sid in list_set:
             if sid not in temp_records:
-                temp_records[sid] = StructureRecord(
-                    stationID=sid,
-                    station=None,
-                    stationType=None,
-                    solarSystem=None,
-                    dock=None,
-                    market=True,
-                    etag=None,
-                )
+                temp_records[sid] = StructureRecord(stationID=sid, station=None, stationType=None, solarSystem=None, dock=None, market=True, etag=None)
 
-        # --------------------- phase: enrich (authenticated + per-record ETag) ---------------------
-        error_stage = "enrich_detail"
+        # Enrich
         token_idx = 0
 
         def current_token() -> str:
@@ -672,7 +552,6 @@ def main() -> int:
 
         need_type_ids: List[int] = []
         need_ss_ids: List[int] = []
-        fatal = False
 
         for sid in sorted(list(temp_records.keys())):
             rec = temp_records.get(sid)
@@ -694,9 +573,7 @@ def main() -> int:
 
                 if st2 == 401:
                     if retry_budget <= 0:
-                        fatal = True
-                        error_hint = "retry_budget_exhausted_401"
-                        break
+                        return fail("enrich_detail", "retry_budget_exhausted_401", now_epoch() + 300, write_lm=True)
                     retry_budget -= 1
                     rotate_token()
                     req_headers["Authorization"] = f"Bearer {current_token()}"
@@ -705,9 +582,7 @@ def main() -> int:
 
                 if st2 == 420:
                     if retry_budget <= 0:
-                        fatal = True
-                        error_hint = "retry_budget_exhausted_420"
-                        break
+                        return fail("enrich_detail", "retry_budget_exhausted_420", now_epoch() + 300, write_lm=True)
                     retry_budget -= 1
                     sleep_with_jitter(30, jitter_max=5)
                     continue
@@ -758,30 +633,11 @@ def main() -> int:
 
                 break
 
-            if fatal:
-                break
-
-        if fatal:
-            out_status = "failed"
-            out_next = now_epoch() + 300
-            publish_outputs()
-            return 1
-
-        # --------------------- resolve SDE names on-demand ---------------------
-        error_stage = "resolve_sde"
+        # Resolve SDE
         try:
-            ss_map, ty_map = resolve_names_on_demand(
-                sde_solarsystems_path=sde_solarsystems_path,
-                sde_types_path=sde_types_path,
-                needed_solarsystems=need_ss_ids,
-                needed_types=need_type_ids,
-            )
+            ss_map, ty_map = resolve_names_on_demand(sde_solarsystems_path, sde_types_path, need_ss_ids, need_type_ids)
         except Exception as e:
-            out_status = "failed"
-            out_next = now_epoch() + 1800
-            error_hint = f"resolve_sde:{safe_hint(str(e))}"
-            publish_outputs()
-            return 1
+            return fail("resolve_sde", f"{e}", now_epoch() + 1800, write_lm=True)
 
         for r in temp_records.values():
             if r._solar_system_id is not None:
@@ -791,7 +647,7 @@ def main() -> int:
             r._solar_system_id = None
             r._type_id = None
 
-        # --------------------- change detection ---------------------
+        # Change detection
         def rows_for_bq(records: Dict[int, StructureRecord]) -> List[Dict[str, Any]]:
             rows: List[Dict[str, Any]] = []
             for sid in sorted(records.keys()):
@@ -801,14 +657,7 @@ def main() -> int:
                 if r.station is None or r.stationType is None or r.solarSystem is None or r.dock is None:
                     continue
                 rows.append(
-                    {
-                        "stationID": r.stationID,
-                        "station": r.station,
-                        "stationType": r.stationType,
-                        "solarSystem": r.solarSystem,
-                        "dock": bool(r.dock),
-                        "market": bool(r.market),
-                    }
+                    {"stationID": r.stationID, "station": r.station, "stationType": r.stationType, "solarSystem": r.solarSystem, "dock": bool(r.dock), "market": bool(r.market)}
                 )
             return rows
 
@@ -829,94 +678,55 @@ def main() -> int:
 
         bq_changed = hash_rows(old_bq_rows) != hash_rows(new_bq_rows)
 
-        # --------------------- phase: BigQuery rewrite (solo si corresponde) ---------------------
+        # BigQuery rewrite (solo si corresponde)
         stage_bq = SKIPPED
         if bq_changed and len(new_bq_rows) > 0:
             stage_bq = FAILED
-            error_stage = "bq_load"
-
-            with tempfile.NamedTemporaryFile(
-                "w",
-                encoding="utf-8",
-                delete=False,
-                prefix="eou_structures_",
-                suffix=".jsonl",
-            ) as tmpf:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, prefix="eou_structures_", suffix=".jsonl") as tmpf:
                 ndjson_path = tmpf.name
                 for row in new_bq_rows:
                     tmpf.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
                     tmpf.write("\n")
-
             try:
                 if not bq_table_exists(project_id, bq_dataset, bq_table):
-                    error_stage = "bq_create"
                     bq_create_clustered(project_id, bq_dataset, bq_table)
-
-                error_stage = "bq_load"
                 bq_load_replace(project_id, bq_dataset, bq_table, ndjson_path)
-
                 stage_bq = DONE_OK
-                error_stage = ""
-                error_hint = ""
             except Exception as e:
-                stage_bq = FAILED
-                error_hint = safe_hint(str(e))
+                try:
+                    os.remove(ndjson_path)
+                except Exception:
+                    pass
+                return fail("bq_load", f"{e}", now_epoch() + 1800, write_lm=True)
             finally:
                 try:
                     os.remove(ndjson_path)
                 except Exception:
                     pass
 
-            if stage_bq == FAILED:
-                out_status = "failed"
-                out_next = now_epoch() + 1800
-                publish_outputs()
-                return 1
-
-        # --------------------- phase: write data file (solo si cambió) ---------------------
+        # Data write (solo si cambió)
         stage_data = SKIPPED
         if data_changed:
             stage_data = FAILED
-            error_stage = "write_data_gz"
             try:
                 write_structures_gz(data_path, temp_records)
                 repo_dirty = True
                 stage_data = DONE_OK
-                error_stage = ""
-                error_hint = ""
             except Exception as e:
-                stage_data = FAILED
-                out_status = "failed"
-                out_next = now_epoch() + 1800
-                error_hint = f"write_data_gz:{safe_hint(str(e))}"
-                publish_outputs()
-                return 1
+                return fail("write_data_gz", f"{e}", now_epoch() + 1800, write_lm=True)
 
-        # --------------------- STRICT state update (etag del listado) ---------------------
-        error_stage = "write_state_etag"
-        stage_state_update = SKIPPED
+        # STRICT state update
+        old_etag_norm = normalize_etag(old_state.get("etag") if isinstance(old_state.get("etag"), str) else None)
         etag_changed = bool(new_etag_norm) and (new_etag_norm != old_etag_norm)
 
         if etag_changed and stage_data != FAILED and stage_bq != FAILED:
-            stage_state_update = FAILED
             try:
-                atomic_write_text(
-                    state_path,
-                    json.dumps({"etag": str(new_etag_norm)}, ensure_ascii=False, separators=(",", ":")) + "\n",
-                )
+                atomic_write_text(state_path, json.dumps({"etag": str(new_etag_norm)}, ensure_ascii=False, separators=(",", ":")) + "\n")
                 repo_dirty = True
-                stage_state_update = DONE_OK
-                error_stage = ""
-                error_hint = ""
             except Exception as e:
-                stage_state_update = FAILED
-                out_status = "failed"
-                out_next = now_epoch() + 1800
-                error_hint = f"write_state_etag:{safe_hint(str(e))}"
-                publish_outputs()
-                return 1
+                return fail("write_state_etag", f"{e}", now_epoch() + 1800, write_lm=True)
 
-        # --------------------- final ---------------------
+        # OK
         out_status = "completed"
         out_next = sde_next
         error_stage = ""
@@ -925,16 +735,7 @@ def main() -> int:
         return 0
 
     except Exception as e:
-        # Fallback: 1 línea a stderr + outputs.
-        if not error_stage:
-            error_stage = "unknown"
-        if not error_hint:
-            error_hint = safe_hint(str(e))
-        out_status = "failed"
-        out_next = now_epoch() + 1800
-        publish_outputs()
-        print(f"EOU_STRUCTURES_FAIL stage={error_stage} hint={error_hint}", file=sys.stderr)
-        return 1
+        return fail("unknown", str(e), now_epoch() + 1800, write_lm=True)
 
 
 if __name__ == "__main__":
