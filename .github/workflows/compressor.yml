@@ -37,4 +37,7 @@ jobs:
 
           git add -A
           git commit -m "Compress ${{ github.event.inputs.file_path }} to .gz" || echo "No changes to commit"
+
+          git pull --rebase origin main
           git push
+
