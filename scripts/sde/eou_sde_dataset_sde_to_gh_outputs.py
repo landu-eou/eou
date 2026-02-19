@@ -740,17 +740,39 @@ def build_excluded_market_types(
 # -----------------------------
 
 def load_existing_packaged(existing_path: Path) -> Dict[int, float]:
+    """
+    Reads data/esi/packaged.jsonl.gz in a tolerant way.
+
+    Accepts keys:
+      - packaged
+      - packagedVolume
+      - packaged_volume
+
+    Ignores rows without a packaged value (legacy or malformed).
+    """
     rows = read_jsonl_gz(existing_path)
     out: Dict[int, float] = {}
     for r in rows:
         try:
-            tid = int(r["typeID"])
-            pv = float(r["packaged"])
+            tid = int(r.get("typeID"))
         except Exception:
             continue
-        out[tid] = pv
-    return out
 
+        pv = r.get("packaged")
+        if pv is None:
+            pv = r.get("packagedVolume")
+        if pv is None:
+            pv = r.get("packaged_volume")
+
+        if pv is None:
+            # legacy line without packaged (or corrupted) -> ignore
+            continue
+
+        try:
+            out[tid] = float(pv)
+        except Exception:
+            continue
+    return out
 
 def build_packaged_updated(
     *,
