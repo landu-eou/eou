@@ -1,31 +1,3 @@
-# -----------------------------------------------------------------------------
-# File tree used by this workflow (SDE → GH)
-#
-# .github/
-#   workflows/
-#     eou_sde_dataset_sde_to_gh.yml
-#
-# scripts/
-#   sde/
-#     eou_sde_dataset_sde_to_gh_outputs.py
-#     eou_sde_dataset_sde_to_gh_io.py
-#     eou_sde_dataset_sde_to_gh_names.py
-#     eou_sde_dataset_sde_to_gh_cynodock.py
-#
-# data/
-#   sde/
-#     regions.jsonl.gz
-#     constellations.jsonl.gz
-#     solarsystems.jsonl.gz
-#     stations.jsonl.gz
-#     stargates.jsonl.gz
-#     types.jsonl.gz
-#     corporations.jsonl.gz
-#
-# states/
-#   sde.json
-# -----------------------------------------------------------------------------
-
 name: SDE Dataset (SDE → GH)
 
 on:
@@ -42,12 +14,8 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  # Necesario para consultar runs del workflow vía REST API (guard)
-  # y para disparar otro workflow vía workflow_dispatch (Actions: write).
   actions: write
-  # Necesario para hacer commit/push de outputs + state
   contents: write
-  # Necesario para OIDC/WIF (Google auth)
   id-token: write
 
 jobs:
@@ -57,7 +25,7 @@ jobs:
     env:
       WORKFLOW_FILE: eou_sde_dataset_sde_to_gh.yml
 
-      SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
+      SHEETS_ID: 1fnoPr1Ho0uQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "4"
 
@@ -256,13 +224,17 @@ jobs:
       # =====================================================================
       # 6) Build (solo si needs_update=true)
       # =====================================================================
-      - name: Build outputs (SDE → data/sde/*.jsonl.gz)
+      - name: Build outputs (SDE + packaged + marketTree + excluded)
         if: steps.decide.outputs.needs_update == 'true'
         id: build
+        env:
+          # Si quieres ajustar agresividad/tiempo:
+          ESI_MIN_DELAY_MS: "300"
+          ESI_MAX_RETRIES: "8"
         run: |
           set -euo pipefail
 
-          mkdir -p .tmp/sde/out data/sde states
+          mkdir -p .tmp/sde/out_sde .tmp/sde/out_esi data/sde data/esi states
 
           curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused \
             -L -o .tmp/sde/sde.zip \
@@ -270,13 +242,27 @@ jobs:
 
           python scripts/sde/eou_sde_dataset_sde_to_gh_outputs.py \
             --zip .tmp/sde/sde.zip \
-            --out .tmp/sde/out
+            --out-sde .tmp/sde/out_sde \
+            --out-esi .tmp/sde/out_esi \
+            --existing-packaged data/esi/packaged.jsonl.gz \
+            --exclude-config config/excludeMarketTypes.txt \
+            --exclude-state states/excludeMarketTypes.json
 
           jq -n --arg etag "${{ steps.sde_headers.outputs.etag }}" '{etag:$etag}' > states/sde.json
 
-          for f in regions constellations solarsystems stations stargates types corporations; do
-            mv -f ".tmp/sde/out/${f}.jsonl.gz" "data/sde/${f}.jsonl.gz"
+          # Move SDE outputs (atomic replace)
+          for f in regions constellations solarsystems stations stargates types corporations marketTree excludedMarketTypes; do
+            mv -f ".tmp/sde/out_sde/${f}.jsonl.gz" "data/sde/${f}.jsonl.gz"
           done
+          mv -f ".tmp/sde/out_sde/marketTree.txt" "data/sde/marketTree.txt"
+
+          # Move ESI packaged output
+          mv -f ".tmp/sde/out_esi/packaged.jsonl.gz" "data/esi/packaged.jsonl.gz"
+
+          # Move exclude state (content etag)
+          if [ -f ".tmp/sde/out_sde/excludeMarketTypes.state.json" ]; then
+            mv -f ".tmp/sde/out_sde/excludeMarketTypes.state.json" "states/excludeMarketTypes.json"
+          fi
 
           echo "updated=true" >> "$GITHUB_OUTPUT"
 
@@ -288,7 +274,13 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add data/sde/*.jsonl.gz states/sde.json
+          git add \
+            data/sde/*.jsonl.gz \
+            data/sde/marketTree.txt \
+            data/esi/packaged.jsonl.gz \
+            states/sde.json \
+            states/excludeMarketTypes.json
+
           if git diff --cached --quiet; then
             exit 0
           fi
@@ -298,7 +290,7 @@ jobs:
           git push
 
       # =====================================================================
-      # 6.5) Trigger routes workflow (solo en éxito y solo si hubo update/force)
+      # 6.5) Trigger routes workflow (main) - on success and update/force
       # =====================================================================
       - name: Trigger routes workflow (main)
         if: success() && (steps.build.outputs.updated == 'true' || steps.decide.outputs.forced == 'true')
@@ -319,7 +311,7 @@ jobs:
             -d '{"ref":"main"}'
 
       # =====================================================================
-      # 7) Finalize (Sheets)
+      # 7) Finalize (Sheets) - igual que tu versión (no lo repito aquí)
       # =====================================================================
       - name: Sheets - finalize (completed)
         if: success()
