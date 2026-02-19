@@ -10,12 +10,14 @@ siguiendo estas reglas:
 - "Visitar" = tener waypoint.
 - Ruta interna por constelación: camino que visita todos sus sistemas con mínimo nº total de stargates
   (usando DP exacta estilo Held–Karp sobre distancias BFS).
-- Encadenado: desde el punto final de constelación, ir al sistema más cercano (en saltos) de una constelación
+- Encadenado en región: desde el punto final de constelación, ir al sistema más cercano (en saltos) de una constelación
   no visitada dentro de la región; repetir hasta completar región.
-- Al acabar región (waypoint fin de región): waypoint a la estación NPC más cercana (BFS),
-  y luego volver al waypoint fin de región si la estación está en otro sistema (para cumplir “no de la estación”).
+- Al acabar región (waypoint fin de región): waypoint a la estación NPC más cercana (BFS).
+  *IMPORTANTE*: NO se vuelve físicamente al fin de región. El fin de región se usa como ANCLA LÓGICA
+  para calcular la siguiente región (dentro del bloque), pero no se imprime un "retorno" obligatorio.
 - Regiones se visitan por bloques: no se pasa al siguiente bloque hasta completar el actual.
-  Dentro de un bloque, la siguiente región es la más cercana (en saltos) al waypoint fin de región.
+  Dentro de un bloque, la siguiente región es la más cercana (en saltos) al waypoint fin de región (ANCLA),
+  no a la estación.
 
 Datos: usa SOLO estos ficheros del repo:
 - data/sde/regions.jsonl.gz
@@ -175,8 +177,6 @@ def bfs_nearest_by_level(
         next_frontier: List[int] = []
         hits: List[int] = []
 
-        # Procesamos en orden determinista (frontier ya determinista si adj lo es),
-        # y aun así recogemos hits para elegir min() si hay empates.
         for node in frontier:
             for nb in adj.get(node, []):
                 if nb in seen:
@@ -232,124 +232,6 @@ def bfs_distances_to_targets(
 
 
 # ---------------------------
-# Held–Karp (Hamiltonian path, fixed start)
-# ---------------------------
-
-def held_karp_path_fixed_start(
-    nodes: List[int],
-    start_node: int,
-    dist_matrix: List[List[int]],
-    next_target_distance_fn,
-) -> List[int]:
-    """
-    Camino mínimo que empieza en start_node y visita todos los nodes exactamente una vez.
-    Final libre. Si hay empates de coste, desempata por:
-      1) menor dist al siguiente objetivo (next_target_distance_fn(end_node))
-      2) menor end_node ID
-    """
-    n = len(nodes)
-    if n == 0:
-        return []
-    if n == 1:
-        return [start_node]
-
-    # Reordenamos para que start sea índice 0
-    if start_node not in nodes:
-        raise ValueError("start_node must be in nodes")
-
-    if nodes[0] != start_node:
-        i = nodes.index(start_node)
-        nodes = [nodes[i]] + nodes[:i] + nodes[i+1:]
-
-        # Reordenar dist_matrix según nuevo orden
-        old_nodes = nodes[:]  # not used
-        # Para reordenar correctamente, necesitamos el mapeo desde el orden original.
-        # Rehacemos dist_matrix a partir de un dict base si hace falta. Aquí asumimos
-        # que dist_matrix ya corresponde al 'nodes' original antes del swap.
-        # Para evitar confusiones, esta función se llama con nodes ya ordenados con start primero.
-        # (ver plan_constellation)
-        raise RuntimeError("Internal: nodes must be provided with start_node first")
-
-    # DP sobre nodos 1..n-1 (bitmask)
-    size = 1 << (n - 1)
-    INF = 10**18
-    dp = [[INF] * n for _ in range(size)]
-    parent: List[List[Optional[int]]] = [[None] * n for _ in range(size)]
-
-    # init
-    for j in range(1, n):
-        m = 1 << (j - 1)
-        dp[m][j] = dist_matrix[0][j]
-        parent[m][j] = 0
-
-    # transitions
-    for mask in range(size):
-        for j in range(1, n):
-            bitj = 1 << (j - 1)
-            if not (mask & bitj):
-                continue
-            prev_mask = mask ^ bitj
-            if prev_mask == 0:
-                continue
-            best = dp[mask][j]
-            best_k = parent[mask][j]
-            for k in range(1, n):
-                bitk = 1 << (k - 1)
-                if not (prev_mask & bitk):
-                    continue
-                cand = dp[prev_mask][k] + dist_matrix[k][j]
-                if cand < best:
-                    best = cand
-                    best_k = k
-            dp[mask][j] = best
-            parent[mask][j] = best_k
-
-    full = size - 1
-
-    # choose best end
-    best_end = None
-    best_cost = INF
-    best_next = INF
-
-    for j in range(1, n):
-        cost = dp[full][j]
-        if cost >= INF:
-            continue
-        end_node = nodes[j]
-        next_d = next_target_distance_fn(end_node)
-        if (
-            cost < best_cost
-            or (cost == best_cost and next_d < best_next)
-            or (cost == best_cost and next_d == best_next and end_node < (best_end if best_end is not None else 10**18))
-        ):
-            best_cost = cost
-            best_next = next_d
-            best_end = j
-
-    if best_end is None:
-        raise RuntimeError("No Hamiltonian path found (graph disconnected?)")
-
-    # reconstruct order (indices)
-    order_idx: List[int] = [best_end]
-    mask = full
-    j = best_end
-
-    while True:
-        pj = parent[mask][j]
-        if pj is None:
-            raise RuntimeError("Failed to reconstruct path")
-        if pj == 0:
-            order_idx.append(0)
-            break
-        mask = mask ^ (1 << (j - 1))
-        j = pj
-        order_idx.append(j)
-
-    order_idx.reverse()
-    return [nodes[i] for i in order_idx]
-
-
-# ---------------------------
 # Core planner
 # ---------------------------
 
@@ -383,6 +265,7 @@ class Planner:
                 lst.sort()
 
     def _append_waypoint(self, out: List[int], wp: int) -> None:
+        # Evita duplicados consecutivos
         if not out or out[-1] != wp:
             out.append(wp)
 
@@ -423,7 +306,7 @@ class Planner:
     def _nearest_station_id(self, start: int) -> Optional[Tuple[int, int, int]]:
         """
         Devuelve (stationID, stationSystemID, dist) de la estación más cercana por BFS.
-        Si hay varias, elige menor stationID.
+        Si hay varias a misma distancia, elige menor stationID (vía ordenación por sistema+min station).
         """
         def is_target_system(sid: int) -> bool:
             return sid in self.stations_in_system and len(self.stations_in_system[sid]) > 0
@@ -435,67 +318,18 @@ class Planner:
         station_id = min(self.stations_in_system[sys_id])
         return (station_id, sys_id, dist)
 
-    def _constellation_path(
-        self,
-        const_systems: List[int],
-        start_system: int,
-        next_target_distance_fn,
-    ) -> List[int]:
-        """
-        Camino mínimo dentro de una constelación empezando en start_system.
-        """
-        nodes = list(const_systems)
-        if start_system not in nodes:
-            # si entramos a una constelación por un sistema externo (no debería),
-            # forzamos start al menor ID por determinismo.
-            start_system = nodes[0]
-
-        # Ordenamos nodes con start primero, resto ascendente
-        rest = sorted([x for x in nodes if x != start_system])
-        nodes_ordered = [start_system] + rest
-        n = len(nodes_ordered)
-
-        # Distancias BFS entre nodos (parada temprana)
-        idx = {sid: i for i, sid in enumerate(nodes_ordered)}
-        dist_m = [[0] * n for _ in range(n)]
-        nodes_set = set(nodes_ordered)
-
-        for sid in nodes_ordered:
-            targets = nodes_set - {sid}
-            dmap = bfs_distances_to_targets(sid, self.adj, targets)
-            for t, d in dmap.items():
-                dist_m[idx[sid]][idx[t]] = d
-
-        # Verificación conectividad mínima (si algún 0 fuera de diagonal, no conectado)
-        for i in range(n):
-            for j in range(n):
-                if i == j:
-                    continue
-                if dist_m[i][j] == 0:
-                    raise RuntimeError(
-                        f"Constellation appears disconnected in stargate graph: "
-                        f"{self.systems[nodes_ordered[i]].name} -> {self.systems[nodes_ordered[j]].name}"
-                    )
-
-        # DP exacta (Held–Karp path) con start fijo (índice 0)
-        # Nota: held_karp_path_fixed_start exige nodes con start primero y no reordena.
-        def next_dist(end_node: int) -> int:
-            return next_target_distance_fn(end_node)
-
-        # implementamos DP aquí sin reordenar
-        path = self._held_karp_nodes_already_ordered(nodes_ordered, dist_m, next_dist)
-        return path
-
     @staticmethod
-    def _held_karp_nodes_already_ordered(
-        nodes_ordered: List[int],
+    def _held_karp_path_nodes_ordered_start_first(
+        nodes: List[int],
         dist_m: List[List[int]],
         next_target_distance_fn,
     ) -> List[int]:
         """
-        Held–Karp path con nodes_ordered donde start es nodes_ordered[0].
+        Held–Karp para camino Hamiltoniano mínimo:
+        - nodes[0] es el inicio fijo
+        - final libre
+        - desempate: menor distancia al "siguiente objetivo" y luego menor end_id
         """
-        nodes = nodes_ordered
         n = len(nodes)
         if n == 1:
             return [nodes[0]]
@@ -505,11 +339,13 @@ class Planner:
         dp = [[INF] * n for _ in range(size)]
         parent: List[List[Optional[int]]] = [[None] * n for _ in range(size)]
 
+        # init: start(0) -> j
         for j in range(1, n):
             m = 1 << (j - 1)
             dp[m][j] = dist_m[0][j]
             parent[m][j] = 0
 
+        # transitions
         for mask in range(size):
             for j in range(1, n):
                 bitj = 1 << (j - 1)
@@ -533,6 +369,7 @@ class Planner:
 
         full = size - 1
 
+        # choose best end
         best_end_idx = None
         best_cost = INF
         best_next = INF
@@ -575,6 +412,49 @@ class Planner:
         order_idx.reverse()
         return [nodes[i] for i in order_idx]
 
+    def _constellation_path(
+        self,
+        const_systems: List[int],
+        start_system: int,
+        next_target_distance_fn,
+    ) -> List[int]:
+        """
+        Camino mínimo dentro de una constelación empezando en start_system.
+        """
+        nodes_all = list(const_systems)
+        if start_system not in nodes_all:
+            # entrada "rara": usa menor ID por determinismo
+            start_system = min(nodes_all)
+
+        # start primero, resto ascendente
+        rest = [x for x in nodes_all if x != start_system]
+        rest.sort()
+        nodes = [start_system] + rest
+        n = len(nodes)
+
+        idx = {sid: i for i, sid in enumerate(nodes)}
+        dist_m = [[0] * n for _ in range(n)]
+        nodes_set = set(nodes)
+
+        for sid in nodes:
+            targets = nodes_set - {sid}
+            dmap = bfs_distances_to_targets(sid, self.adj, targets)
+            for t, d in dmap.items():
+                dist_m[idx[sid]][idx[t]] = d
+
+        # conectividad mínima (si 0 fuera de diagonal, no hay conexión)
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
+                if dist_m[i][j] == 0:
+                    raise RuntimeError(
+                        f"Constellation disconnected in stargate graph: "
+                        f"{self.systems[nodes[i]].name} -> {self.systems[nodes[j]].name}"
+                    )
+
+        return self._held_karp_path_nodes_ordered_start_first(nodes, dist_m, next_target_distance_fn)
+
     def plan_region(
         self,
         region: str,
@@ -584,26 +464,26 @@ class Planner:
         """
         Planifica una región completa:
         - Constelación a constelación con ruta interna mínima por constelación.
-        - Devuelve (waypoints, region_end_system).
+        Devuelve:
+          (waypoints, region_end_system) donde region_end_system es el ANCLA lógica de la región.
         """
         if entry_system not in self.reachable:
             raise RuntimeError(f"Entry system {entry_system} not reachable")
 
         waypoints: List[int] = []
 
-        # constellations in region (con sistemas)
         const_map = self.systems_by_region_const.get(region, {})
         if not const_map:
             raise RuntimeError(f"No reachable systems found for region: {region}")
 
         visited_constellations: Set[str] = set()
-
         current_system = entry_system
 
         while True:
             meta = self.systems[current_system]
+
+            # si estamos fuera de región por entrada borde, ajusta a algún sistema de la región
             if meta.region != region:
-                # si entramos por frontera, ajusta a región (por si acaso)
                 nearest_in_region = self._nearest_system_in_regions(current_system, {region})
                 if nearest_in_region is None:
                     raise RuntimeError(f"Cannot find any system in region {region} from {current_system}")
@@ -611,11 +491,8 @@ class Planner:
                 meta = self.systems[current_system]
 
             current_const = meta.constellation
-            if current_const not in const_map:
-                # constelación sin sistemas (debería no ocurrir)
-                visited_constellations.add(current_const)
 
-            # si la constelación ya está visitada (puede pasar si entry cae ahí), busca siguiente
+            # Si la const ya está visitada, salta a la siguiente no visitada
             if current_const in visited_constellations:
                 nxt = self._nearest_system_in_unvisited_constellations(current_system, region, visited_constellations)
                 if nxt is None:
@@ -623,17 +500,22 @@ class Planner:
                 current_system = nxt
                 continue
 
-            # sistema objetivo: todos los sistemas de esta constelación (reachable)
-            systems_in_const = const_map[current_const]
+            # Marca constelación visitada
             visited_constellations.add(current_const)
 
-            # define función de “siguiente objetivo” para desempatar el final del camino
-            # 1) si quedan constelaciones en región: distancia al sistema más cercano en constelación no visitada
-            # 2) si no quedan: distancia al sistema más cercano de una región pendiente del bloque
-            # (esto ayuda a elegir endpoint del último tramo dentro de región)
+            systems_in_const = const_map.get(current_const, [])
+            if not systems_in_const:
+                # constelación sin sistemas reachable (extraño), sigue
+                nxt = self._nearest_system_in_unvisited_constellations(current_system, region, visited_constellations)
+                if nxt is None:
+                    break
+                current_system = nxt
+                continue
+
             remaining_consts_exist = any(c not in visited_constellations for c in const_map.keys())
 
             def next_target_distance_fn(end_sid: int) -> int:
+                # 1) si quedan constelaciones en la región: distancia al sistema más cercano de una const no visitada
                 if remaining_consts_exist:
                     def is_target(sid: int) -> bool:
                         m = self.systems.get(sid)
@@ -645,7 +527,8 @@ class Planner:
                         )
                     res = bfs_nearest_by_level(end_sid, self.adj, is_target)
                     return res[1] if res else 10**9
-                # si región termina, miramos hacia regiones pendientes del bloque
+
+                # 2) si región termina: distancia a alguna región pendiente del bloque (para escoger buen endpoint)
                 if pending_regions_in_block:
                     def is_target2(sid: int) -> bool:
                         m = self.systems.get(sid)
@@ -656,27 +539,31 @@ class Planner:
                         )
                     res2 = bfs_nearest_by_level(end_sid, self.adj, is_target2)
                     return res2[1] if res2 else 10**9
+
                 return 10**9
 
-            # ruta mínima dentro de constelación
+            # Ruta mínima dentro de constelación
             path = self._constellation_path(systems_in_const, current_system, next_target_distance_fn)
             for sid in path:
                 self._append_waypoint(waypoints, sid)
 
             current_system = path[-1]
 
-            # buscamos siguiente constelación no visitada dentro de región
+            # Siguiente constelación no visitada dentro de la región
             nxt = self._nearest_system_in_unvisited_constellations(current_system, region, visited_constellations)
             if nxt is None:
                 break
             current_system = nxt
 
-        region_end = current_system
-        return waypoints, region_end
+        region_end_system = current_system
+        return waypoints, region_end_system
 
     def plan_all(self) -> List[int]:
         """
         Plan global por bloques.
+        Importante:
+          - current_anchor es el ANCLA lógica (fin de región) para elegir la siguiente región.
+          - out contiene waypoints "físicos" (incluye stationID), pero NO afecta a la elección de la siguiente región.
         """
         if START_SYSTEM_NAME not in self.system_id_by_name:
             raise RuntimeError(f"Start system not found: {START_SYSTEM_NAME}")
@@ -686,63 +573,60 @@ class Planner:
             raise RuntimeError("Start system is not reachable in stargate graph")
 
         out: List[int] = []
+        current_anchor = start_system  # ancla lógica (al inicio, Jita)
 
-        current_anchor = start_system
-
-        # Pre-filtra regiones existentes en el SDE (por nombre)
+        # Filtra regiones existentes en el SDE (por nombre)
         all_region_names_in_sde = {m.region for m in self.systems.values()}
-        blocks = []
+        blocks: List[List[str]] = []
         for block in self.regions_in_blocks:
             blocks.append([r for r in block if r in all_region_names_in_sde])
 
-        # Forzamos que el primer bloque incluya la región de Jita si no está (por seguridad)
+        # Asegura que la región de Jita esté en el primer bloque
         jita_region = self.systems[start_system].region
         if blocks and jita_region not in blocks[0]:
             blocks[0] = [jita_region] + blocks[0]
 
         for bi, block_regions in enumerate(blocks, start=1):
-            pending = set(block_regions)
+            pending: Set[str] = set(block_regions)
 
-            # si estamos al inicio del primer bloque, arrancamos en la región de Jita
-            # si no, elegimos la región más cercana por BFS desde current_anchor
             while pending:
-                # elige región actual
-                current_region = self.systems[current_anchor].region
-                if current_region in pending:
+                # Región “candidata” si el ancla ya está en una región pendiente
+                anchor_region = self.systems[current_anchor].region
+
+                if anchor_region in pending:
                     entry_system = current_anchor
-                    region_to_visit = current_region
+                    region_to_visit = anchor_region
                 else:
+                    # Elige región pendiente más cercana EN SALTOS desde el ANCLA
                     entry_system = self._nearest_system_in_regions(current_anchor, pending)
                     if entry_system is None:
-                        raise RuntimeError(f"Cannot reach any pending region in block {bi} from anchor {current_anchor}")
+                        raise RuntimeError(
+                            f"Cannot reach any pending region in block {bi} from anchor {current_anchor}"
+                        )
                     region_to_visit = self.systems[entry_system].region
 
                 pending.remove(region_to_visit)
 
-                # planifica región
+                # Planifica región completa
                 region_waypoints, region_end = self.plan_region(
                     region=region_to_visit,
                     entry_system=entry_system,
                     pending_regions_in_block=set(pending),
                 )
 
-                # añade los waypoints de región
+                # Emite waypoints de región (sistemas)
                 for wp in region_waypoints:
                     self._append_waypoint(out, wp)
 
-                # waypoint fin de región
+                # Fijamos ANCLA lógica al fin de región
                 current_anchor = region_end
 
-                # estación NPC más cercana + retorno al fin de región si la estación está en otro sistema
+                # Añade estación NPC más cercana (waypoint físico),
+                # PERO NO volvemos al ancla: el ancla solo se usa para calcular la siguiente región.
                 station_info = self._nearest_station_id(current_anchor)
                 if station_info is not None:
-                    station_id, station_sys, _dist = station_info
+                    station_id, _station_sys, _dist = station_info
                     self._append_waypoint(out, station_id)
-                    if station_sys != current_anchor:
-                        # retorno explícito al waypoint fin de región (cumple “no de la estación”)
-                        self._append_waypoint(out, current_anchor)
-
-                # siguiente región (si queda) será desde current_anchor por BFS en el bucle
 
         return out
 
@@ -792,7 +676,7 @@ def build_everything() -> Planner:
         if "↔" in group:
             a, b = group.split("↔", 1)
             return a.strip(), b.strip()
-        # fallback: intenta otros separadores si existieran
+        # fallback si cambiara el separador
         for sep in ["<->", "↔︎", " - "]:
             if sep in group:
                 a, b = group.split(sep, 1)
