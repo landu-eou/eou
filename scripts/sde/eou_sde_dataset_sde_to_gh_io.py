@@ -1,7 +1,14 @@
+"""
+EOU · SDE Dataset (SDE → GH) — I/O helpers
+
+Only uses the official CCP SDE JSONL ZIP (plus small local caches like packaged.jsonl.gz).
+
+This module is intentionally dependency-free (stdlib only).
+"""
+
 from __future__ import annotations
 
 import gzip
-import hashlib
 import io
 import json
 import os
@@ -12,6 +19,11 @@ import zipfile
 
 
 def find_zip_member(zf: zipfile.ZipFile, basename: str) -> str:
+    """Find a member in the ZIP by basename.
+
+    The official CCP ZIP sometimes includes files at the root or under a folder.
+    We match on suffix to be robust.
+    """
     candidates = [n for n in zf.namelist() if n.endswith("/" + basename) or n == basename]
     if not candidates:
         raise KeyError(f"{basename} not found in ZIP")
@@ -19,6 +31,7 @@ def find_zip_member(zf: zipfile.ZipFile, basename: str) -> str:
 
 
 def iter_jsonl_from_zip(zf: zipfile.ZipFile, basename: str) -> Iterator[Dict]:
+    """Yield JSON objects from a JSONL file inside a ZIP."""
     member = find_zip_member(zf, basename)
     with zf.open(member, "r") as raw:
         text = io.TextIOWrapper(raw, encoding="utf-8")
@@ -29,56 +42,40 @@ def iter_jsonl_from_zip(zf: zipfile.ZipFile, basename: str) -> Iterator[Dict]:
             yield json.loads(line)
 
 
-def read_jsonl_gz(path: str | Path) -> List[Dict]:
-    """
-    Robust reader for .jsonl.gz.
+def read_jsonl_gz(path: str | Path, *, max_bad_lines: int = 20) -> List[Dict]:
+    """Read newline-delimited JSON from a .jsonl.gz file.
 
-    Supports:
-      - NDJSON (one JSON object per line)
-      - A single JSON array (legacy / accidental format)
-
-    Behavior:
-      - Skips invalid lines instead of failing the whole run.
+    Robust mode: if a line is invalid JSON, we skip it and keep going.
+    This prevents a single corrupted line from killing the whole workflow.
     """
     path = Path(path)
-    if not path.exists():
-        return []
-
-    with gzip.open(path, mode="rt", encoding="utf-8", errors="replace") as f:
-        content = f.read()
-
-    if not content.strip():
-        return []
-
-    s = content.lstrip()
-
-    # Legacy/accidental: JSON array
-    if s.startswith("["):
-        try:
-            obj = json.loads(content)
-            if isinstance(obj, list):
-                return [x for x in obj if isinstance(x, dict)]
-            return []
-        except json.JSONDecodeError:
-            # fall through to line-based parsing
-            pass
-
     out: List[Dict] = []
-    for line in content.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            # tolerate corrupted/legacy lines
-            continue
-        if isinstance(obj, dict):
-            out.append(obj)
+    if not path.exists():
+        return out
+
+    bad = 0
+    with gzip.open(path, mode="rt", encoding="utf-8") as f:
+        for i, line in enumerate(f, start=1):
+            s = line.strip()
+            if not s:
+                continue
+            try:
+                out.append(json.loads(s))
+            except json.JSONDecodeError:
+                bad += 1
+                if bad <= max_bad_lines:
+                    # Keep it short; runner logs are precious.
+                    print(f"[WARN] Invalid JSON in {path} at line {i} (skipping).")
+                continue
+
+    if bad > max_bad_lines:
+        print(f"[WARN] Skipped {bad} invalid JSON lines in {path} (showed first {max_bad_lines}).")
+
     return out
 
 
 def write_jsonl_gz(path: str | Path, rows: Iterable[Dict]) -> None:
+    """Write newline-delimited JSON to a .jsonl.gz file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with gzip.open(path, mode="wt", encoding="utf-8", compresslevel=9) as f:
@@ -87,33 +84,8 @@ def write_jsonl_gz(path: str | Path, rows: Iterable[Dict]) -> None:
             f.write("\n")
 
 
-def write_text(path: str | Path, text: str) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-
-
-def sha256_file(path: str | Path) -> str:
-    path = Path(path)
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def env_bool(name: str, default: bool = False) -> bool:
     v = os.environ.get(name)
     if v is None:
         return default
     return v.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def env_int(name: str, default: int) -> int:
-    v = os.environ.get(name)
-    if v is None:
-        return default
-    try:
-        return int(v.strip())
-    except Exception:
-        return default
