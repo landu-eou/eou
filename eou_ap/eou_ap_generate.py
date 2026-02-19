@@ -45,6 +45,7 @@ BLOCKS: List[List[str]] = [
     # 1º Bloque Imperio
     [
         "The Forge",
+        "The Citadel",
         "Domain",
         "Kador",
         "Tash-Murkon",
@@ -103,6 +104,12 @@ BLOCKS: List[List[str]] = [
         "Querious",
         "Catch",
         "Immensea",
+        "Cache",
+        "The Spire",
+        "Impass",
+        "Providence",
+        "Cobalt Edge",
+        "Omist",
         "Tenerifis",
         "Feythabolis",
         "Cloud Ring",
@@ -114,7 +121,7 @@ BLOCKS: List[List[str]] = [
     ],
     # 5º Bloque The Deathless
     [
-        "Zarzakh",
+        "Yasna Zakh",
     ],
 ]
 
