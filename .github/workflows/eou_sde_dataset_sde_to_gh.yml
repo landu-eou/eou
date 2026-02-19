@@ -244,6 +244,7 @@ jobs:
             --zip .tmp/sde/sde.zip \
             --out-sde .tmp/sde/out_sde \
             --out-esi .tmp/sde/out_esi \
+            --baseline-types data/sde/types.jsonl.gz \
             --existing-packaged data/esi/packaged.jsonl.gz \
             --exclude-config config/excludeMarketTypes.txt \
             --exclude-state states/excludeMarketTypes.json
