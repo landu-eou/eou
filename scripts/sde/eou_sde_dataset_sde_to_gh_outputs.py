@@ -1,23 +1,38 @@
 """
-EOU · SDE Dataset (SDE → GH) — build outputs
+EOU · SDE Dataset (SDE → GH) — build outputs (SDE + packaged + marketTree + excluded)
 
-Key change (2026-02):
-- packaged ESI calls are done ONLY for types3 = (types2 - types1),
-  where:
-    types1 = baseline types.jsonl.gz already committed in repo
-    types2 = freshly built published types from SDE
-- data/esi/packaged.jsonl.gz remains "exceptions only" (packaged != volume)
+Outputs (out_sde):
+  - regions.jsonl.gz
+  - constellations.jsonl.gz
+  - solarsystems.jsonl.gz
+  - stations.jsonl.gz
+  - stargates.jsonl.gz
+  - types.jsonl.gz
+  - corporations.jsonl.gz
+  - marketTree.jsonl.gz
+  - excludedMarketTypes.jsonl.gz
+  - marketTree.txt
+  - excludeMarketTypes.state.json
+
+Outputs (out_esi):
+  - packaged.jsonl.gz   (exceptions only; packaged != volume)
+
+Key packaged strategy:
+  - baseline types1 = committed data/sde/types.jsonl.gz
+  - new types2 = SDE published types from ZIP
+  - types3 = types2 - types1  (ONLY these call ESI)
 """
 
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import json
-import os
+import re
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Set, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -27,13 +42,25 @@ THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 
-from eou_sde_dataset_sde_to_gh_io import iter_jsonl_from_zip, read_jsonl_gz, write_jsonl_gz  # noqa: E402
-from eou_sde_dataset_sde_to_gh_names import safe_en_name  # noqa: E402
+from eou_sde_dataset_sde_to_gh_io import (  # noqa: E402
+    env_int,
+    iter_jsonl_from_zip,
+    read_jsonl_gz,
+    sha256_file,
+    write_jsonl_gz,
+    write_text,
+)
+from eou_sde_dataset_sde_to_gh_names import moon_name, planet_name, safe_en_name  # noqa: E402
+from eou_sde_dataset_sde_to_gh_cynodock import station_cyno, system_cyno  # noqa: E402
 
 
 # -----------------------------
-# Small helpers
+# small helpers
 # -----------------------------
+
+def log(msg: str) -> None:
+    print(msg, flush=True)
+
 
 def _get_int(obj: Dict, *keys: str) -> Optional[int]:
     for k in keys:
@@ -62,28 +89,18 @@ def _get_bool(obj: Dict, *keys: str, default: bool = False) -> bool:
     return default
 
 
-def env_int(name: str, default: int) -> int:
-    v = os.environ.get(name)
-    if v is None:
-        return default
-    try:
-        return int(v)
-    except Exception:
-        return default
+def _sleep_ms(ms: int) -> None:
+    time.sleep(max(0, ms) / 1000.0)
 
 
 # -----------------------------
-# Baseline (types1) loader
+# baseline (types1) typeIDs
 # -----------------------------
 
-def load_baseline_typeids(baseline_types_path: Optional[str]) -> Set[int]:
-    """Load typeIDs from the committed baseline types file (types1)."""
-    if not baseline_types_path:
-        return set()
+def load_baseline_typeids(baseline_types_path: str) -> Set[int]:
     p = Path(baseline_types_path)
-    if not p.exists():
+    if not baseline_types_path or not p.exists():
         return set()
-
     rows = read_jsonl_gz(p)
     out: Set[int] = set()
     for r in rows:
@@ -94,63 +111,51 @@ def load_baseline_typeids(baseline_types_path: Optional[str]) -> Set[int]:
 
 
 # -----------------------------
-# Existing packaged exceptions loader
+# packaged exceptions (repo file)
 # -----------------------------
 
-def load_existing_packaged(existing_path: Optional[str]) -> Dict[int, Dict]:
-    """Load packaged exceptions: typeID -> row.
-
-    Row format:
-      {"typeID":..., "type":..., "packaged":...}
-
-    This file intentionally stores ONLY exceptions (packaged != volume).
-    """
-    if not existing_path:
-        return {}
+def load_existing_packaged(existing_path: str) -> Dict[int, Dict]:
     p = Path(existing_path)
-    if not p.exists():
+    if not existing_path or not p.exists():
         return {}
-
     rows = read_jsonl_gz(p)
     out: Dict[int, Dict] = {}
     for r in rows:
         tid = _get_int(r, "typeID")
-        packaged = _get_float(r, "packaged")
-        if tid is None or packaged is None:
+        if tid is None:
             continue
-        out[tid] = {"typeID": tid, "type": str(r.get("type") or ""), "packaged": float(packaged)}
+        pv = r.get("packaged")
+        if pv is None:
+            pv = r.get("packagedVolume")
+        if pv is None:
+            pv = r.get("packaged_volume")
+        try:
+            pv_f = float(pv)
+        except Exception:
+            continue
+        out[tid] = {"typeID": tid, "type": str(r.get("type") or ""), "packaged": pv_f}
     return out
 
 
-def write_packaged_exceptions(path: str | Path, packaged_map: Dict[int, Dict]) -> None:
-    """Write packaged exceptions ordered by typeID desc."""
+def write_packaged_exceptions(path: Path, packaged_map: Dict[int, Dict]) -> None:
     rows = list(packaged_map.values())
     rows.sort(key=lambda r: int(r["typeID"]), reverse=True)
     write_jsonl_gz(path, rows)
 
 
 # -----------------------------
-# ESI fetch (only for types3)
+# ESI fetch for packagedVolume (only for types3)
 # -----------------------------
 
-def esi_get_type(type_id: int, *, user_agent: str = "EOU-SDE-Packaged/1.0") -> Tuple[int, Optional[Dict]]:
-    """Fetch /universe/types/{type_id}.
-
-    Returns: (http_status, json_obj_or_none)
-    """
-    url = f"https://esi.evetech.net/universe/types/{type_id}"
-    req = Request(url, headers={"User-Agent": user_agent, "Accept": "application/json"})
+def esi_get_type(type_id: int) -> Tuple[int, Optional[Dict]]:
+    url = f"https://esi.evetech.net/latest/universe/types/{type_id}/?datasource=tranquility&language=en"
+    req = Request(url, headers={"Accept": "application/json", "User-Agent": "EOU-packaged/1.0"})
     try:
         with urlopen(req, timeout=30) as resp:
             status = getattr(resp, "status", 200)
-            data = resp.read().decode("utf-8")
+            data = resp.read().decode("utf-8", errors="replace")
             return status, json.loads(data)
     except HTTPError as e:
-        try:
-            body = e.read()
-            _ = body  # ignore
-        except Exception:
-            pass
         return int(e.code), None
     except URLError:
         return 0, None
@@ -160,207 +165,660 @@ def refresh_packaged_for_new_types(
     *,
     new_type_ids: List[int],
     type_name_by_id: Dict[int, str],
-    volume_by_id: Dict[int, float],
+    sde_volume_by_id: Dict[int, float],
     packaged_map: Dict[int, Dict],
 ) -> None:
-    """For each new typeID (types3), call ESI and update packaged exceptions map (in-place)."""
+    """
+    Update packaged_map in-place for ONLY new types (types3).
+
+    Store exception ONLY when packaged_volume != volume.
+    """
+    if not new_type_ids:
+        log("[PACKAGED] No new types to evaluate (types3 empty).")
+        return
 
     min_delay_ms = env_int("ESI_MIN_DELAY_MS", 300)
     max_retries = env_int("ESI_MAX_RETRIES", 8)
+    log_every = env_int("ESI_LOG_EVERY", 50)
 
-    def sleep_ms(ms: int) -> None:
-        time.sleep(ms / 1000.0)
-
-    total = len(new_type_ids)
-    if total == 0:
-        print("[PACKAGED] No new types to evaluate (types3 empty).")
-        return
-
-    print(f"[PACKAGED] Evaluating {total} new typeIDs via ESI (types3).")
-    # Log every N to show progress in long runs
-    log_every = 50 if total >= 200 else 10
+    log(f"[PACKAGED] Evaluating {len(new_type_ids)} new typeIDs via ESI (types3).")
 
     for idx, tid in enumerate(new_type_ids, start=1):
-        vol = volume_by_id.get(tid)
-        if vol is None:
-            # Shouldn't happen; skip safely.
-            continue
+        vol = float(sde_volume_by_id.get(tid, 0.0))
 
-        # simple retry loop
         attempt = 0
         while True:
             attempt += 1
+            _sleep_ms(min_delay_ms)
             status, payload = esi_get_type(tid)
 
-            # Good response
             if status == 200 and isinstance(payload, dict):
-                esi_vol = payload.get("volume")
-                pkg_vol = payload.get("packaged_volume")
-                # If packaged_volume is absent, treat as "no exception"
-                if pkg_vol is not None and esi_vol is not None:
-                    try:
-                        pkg_vol_f = float(pkg_vol)
-                        vol_f = float(vol)
-                        if pkg_vol_f != vol_f:
-                            packaged_map[tid] = {
-                                "typeID": tid,
-                                "type": type_name_by_id.get(tid, str(tid)),
-                                "packaged": pkg_vol_f,
-                            }
-                        else:
-                            # ensure not present (exceptions-only)
-                            packaged_map.pop(tid, None)
-                    except Exception:
-                        pass
+                pkg = payload.get("packaged_volume")
+                # If absent -> treat as "no exception"
+                if pkg is None:
+                    packaged_map.pop(tid, None)
+                    break
+
+                try:
+                    pkg_f = float(pkg)
+                except Exception:
+                    packaged_map.pop(tid, None)
+                    break
+
+                if pkg_f != vol:
+                    packaged_map[tid] = {
+                        "typeID": tid,
+                        "type": type_name_by_id.get(tid, str(tid)),
+                        "packaged": pkg_f,
+                    }
                 else:
                     packaged_map.pop(tid, None)
-
                 break
 
-            # Not found: remove if exists (shouldn't for new, but safe)
             if status == 404:
                 packaged_map.pop(tid, None)
                 break
 
-            # Throttle/retry statuses:
-            # - 420/429 (rate limits)
-            # - 5xx transient
             retryable = status in {0, 420, 429, 500, 502, 503, 504}
             if retryable and attempt < max_retries:
-                # Backoff: linear + base delay
-                sleep_ms(min_delay_ms * attempt)
+                _sleep_ms(min_delay_ms * attempt)
                 continue
 
-            # Non-retryable or max retries reached
-            print(f"[WARN] ESI type {tid} failed (status={status}) after {attempt} attempts; skipping.")
+            log(f"[WARN] ESI type {tid} failed (status={status}) after {attempt} attempts; skipping.")
             break
 
-        # Base politeness delay (even after success)
-        sleep_ms(min_delay_ms)
-
-        if idx % log_every == 0 or idx == total:
-            print(f"[PACKAGED] Progress {idx}/{total} (last typeID={tid}).")
+        if idx % log_every == 0 or idx == len(new_type_ids):
+            log(f"[PACKAGED] Progress {idx}/{len(new_type_ids)} (last typeID={tid}).")
 
 
 # -----------------------------
-# SDE reads (subset needed for types delta + output)
+# SDE readers
 # -----------------------------
 
-def read_published_types_from_sde(zf: zipfile.ZipFile) -> List[Dict]:
-    """Return the published types objects from SDE types.jsonl as raw dicts."""
-    out: List[Dict] = []
-    for obj in iter_jsonl_from_zip(zf, "types.jsonl"):
-        if not _get_bool(obj, "published", default=False):
-            continue
-        out.append(obj)
+def read_regions(zf: zipfile.ZipFile) -> Dict[int, str]:
+    out: Dict[int, str] = {}
+    for obj in iter_jsonl_from_zip(zf, "mapRegions.jsonl"):
+        rid = int(obj["_key"])
+        out[rid] = safe_en_name(obj, fallback=str(rid))
     return out
 
 
-def build_types_out_with_packaged_and_market_tree(
-    zf: zipfile.ZipFile,
-    *,
-    packaged_map: Dict[int, Dict],
-) -> List[Dict]:
+def read_constellations(zf: zipfile.ZipFile) -> Dict[int, Tuple[str, int]]:
+    # constellationID -> (name_en, regionID)
+    out: Dict[int, Tuple[str, int]] = {}
+    for obj in iter_jsonl_from_zip(zf, "mapConstellations.jsonl"):
+        cid = int(obj["_key"])
+        out[cid] = (safe_en_name(obj, fallback=str(cid)), int(obj["regionID"]))
+    return out
+
+
+def read_factions(zf: zipfile.ZipFile) -> Dict[int, str]:
+    out: Dict[int, str] = {}
+    for obj in iter_jsonl_from_zip(zf, "factions.jsonl"):
+        fid = int(obj["_key"])
+        out[fid] = safe_en_name(obj, fallback=str(fid))
+    return out
+
+
+def read_solarsystems(zf: zipfile.ZipFile) -> Dict[int, Dict]:
     """
-    Minimal version: produces types.jsonl.gz with:
-      - typeID, type
-      - volume (SDE)
-      - packaged (from packaged_map exceptions else volume)
-      - group, category, marketGroup
-      - marketTree (placeholder unless you already have it implemented)
-      - is_contraband, is_gategank
-
-    NOTE: If you already have full marketTree logic in your current outputs.py,
-    keep it and only replace the packaged delta parts; the delta strategy is orthogonal.
+    solarSystemID -> dict with:
+      name, constellationID, regionID, position[x,y,z], factionID?, securityStatus,
+      planets count, stargates count
     """
-    # ---- read groups/categories/marketGroups/contraband as in your existing code ----
-    # Kept minimal here to focus on the delta strategy.
-    groups_meta: Dict[int, Tuple[str, int]] = {}
-    for obj in iter_jsonl_from_zip(zf, "groups.jsonl"):
-        gid = int(obj.get("_key"))
-        gname = safe_en_name(obj, fallback=str(gid))
-        cat_id = int(obj.get("categoryID"))
-        groups_meta[gid] = (gname, cat_id)
+    out: Dict[int, Dict] = {}
+    for obj in iter_jsonl_from_zip(zf, "mapSolarSystems.jsonl"):
+        sid = int(obj["_key"])
+        name = safe_en_name(obj, fallback=str(sid))
+        pos = obj.get("position") or {}
+        position = [float(pos.get("x", 0.0)), float(pos.get("y", 0.0)), float(pos.get("z", 0.0))]
+        sec = float(obj.get("securityStatus", 0.0))
+        fid = obj.get("factionID")
+        faction_id = int(fid) if fid is not None else None
+        planets = len(obj.get("planetIDs", []) or []) if isinstance(obj.get("planetIDs"), list) else 0
+        stargates = len(obj.get("stargateIDs", []) or []) if isinstance(obj.get("stargateIDs"), list) else 0
 
-    categories: Dict[int, str] = {}
-    for obj in iter_jsonl_from_zip(zf, "categories.jsonl"):
-        cid = int(obj.get("_key"))
-        categories[cid] = safe_en_name(obj, fallback=str(cid))
+        out[sid] = {
+            "name": name,
+            "constellationID": int(obj["constellationID"]),
+            "regionID": int(obj["regionID"]),
+            "position": position,
+            "factionID": faction_id,
+            "securityStatus": sec,
+            "planets": planets,
+            "stargates": stargates,
+        }
+    return out
 
-    marketgroup_names: Dict[int, str] = {}
+
+def read_planet_orbits(zf: zipfile.ZipFile, systems: Dict[int, Dict]) -> Dict[int, str]:
+    out: Dict[int, str] = {}
+    for obj in iter_jsonl_from_zip(zf, "mapPlanets.jsonl"):
+        pid = int(obj["_key"])
+        sid = int(obj["solarSystemID"])
+        ss_name = systems.get(sid, {"name": str(sid)})["name"]
+        cidx = int(obj.get("celestialIndex", 0))
+        out[pid] = planet_name(ss_name, cidx)
+    return out
+
+
+def read_moon_orbits(zf: zipfile.ZipFile, planet_orbits: Dict[int, str]) -> Dict[int, str]:
+    out: Dict[int, str] = {}
+    for obj in iter_jsonl_from_zip(zf, "mapMoons.jsonl"):
+        mid = int(obj["_key"])
+        pid = int(obj["orbitID"])
+        p_orbit = planet_orbits.get(pid, str(pid))
+        oidx = int(obj.get("orbitIndex", 0))
+        out[mid] = moon_name(p_orbit, oidx)
+    return out
+
+
+def count_moons_by_system(zf: zipfile.ZipFile) -> Dict[int, int]:
+    c: Dict[int, int] = defaultdict(int)
+    for obj in iter_jsonl_from_zip(zf, "mapMoons.jsonl"):
+        sid = int(obj["solarSystemID"])
+        c[sid] += 1
+    return dict(c)
+
+
+def count_asteroid_belts_by_system(zf: zipfile.ZipFile) -> Dict[int, int]:
+    c: Dict[int, int] = defaultdict(int)
+    for obj in iter_jsonl_from_zip(zf, "mapPlanets.jsonl"):
+        sid = int(obj["solarSystemID"])
+        belts = obj.get("asteroidBeltIDs")
+        if isinstance(belts, list):
+            c[sid] += len(belts)
+    return dict(c)
+
+
+def read_corporations(zf: zipfile.ZipFile) -> Dict[int, str]:
+    out: Dict[int, str] = {}
+    for obj in iter_jsonl_from_zip(zf, "npcCorporations.jsonl"):
+        cid = int(obj["_key"])
+        out[cid] = safe_en_name(obj, fallback=str(cid))
+    return out
+
+
+def read_station_services(zf: zipfile.ZipFile) -> Dict[int, str]:
+    """
+    stationServices.jsonl:
+      _key = serviceID
+      serviceName.en = name
+    We normalize into canonical keys.
+    """
+    def norm(s: str) -> str:
+        x = s.strip().lower()
+        x = re.sub(r"\s+", "-", x)
+        x = x.replace("_", "-")
+        x = re.sub(r"[^a-z0-9\-]", "", x)
+        x = re.sub(r"-{2,}", "-", x).strip("-")
+        return x
+
+    CANON = {
+        "docking": "docking",
+        "market": "market",
+        "storage": "storage",
+        "repair-facilities": "repair-facilities",
+        "repair": "repair-facilities",
+        "fitting": "fitting",
+        "cloning": "cloning",
+        "jump-clone-facility": "jump-clone-facility",
+        "jump-clone": "jump-clone-facility",
+    }
+
+    out: Dict[int, str] = {}
+    for obj in iter_jsonl_from_zip(zf, "stationServices.jsonl"):
+        sid = int(obj["_key"])
+        sn = obj.get("serviceName") or {}
+        en = sn.get("en") if isinstance(sn, dict) else None
+        en = en if isinstance(en, str) and en else str(sid)
+        out[sid] = CANON.get(norm(en), norm(en))
+    return out
+
+
+def read_station_operations(zf: zipfile.ZipFile, service_keys: Dict[int, str]) -> Dict[int, Dict]:
+    """
+    stationOperations.jsonl:
+      _key = operationID
+      useOperationName
+      services = [serviceID...]
+    """
+    out: Dict[int, Dict] = {}
+    for obj in iter_jsonl_from_zip(zf, "stationOperations.jsonl"):
+        oid = int(obj["_key"])
+        name = safe_en_name(obj, fallback=str(oid))
+        use_op = bool(obj.get("useOperationName", False))
+        svc_ids = obj.get("services") or []
+        svc_set: Set[str] = set()
+        if isinstance(svc_ids, list):
+            for s in svc_ids:
+                try:
+                    sid = int(s)
+                except Exception:
+                    continue
+                k = service_keys.get(sid)
+                if k:
+                    svc_set.add(k)
+        out[oid] = {"operationName": name, "useOperationName": use_op, "services": svc_set}
+    return out
+
+
+def read_type_name_map(zf: zipfile.ZipFile) -> Dict[int, str]:
+    out: Dict[int, str] = {}
+    for obj in iter_jsonl_from_zip(zf, "types.jsonl"):
+        tid = int(obj["_key"])
+        out[tid] = safe_en_name(obj, fallback=str(tid))
+    return out
+
+
+def read_market_groups(zf: zipfile.ZipFile) -> Dict[int, Tuple[str, Optional[int]]]:
+    out: Dict[int, Tuple[str, Optional[int]]] = {}
     for obj in iter_jsonl_from_zip(zf, "marketGroups.jsonl"):
-        mgid = int(obj.get("_key"))
-        marketgroup_names[mgid] = safe_en_name(obj, fallback=str(mgid))
+        mgid = int(obj["_key"])
+        name = safe_en_name(obj, fallback=str(mgid))
+        parent = obj.get("parentGroupID")
+        parent_id = int(parent) if parent is not None else None
+        out[mgid] = (name, parent_id)
+    return out
 
-    contraband: Set[int] = set()
+
+def read_groups_meta(zf: zipfile.ZipFile) -> Dict[int, Tuple[str, int]]:
+    out: Dict[int, Tuple[str, int]] = {}
+    for obj in iter_jsonl_from_zip(zf, "groups.jsonl"):
+        gid = int(obj["_key"])
+        out[gid] = (safe_en_name(obj, fallback=str(gid)), int(obj["categoryID"]))
+    return out
+
+
+def read_categories(zf: zipfile.ZipFile) -> Dict[int, str]:
+    out: Dict[int, str] = {}
+    for obj in iter_jsonl_from_zip(zf, "categories.jsonl"):
+        cid = int(obj["_key"])
+        out[cid] = safe_en_name(obj, fallback=str(cid))
+    return out
+
+
+def read_contraband_set(zf: zipfile.ZipFile) -> Set[int]:
+    s: Set[int] = set()
     for obj in iter_jsonl_from_zip(zf, "contrabandTypes.jsonl"):
-        contraband.add(int(obj.get("_key")))
+        s.add(int(obj["_key"]))
+    return s
 
-    rows: List[Dict] = []
+
+def read_published_types_base(zf: zipfile.ZipFile) -> Dict[int, Dict]:
+    """
+    published-only:
+      typeID -> {type, volume, group_id, marketGroupID}
+    """
+    out: Dict[int, Dict] = {}
     for obj in iter_jsonl_from_zip(zf, "types.jsonl"):
         if not _get_bool(obj, "published", default=False):
             continue
+        tid = int(obj["_key"])
+        out[tid] = {
+            "type": safe_en_name(obj, fallback=str(tid)),
+            "volume": float(obj.get("volume", 0.0)),
+            "group_id": _get_int(obj, "group_id", "groupID"),
+            "marketGroupID": _get_int(obj, "marketGroupID", "market_group_id", "marketGroupId"),
+        }
+    return out
 
-        tid = int(obj.get("_key"))
-        tname = safe_en_name(obj, fallback=str(tid))
-        volume = _get_float(obj, "volume") or 0.0
 
-        # group/category
-        gid = _get_int(obj, "group_id", "groupID")
+# -----------------------------
+# builders
+# -----------------------------
+
+def build_regions_out(regions: Dict[int, str]) -> List[Dict]:
+    rows = [{"regionID": rid, "region": nm} for rid, nm in regions.items()]
+    rows.sort(key=lambda r: r["regionID"])
+    return rows
+
+
+def build_constellations_out(consts: Dict[int, Tuple[str, int]], regions: Dict[int, str]) -> List[Dict]:
+    rows: List[Dict] = []
+    for cid, (cname, rid) in consts.items():
+        rows.append({"constellationID": cid, "constellation": cname, "region": regions.get(rid, str(rid))})
+    rows.sort(key=lambda r: r["constellationID"])
+    return rows
+
+
+def build_corporations_out(corps: Dict[int, str]) -> List[Dict]:
+    rows = [{"corporationID": cid, "corporation": nm} for cid, nm in corps.items()]
+    rows.sort(key=lambda r: r["corporationID"])
+    return rows
+
+
+def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Dict]) -> List[Dict]:
+    rows: List[Dict] = []
+    for obj in iter_jsonl_from_zip(zf, "mapStargates.jsonl"):
+        gid = int(obj["_key"])
+        src_id = int(obj["solarSystemID"])
+        dst = obj.get("destination") or {}
+        dst_id = int(dst["solarSystemID"])
+        src = systems.get(src_id, {"name": str(src_id)})["name"]
+        dstn = systems.get(dst_id, {"name": str(dst_id)})["name"]
+        lo_id, hi_id = (src_id, dst_id) if src_id <= dst_id else (dst_id, src_id)
+        lo = systems.get(lo_id, {"name": str(lo_id)})["name"]
+        hi = systems.get(hi_id, {"name": str(hi_id)})["name"]
+        rows.append({"stargateID": gid, "stargate": f"{src} → {dstn}", "stargateGroup": f"{lo} ↔ {hi}", "solarSystem": src})
+    rows.sort(key=lambda r: r["stargateID"])
+    return rows
+
+
+def market_tree_string(mgid: Optional[int], mg_map: Dict[int, Tuple[str, Optional[int]]]) -> Optional[str]:
+    if mgid is None or mgid not in mg_map:
+        return None
+    parts: List[str] = []
+    cur: Optional[int] = mgid
+    seen: Set[int] = set()
+    while cur is not None and cur in mg_map and cur not in seen:
+        seen.add(cur)
+        name, parent = mg_map[cur]
+        parts.append(name)
+        cur = parent
+    parts.reverse()
+    return "Market → " + " → ".join(parts)
+
+
+def build_types_out(
+    types_base: Dict[int, Dict],
+    packaged_map: Dict[int, Dict],
+    groups_meta: Dict[int, Tuple[str, int]],
+    categories: Dict[int, str],
+    market_groups: Dict[int, Tuple[str, Optional[int]]],
+    contraband: Set[int],
+) -> List[Dict]:
+    rows: List[Dict] = []
+    for tid, t in types_base.items():
+        volume = float(t["volume"])
+        # packaged: exception if exists else volume
+        pkg = packaged_map.get(tid, {}).get("packaged")
+        packaged = float(pkg) if pkg is not None else volume
+
+        gid = t.get("group_id")
         gname = ""
         cname = ""
-        if gid is not None and gid in groups_meta:
-            gname, cat_id = groups_meta[gid]
+        if gid is not None and int(gid) in groups_meta:
+            gname, cat_id = groups_meta[int(gid)]
             cname = categories.get(cat_id, str(cat_id))
 
-        # market group name
-        mgid = _get_int(obj, "marketGroupID", "market_group_id", "marketGroupId")
-        mgname = marketgroup_names.get(mgid, str(mgid)) if mgid is not None else ""
-
-        # packaged: from exceptions if present, else volume
-        pkg = packaged_map.get(tid, {}).get("packaged")
-        packaged = float(pkg) if pkg is not None else float(volume)
-
-        # marketTree: (keep your full logic; here placeholder)
-        market_tree = None if mgid is None else f"Market → … → {mgname or str(mgid)}"
+        mgid = t.get("marketGroupID")
+        mgname = market_groups.get(int(mgid), ("", None))[0] if mgid is not None and int(mgid) in market_groups else ""
+        mtree = market_tree_string(int(mgid) if mgid is not None else None, market_groups)
 
         rows.append(
             {
                 "typeID": tid,
-                "type": tname,
-                "volume": float(volume),
-                "packaged": float(packaged),
+                "type": t["type"],
+                "volume": volume,
+                "packaged": packaged,
                 "group": gname,
                 "category": cname,
                 "marketGroup": mgname,
-                "marketTree": market_tree,
+                "marketTree": mtree,
                 "is_contraband": tid in contraband,
                 "is_gategank": gname == "Smart Bomb",
             }
         )
-
     rows.sort(key=lambda r: r["typeID"])
     return rows
 
 
+def build_market_tree_jsonl(types_rows: List[Dict]) -> List[Dict]:
+    buckets: Dict[str, Set[str]] = defaultdict(set)
+    for r in types_rows:
+        mt = r.get("marketTree")
+        if isinstance(mt, str) and mt:
+            buckets[mt].add(str(r.get("type", "")))
+    out: List[Dict] = []
+    for mt, tset in buckets.items():
+        out.append({"marketTree": mt, "types": sorted(tset)})
+    out.sort(key=lambda r: r["marketTree"])
+    return out
+
+
+def build_market_tree_txt(market_groups: Dict[int, Tuple[str, Optional[int]]], types_base: Dict[int, Dict]) -> str:
+    children: Dict[Optional[int], List[int]] = defaultdict(list)
+    for mgid, (_name, parent) in market_groups.items():
+        children[parent].append(mgid)
+    for k in list(children.keys()):
+        children[k].sort(key=lambda mgid: market_groups[mgid][0].lower())
+
+    group_types: Dict[int, List[str]] = defaultdict(list)
+    for _tid, t in types_base.items():
+        mgid = t.get("marketGroupID")
+        if mgid is None:
+            continue
+        if int(mgid) in market_groups:
+            group_types[int(mgid)].append(str(t.get("type", "")))
+    for mgid in list(group_types.keys()):
+        group_types[mgid].sort(key=lambda x: x.lower())
+
+    roots = children.get(None, [])
+
+    def icon_for_type_name(name: str) -> str:
+        n = name.lower()
+        if "blueprint" in n:
+            return "📜"
+        if "drone" in n:
+            return "🐝"
+        if "charge" in n or "ammo" in n or "missile" in n:
+            return "☄️"
+        if "skill" in n:
+            return "🎓"
+        if "implant" in n or "booster" in n:
+            return "🧠"
+        if "ship" in n:
+            return "🚢"
+        return "📦"
+
+    lines: List[str] = ["Market"]
+
+    def walk(mgid: int, prefix: str, is_last: bool) -> None:
+        name = market_groups[mgid][0]
+        branch = "└── " if is_last else "├── "
+        lines.append(f"{prefix}{branch}📁 {name}")
+        new_prefix = prefix + ("    " if is_last else "│   ")
+
+        kids = children.get(mgid, [])
+        tps = group_types.get(mgid, [])
+
+        for i, child in enumerate(kids):
+            # last if last child AND no types after
+            walk(child, new_prefix, i == len(kids) - 1 and len(tps) == 0)
+
+        for j, tn in enumerate(tps):
+            b = "└── " if j == len(tps) - 1 else "├── "
+            lines.append(f"{new_prefix}{b}{icon_for_type_name(tn)} {tn}")
+
+    for i, root in enumerate(roots):
+        walk(root, "", i == len(roots) - 1)
+
+    lines.append("")
+    lines.append("Leyenda (ajustable): ☄️ ammo | 🐝 drones | 📜 blueprints | 🎓 skills | 🧠 implants/boosters | 🚢 ships | 📦 default")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_excluded_market_types(exclude_config: Path, types_rows: List[Dict], market_tree_rows: List[Dict]) -> List[Dict]:
+    type_to_tree: Dict[str, Optional[str]] = {str(r.get("type", "")): r.get("marketTree") for r in types_rows}
+    tree_to_types: Dict[str, List[str]] = {}
+    for r in market_tree_rows:
+        mt = str(r.get("marketTree", ""))
+        tps = r.get("types") or []
+        if isinstance(tps, list):
+            tree_to_types[mt] = [str(x) for x in tps]
+
+    out: List[Dict] = []
+    if not exclude_config.exists():
+        return out
+
+    for raw in exclude_config.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+
+        if line.startswith("Market → "):
+            if line in tree_to_types:
+                for tname in tree_to_types[line]:
+                    out.append({"excludedType": tname, "marketTree": type_to_tree.get(tname)})
+        else:
+            if line in type_to_tree:
+                out.append({"excludedType": line, "marketTree": type_to_tree.get(line)})
+
+    # de-dup + deterministic sort
+    uniq = {(r["excludedType"], r.get("marketTree")): r for r in out}
+    out2 = list(uniq.values())
+    out2.sort(key=lambda r: (str(r.get("excludedType", "")).lower(), str(r.get("marketTree", "") or "").lower()))
+    return out2
+
+
+def build_stations_out(
+    zf: zipfile.ZipFile,
+    systems: Dict[int, Dict],
+    corp_names: Dict[int, str],
+    operations: Dict[int, Dict],
+    planet_orbits: Dict[int, str],
+    moon_orbits: Dict[int, str],
+    type_names: Dict[int, str],
+) -> Tuple[List[Dict], Dict[int, Set[Optional[str]]], Dict[int, int]]:
+    rows: List[Dict] = []
+    system_labels: Dict[int, Set[Optional[str]]] = defaultdict(set)
+    stations_count: Dict[int, int] = defaultdict(int)
+
+    orbit_names: Dict[int, str] = {}
+    orbit_names.update(planet_orbits)
+    orbit_names.update(moon_orbits)
+
+    n = 0
+    for obj in iter_jsonl_from_zip(zf, "npcStations.jsonl"):
+        n += 1
+        if n % 5000 == 0:
+            log(f"[STATIONS] parsed {n}")
+
+        station_id = int(obj["_key"])
+        sid = int(obj.get("solarSystemID", -1))
+        stations_count[sid] += 1
+
+        ss_name = systems.get(sid, {"name": str(sid)})["name"]
+
+        orbit_id = obj.get("orbitID")
+        orbit_name = orbit_names.get(int(orbit_id), ss_name) if orbit_id is not None else ss_name
+
+        owner_id = int(obj.get("ownerID", -1))
+        owner = corp_names.get(owner_id, str(owner_id))
+
+        op_id = obj.get("operationID")
+        services: Set[str] = set()
+        use_op = False
+        op_name = ""
+        if op_id is not None and int(op_id) in operations:
+            op = operations[int(op_id)]
+            services = set(op.get("services", set()) or set())
+            use_op = bool(op.get("useOperationName", False))
+            op_name = str(op.get("operationName", "")) or str(op_id)
+
+        station_name = f"{orbit_name} - {owner}".strip()
+        if use_op and op_name:
+            station_name = f"{station_name} {op_name}".strip()
+
+        st_type_id = obj.get("typeID") or obj.get("stationTypeID") or obj.get("stationTypeId")
+        st_type_id_int = int(st_type_id) if st_type_id is not None else None
+        station_type = type_names.get(st_type_id_int, str(st_type_id_int)) if st_type_id_int is not None else ""
+
+        docking = "docking" in services
+        market = "market" in services
+        storage = "storage" in services
+        repair = "repair-facilities" in services
+        fitting = "fitting" in services
+        cloning = "cloning" in services
+        jump_clone = "jump-clone-facility" in services
+
+        _lvl, dock_label = station_cyno(station_type if station_type else None, docking)
+        system_labels[sid].add(dock_label)
+
+        rows.append(
+            {
+                "_solarSystemID": sid,  # internal for later injection
+                "stationID": station_id,
+                "station": station_name,
+                "stationType": station_type,
+                "solarSystem": ss_name,
+                "owner": owner,
+                # cynoJumpSecurity injected later
+                "cynoDockSecurity": dock_label,
+                "docking": docking,
+                "market": market,
+                "storage": storage,
+                "repair": repair,
+                "fitting": fitting,
+                "cloning": cloning,
+                "jump-clone": jump_clone,
+            }
+        )
+
+    rows.sort(key=lambda r: r["stationID"])
+    return rows, dict(system_labels), dict(stations_count)
+
+
+def build_solarsystems_out(
+    systems: Dict[int, Dict],
+    consts: Dict[int, Tuple[str, int]],
+    regions: Dict[int, str],
+    factions: Dict[int, str],
+    moons_count: Dict[int, int],
+    belts_count: Dict[int, int],
+    stations_count: Dict[int, int],
+    system_cyno_jump: Dict[int, str],
+) -> List[Dict]:
+    rows: List[Dict] = []
+    for sid, s in systems.items():
+        cid = int(s["constellationID"])
+        rid = int(s["regionID"])
+        cname = consts.get(cid, (str(cid), 0))[0]
+        rname = regions.get(rid, str(rid))
+
+        fid = s.get("factionID")
+        faction = factions.get(int(fid)) if fid is not None and int(fid) in factions else None
+
+        # securityStatus: redondeo 6 decimales (como pediste)
+        sec = float(s.get("securityStatus", 0.0))
+        sec6 = float(f"{sec:.6f}")
+
+        rows.append(
+            {
+                "solarSystemID": sid,
+                "solarSystem": s["name"],
+                "constellation": cname,
+                "region": rname,
+                "position": s.get("position", [0.0, 0.0, 0.0]),
+                "faction": faction,
+                "securityStatus": sec6,
+                "planets": int(s.get("planets", 0)),
+                "moons": int(moons_count.get(sid, 0)),
+                "asteroid_belts": int(belts_count.get(sid, 0)),
+                "stargates": int(s.get("stargates", 0)),
+                "stations": int(stations_count.get(sid, 0)),
+                "cynoJumpSecurity": system_cyno_jump.get(sid, "no jump"),
+            }
+        )
+    rows.sort(key=lambda r: r["solarSystemID"])
+    return rows
+
+
 # -----------------------------
-# Main
+# main
 # -----------------------------
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--zip", required=True, help="Path to CCP SDE JSONL ZIP")
-
-    ap.add_argument("--out-sde", required=True, help="Output dir for SDE datasets")
-    ap.add_argument("--out-esi", required=True, help="Output dir for ESI-derived datasets")
-
-    ap.add_argument("--baseline-types", required=False, default="", help="Committed baseline types file (types1) to compute types3")
-    ap.add_argument("--existing-packaged", required=False, default="", help="Existing packaged exceptions file (data/esi/packaged.jsonl.gz)")
-
-    # (you have more args in your full script: exclude-config/state, etc.)
-    ap.add_argument("--exclude-config", required=False, default="")
-    ap.add_argument("--exclude-state", required=False, default="")
-
+    ap.add_argument("--out-sde", required=True, help="Output directory for SDE")
+    ap.add_argument("--out-esi", required=True, help="Output directory for ESI")
+    ap.add_argument("--baseline-types", required=False, default="", help="Committed types.jsonl.gz (types1)")
+    ap.add_argument("--existing-packaged", required=False, default="", help="Committed packaged.jsonl.gz (exceptions)")
+    ap.add_argument("--exclude-config", required=False, default="", help="config/excludeMarketTypes.txt")
+    ap.add_argument("--exclude-state", required=False, default="", help="states/excludeMarketTypes.json (for comparison only)")
     args = ap.parse_args()
 
     out_sde = Path(args.out_sde)
@@ -368,64 +826,154 @@ def main() -> int:
     out_sde.mkdir(parents=True, exist_ok=True)
     out_esi.mkdir(parents=True, exist_ok=True)
 
-    # types1 (baseline) -> used to compute types3
-    baseline_ids = load_baseline_typeids(args.baseline_types)
-    print(f"[DELTA] baseline types1 size: {len(baseline_ids)}")
+    baseline_ids = load_baseline_typeids(args.baseline_types) if args.baseline_types else set()
+    log(f"[DELTA] baseline types1 size: {len(baseline_ids)}")
 
-    # packaged exceptions currently in repo
-    packaged_map = load_existing_packaged(args.existing_packaged)
-    print(f"[PACKAGED] existing exceptions in repo: {len(packaged_map)}")
+    packaged_map = load_existing_packaged(args.existing_packaged) if args.existing_packaged else {}
+    log(f"[PACKAGED] existing exceptions in repo: {len(packaged_map)}")
+
+    exclude_config = Path(args.exclude_config) if args.exclude_config else Path("config/excludeMarketTypes.txt")
+    exclude_state = Path(args.exclude_state) if args.exclude_state else Path("states/excludeMarketTypes.json")
 
     with zipfile.ZipFile(args.zip) as zf:
-        # Build types2 set from SDE (published)
-        published_objs = read_published_types_from_sde(zf)
-        types2_ids: Set[int] = set()
-        volume_by_id: Dict[int, float] = {}
-        type_name_by_id: Dict[int, str] = {}
+        # ---- read core maps ----
+        regions = read_regions(zf)
+        consts = read_constellations(zf)
+        factions = read_factions(zf)
+        systems = read_solarsystems(zf)
+        corp_names = read_corporations(zf)
 
-        for obj in published_objs:
-            tid = int(obj.get("_key"))
-            types2_ids.add(tid)
-            type_name_by_id[tid] = safe_en_name(obj, fallback=str(tid))
-            volume_by_id[tid] = float(_get_float(obj, "volume") or 0.0)
+        log(f"[SDE] regions={len(regions)} constellations={len(consts)} systems={len(systems)} corps={len(corp_names)}")
 
-        print(f"[DELTA] new SDE types2 size: {len(types2_ids)}")
+        # ---- published types base (types2) ----
+        types_base = read_published_types_base(zf)
+        types2_ids = set(types_base.keys())
+        log(f"[DELTA] new SDE types2 size: {len(types2_ids)}")
 
-        # types3 = types2 - types1 (NEW TYPES ONLY)
+        # types3 = types2 - types1
         types3_ids = sorted([tid for tid in types2_ids if tid not in baseline_ids])
-        print(f"[DELTA] types3 (types2 - types1) size: {len(types3_ids)}")
+        log(f"[DELTA] types3 (types2 - types1) size: {len(types3_ids)}")
 
-        # prune packaged exceptions for types that disappeared from SDE
+        # prune packaged exceptions if type disappears from SDE
         before = len(packaged_map)
         packaged_map = {tid: row for tid, row in packaged_map.items() if tid in types2_ids}
         pruned = before - len(packaged_map)
         if pruned:
-            print(f"[PACKAGED] pruned {pruned} exceptions (types no longer in SDE).")
+            log(f"[PACKAGED] pruned {pruned} exceptions (types no longer in SDE).")
 
-        # call ESI only for types3
+        # ---- ESI packaged only for types3 ----
+        type_name_by_id = {tid: t["type"] for tid, t in types_base.items()}
+        sde_volume_by_id = {tid: float(t["volume"]) for tid, t in types_base.items()}
         refresh_packaged_for_new_types(
             new_type_ids=types3_ids,
             type_name_by_id=type_name_by_id,
-            volume_by_id=volume_by_id,
+            sde_volume_by_id=sde_volume_by_id,
             packaged_map=packaged_map,
         )
 
-        # write packaged exceptions output (ESI-derived)
+        # write packaged exceptions output
         write_packaged_exceptions(out_esi / "packaged.jsonl.gz", packaged_map)
-        print(f"[PACKAGED] wrote exceptions: {len(packaged_map)} -> {out_esi/'packaged.jsonl.gz'}")
+        log(f"[PACKAGED] wrote exceptions: {len(packaged_map)} -> {out_esi/'packaged.jsonl.gz'}")
 
-        # build types output (SDE) using packaged_map for packaged field
-        types_rows = build_types_out_with_packaged_and_market_tree(zf, packaged_map=packaged_map)
+        # ---- market groups/meta for types output ----
+        market_groups = read_market_groups(zf)
+        groups_meta = read_groups_meta(zf)
+        categories = read_categories(zf)
+        contraband = read_contraband_set(zf)
+
+        # build types output
+        types_rows = build_types_out(
+            types_base=types_base,
+            packaged_map=packaged_map,
+            groups_meta=groups_meta,
+            categories=categories,
+            market_groups=market_groups,
+            contraband=contraband,
+        )
+
+        # marketTree outputs
+        market_tree_rows = build_market_tree_jsonl(types_rows)
+        market_tree_txt = build_market_tree_txt(market_groups, types_base)
+
+        # ---- stations + cynoDock + services ----
+        type_names = read_type_name_map(zf)
+        planet_orbits = read_planet_orbits(zf, systems)
+        moon_orbits = read_moon_orbits(zf, planet_orbits)
+        service_keys = read_station_services(zf)
+        operations = read_station_operations(zf, service_keys)
+
+        stations_rows, system_station_labels, stations_count = build_stations_out(
+            zf=zf,
+            systems=systems,
+            corp_names=corp_names,
+            operations=operations,
+            planet_orbits=planet_orbits,
+            moon_orbits=moon_orbits,
+            type_names=type_names,
+        )
+
+        # system cynoJumpSecurity
+        system_cyno_jump: Dict[int, str] = {}
+        for sid in systems.keys():
+            labels = system_station_labels.get(sid, set())
+            scount = int(stations_count.get(sid, 0))
+            system_cyno_jump[sid] = system_cyno(labels, scount)
+
+        # inject cynoJumpSecurity into stations + remove internal key
+        for r in stations_rows:
+            sid = int(r.pop("_solarSystemID", -1))
+            r["cynoJumpSecurity"] = system_cyno_jump.get(sid, "no jump")
+
+        # ---- solarsystems counts ----
+        moons_count = count_moons_by_system(zf)
+        belts_count = count_asteroid_belts_by_system(zf)
+
+        sol_rows = build_solarsystems_out(
+            systems=systems,
+            consts=consts,
+            regions=regions,
+            factions=factions,
+            moons_count=moons_count,
+            belts_count=belts_count,
+            stations_count=stations_count,
+            system_cyno_jump=system_cyno_jump,
+        )
+
+        # ---- excludedMarketTypes ----
+        excluded_rows = build_excluded_market_types(exclude_config, types_rows, market_tree_rows)
+
+        # exclude state (etag = sha256(config))
+        cfg_etag = sha256_file(exclude_config)
+        write_text(out_sde / "excludeMarketTypes.state.json", json.dumps({"etag": cfg_etag}, ensure_ascii=False, indent=2) + "\n")
+
+        # ---- write all SDE outputs expected by workflow ----
+        write_jsonl_gz(out_sde / "regions.jsonl.gz", build_regions_out(regions))
+        write_jsonl_gz(out_sde / "constellations.jsonl.gz", build_constellations_out(consts, regions))
+        write_jsonl_gz(out_sde / "solarsystems.jsonl.gz", sol_rows)
+        write_jsonl_gz(out_sde / "stations.jsonl.gz", stations_rows)
+        write_jsonl_gz(out_sde / "stargates.jsonl.gz", build_stargates_out(zf, systems))
         write_jsonl_gz(out_sde / "types.jsonl.gz", types_rows)
-        print(f"[TYPES] wrote {len(types_rows)} published types -> {out_sde/'types.jsonl.gz'}")
+        write_jsonl_gz(out_sde / "corporations.jsonl.gz", build_corporations_out(corp_names))
+        write_jsonl_gz(out_sde / "marketTree.jsonl.gz", market_tree_rows)
+        write_jsonl_gz(out_sde / "excludedMarketTypes.jsonl.gz", excluded_rows)
+        write_text(out_sde / "marketTree.txt", market_tree_txt)
 
-        # TODO: (keep your existing code)
-        # - regions/constellations/solarsystems/stations/stargates/corporations
-        # - marketTree.jsonl.gz + marketTree.txt
-        # - excludedMarketTypes.jsonl.gz + excludeMarketTypes.state.json
-
-    # Sanity checks for the files we touched here
-    for p in [out_esi / "packaged.jsonl.gz", out_sde / "types.jsonl.gz"]:
+    # sanity checks for files your workflow mv's
+    expected = [
+        out_sde / "regions.jsonl.gz",
+        out_sde / "constellations.jsonl.gz",
+        out_sde / "solarsystems.jsonl.gz",
+        out_sde / "stations.jsonl.gz",
+        out_sde / "stargates.jsonl.gz",
+        out_sde / "types.jsonl.gz",
+        out_sde / "corporations.jsonl.gz",
+        out_sde / "marketTree.jsonl.gz",
+        out_sde / "excludedMarketTypes.jsonl.gz",
+        out_sde / "marketTree.txt",
+        out_sde / "excludeMarketTypes.state.json",
+        out_esi / "packaged.jsonl.gz",
+    ]
+    for p in expected:
         if not p.exists() or p.stat().st_size == 0:
             raise RuntimeError(f"Missing/empty output: {p}")
 
