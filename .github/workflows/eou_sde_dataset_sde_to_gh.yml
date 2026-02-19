@@ -25,7 +25,7 @@ jobs:
     env:
       WORKFLOW_FILE: eou_sde_dataset_sde_to_gh.yml
 
-      SHEETS_ID: 1fnoPr1Ho0uQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
+      SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "4"
 
