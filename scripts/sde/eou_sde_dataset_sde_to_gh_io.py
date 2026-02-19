@@ -30,16 +30,51 @@ def iter_jsonl_from_zip(zf: zipfile.ZipFile, basename: str) -> Iterator[Dict]:
 
 
 def read_jsonl_gz(path: str | Path) -> List[Dict]:
+    """
+    Robust reader for .jsonl.gz.
+
+    Supports:
+      - NDJSON (one JSON object per line)
+      - A single JSON array (legacy / accidental format)
+
+    Behavior:
+      - Skips invalid lines instead of failing the whole run.
+    """
     path = Path(path)
     if not path.exists():
         return []
+
+    with gzip.open(path, mode="rt", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    if not content.strip():
+        return []
+
+    s = content.lstrip()
+
+    # Legacy/accidental: JSON array
+    if s.startswith("["):
+        try:
+            obj = json.loads(content)
+            if isinstance(obj, list):
+                return [x for x in obj if isinstance(x, dict)]
+            return []
+        except json.JSONDecodeError:
+            # fall through to line-based parsing
+            pass
+
     out: List[Dict] = []
-    with gzip.open(path, mode="rt", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            out.append(json.loads(line))
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            # tolerate corrupted/legacy lines
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
     return out
 
 
