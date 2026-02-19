@@ -21,6 +21,18 @@ Key packaged strategy:
   - baseline types1 = committed data/sde/types.jsonl.gz
   - new types2 = SDE published types from ZIP
   - types3 = types2 - types1  (ONLY these call ESI)
+
+New exclude rules:
+  - "Market → ...": exact match only
+  - "Market → ... → ...": exact + any descendant trees prefixed by "Market → ..."
+
+marketGroup null rule:
+  - if type has no marketGroup => "marketGroup": null (not "")
+
+marketTree.txt icons:
+  - folders: 📁
+  - types: ☠️ if contraband else 📦
+  - no other icons
 """
 
 from __future__ import annotations
@@ -32,7 +44,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -194,7 +206,6 @@ def refresh_packaged_for_new_types(
 
             if status == 200 and isinstance(payload, dict):
                 pkg = payload.get("packaged_volume")
-                # If absent -> treat as "no exception"
                 if pkg is None:
                     packaged_map.pop(tid, None)
                     break
@@ -244,7 +255,6 @@ def read_regions(zf: zipfile.ZipFile) -> Dict[int, str]:
 
 
 def read_constellations(zf: zipfile.ZipFile) -> Dict[int, Tuple[str, int]]:
-    # constellationID -> (name_en, regionID)
     out: Dict[int, Tuple[str, int]] = {}
     for obj in iter_jsonl_from_zip(zf, "mapConstellations.jsonl"):
         cid = int(obj["_key"])
@@ -261,11 +271,6 @@ def read_factions(zf: zipfile.ZipFile) -> Dict[int, str]:
 
 
 def read_solarsystems(zf: zipfile.ZipFile) -> Dict[int, Dict]:
-    """
-    solarSystemID -> dict with:
-      name, constellationID, regionID, position[x,y,z], factionID?, securityStatus,
-      planets count, stargates count
-    """
     out: Dict[int, Dict] = {}
     for obj in iter_jsonl_from_zip(zf, "mapSolarSystems.jsonl"):
         sid = int(obj["_key"])
@@ -340,12 +345,6 @@ def read_corporations(zf: zipfile.ZipFile) -> Dict[int, str]:
 
 
 def read_station_services(zf: zipfile.ZipFile) -> Dict[int, str]:
-    """
-    stationServices.jsonl:
-      _key = serviceID
-      serviceName.en = name
-    We normalize into canonical keys.
-    """
     def norm(s: str) -> str:
         x = s.strip().lower()
         x = re.sub(r"\s+", "-", x)
@@ -377,12 +376,6 @@ def read_station_services(zf: zipfile.ZipFile) -> Dict[int, str]:
 
 
 def read_station_operations(zf: zipfile.ZipFile, service_keys: Dict[int, str]) -> Dict[int, Dict]:
-    """
-    stationOperations.jsonl:
-      _key = operationID
-      useOperationName
-      services = [serviceID...]
-    """
     out: Dict[int, Dict] = {}
     for obj in iter_jsonl_from_zip(zf, "stationOperations.jsonl"):
         oid = int(obj["_key"])
@@ -446,10 +439,6 @@ def read_contraband_set(zf: zipfile.ZipFile) -> Set[int]:
 
 
 def read_published_types_base(zf: zipfile.ZipFile) -> Dict[int, Dict]:
-    """
-    published-only:
-      typeID -> {type, volume, group_id, marketGroupID}
-    """
     out: Dict[int, Dict] = {}
     for obj in iter_jsonl_from_zip(zf, "types.jsonl"):
         if not _get_bool(obj, "published", default=False):
@@ -531,7 +520,6 @@ def build_types_out(
     rows: List[Dict] = []
     for tid, t in types_base.items():
         volume = float(t["volume"])
-        # packaged: exception if exists else volume
         pkg = packaged_map.get(tid, {}).get("packaged")
         packaged = float(pkg) if pkg is not None else volume
 
@@ -543,7 +531,12 @@ def build_types_out(
             cname = categories.get(cat_id, str(cat_id))
 
         mgid = t.get("marketGroupID")
-        mgname = market_groups.get(int(mgid), ("", None))[0] if mgid is not None and int(mgid) in market_groups else ""
+
+        # IMPORTANT: marketGroup must be null if no marketGroup
+        mgname: Optional[str] = None
+        if mgid is not None and int(mgid) in market_groups:
+            mgname = market_groups[int(mgid)][0]
+
         mtree = market_tree_string(int(mgid) if mgid is not None else None, market_groups)
 
         rows.append(
@@ -554,12 +547,13 @@ def build_types_out(
                 "packaged": packaged,
                 "group": gname,
                 "category": cname,
-                "marketGroup": mgname,
-                "marketTree": mtree,
+                "marketGroup": mgname,   # None -> null
+                "marketTree": mtree,     # None -> null
                 "is_contraband": tid in contraband,
                 "is_gategank": gname == "Smart Bomb",
             }
         )
+
     rows.sort(key=lambda r: r["typeID"])
     return rows
 
@@ -577,40 +571,34 @@ def build_market_tree_jsonl(types_rows: List[Dict]) -> List[Dict]:
     return out
 
 
-def build_market_tree_txt(market_groups: Dict[int, Tuple[str, Optional[int]]], types_base: Dict[int, Dict]) -> str:
+def build_market_tree_txt(
+    market_groups: Dict[int, Tuple[str, Optional[int]]],
+    types_base: Dict[int, Dict],
+    contraband: Set[int],
+) -> str:
+    # parent -> children
     children: Dict[Optional[int], List[int]] = defaultdict(list)
     for mgid, (_name, parent) in market_groups.items():
         children[parent].append(mgid)
     for k in list(children.keys()):
         children[k].sort(key=lambda mgid: market_groups[mgid][0].lower())
 
-    group_types: Dict[int, List[str]] = defaultdict(list)
-    for _tid, t in types_base.items():
+    # marketGroupID -> list of (typeID, typeName)
+    group_types: Dict[int, List[Tuple[int, str]]] = defaultdict(list)
+    for tid, t in types_base.items():
         mgid = t.get("marketGroupID")
         if mgid is None:
             continue
-        if int(mgid) in market_groups:
-            group_types[int(mgid)].append(str(t.get("type", "")))
+        mgid = int(mgid)
+        if mgid in market_groups:
+            group_types[mgid].append((int(tid), str(t.get("type", ""))))
     for mgid in list(group_types.keys()):
-        group_types[mgid].sort(key=lambda x: x.lower())
+        group_types[mgid].sort(key=lambda p: p[1].lower())
 
     roots = children.get(None, [])
 
-    def icon_for_type_name(name: str) -> str:
-        n = name.lower()
-        if "blueprint" in n:
-            return "📜"
-        if "drone" in n:
-            return "🐝"
-        if "charge" in n or "ammo" in n or "missile" in n:
-            return "☄️"
-        if "skill" in n:
-            return "🎓"
-        if "implant" in n or "booster" in n:
-            return "🧠"
-        if "ship" in n:
-            return "🚢"
-        return "📦"
+    def type_icon(tid: int) -> str:
+        return "☠️" if tid in contraband else "📦"
 
     lines: List[str] = ["Market"]
 
@@ -624,24 +612,34 @@ def build_market_tree_txt(market_groups: Dict[int, Tuple[str, Optional[int]]], t
         tps = group_types.get(mgid, [])
 
         for i, child in enumerate(kids):
-            # last if last child AND no types after
-            walk(child, new_prefix, i == len(kids) - 1 and len(tps) == 0)
+            child_is_last = (i == len(kids) - 1) and (len(tps) == 0)
+            walk(child, new_prefix, child_is_last)
 
-        for j, tn in enumerate(tps):
+        for j, (tid, tname) in enumerate(tps):
             b = "└── " if j == len(tps) - 1 else "├── "
-            lines.append(f"{new_prefix}{b}{icon_for_type_name(tn)} {tn}")
+            lines.append(f"{new_prefix}{b}{type_icon(tid)} {tname}")
 
     for i, root in enumerate(roots):
         walk(root, "", i == len(roots) - 1)
 
     lines.append("")
-    lines.append("Leyenda (ajustable): ☄️ ammo | 🐝 drones | 📜 blueprints | 🎓 skills | 🧠 implants/boosters | 🚢 ships | 📦 default")
+    lines.append("Leyenda: ☠️ contraband | 📦 normal")
     lines.append("")
     return "\n".join(lines)
 
 
-def build_excluded_market_types(exclude_config: Path, types_rows: List[Dict], market_tree_rows: List[Dict]) -> List[Dict]:
+def build_excluded_market_types(
+    exclude_config: Path,
+    types_rows: List[Dict],
+    market_tree_rows: List[Dict],
+) -> List[Dict]:
+    """
+    New rule:
+      - "Market → A → B"           => exact match only
+      - "Market → A → B → ..."     => exact + descendants prefixed by "Market → A → B → "
+    """
     type_to_tree: Dict[str, Optional[str]] = {str(r.get("type", "")): r.get("marketTree") for r in types_rows}
+
     tree_to_types: Dict[str, List[str]] = {}
     for r in market_tree_rows:
         mt = str(r.get("marketTree", ""))
@@ -659,14 +657,24 @@ def build_excluded_market_types(exclude_config: Path, types_rows: List[Dict], ma
             continue
 
         if line.startswith("Market → "):
-            if line in tree_to_types:
-                for tname in tree_to_types[line]:
+            wants_prefix = line.endswith(" → ...")
+            base = line[:-6] if wants_prefix else line  # remove trailing " → ..."
+
+            if wants_prefix:
+                prefix = base + " → "
+                matched_trees = [mt for mt in tree_to_types.keys() if mt == base or mt.startswith(prefix)]
+            else:
+                matched_trees = [base] if base in tree_to_types else []
+
+            for mt in matched_trees:
+                for tname in tree_to_types.get(mt, []):
                     out.append({"excludedType": tname, "marketTree": type_to_tree.get(tname)})
+
         else:
             if line in type_to_tree:
                 out.append({"excludedType": line, "marketTree": type_to_tree.get(line)})
 
-    # de-dup + deterministic sort
+    # De-dup + deterministic order
     uniq = {(r["excludedType"], r.get("marketTree")): r for r in out}
     out2 = list(uniq.values())
     out2.sort(key=lambda r: (str(r.get("excludedType", "")).lower(), str(r.get("marketTree", "") or "").lower()))
@@ -739,13 +747,12 @@ def build_stations_out(
 
         rows.append(
             {
-                "_solarSystemID": sid,  # internal for later injection
+                "_solarSystemID": sid,  # internal
                 "stationID": station_id,
                 "station": station_name,
                 "stationType": station_type,
                 "solarSystem": ss_name,
                 "owner": owner,
-                # cynoJumpSecurity injected later
                 "cynoDockSecurity": dock_label,
                 "docking": docking,
                 "market": market,
@@ -781,9 +788,8 @@ def build_solarsystems_out(
         fid = s.get("factionID")
         faction = factions.get(int(fid)) if fid is not None and int(fid) in factions else None
 
-        # securityStatus: redondeo 6 decimales (como pediste)
         sec = float(s.get("securityStatus", 0.0))
-        sec6 = float(f"{sec:.6f}")
+        sec6 = float(f"{sec:.6f}")  # hard requirement
 
         rows.append(
             {
@@ -836,7 +842,6 @@ def main() -> int:
     exclude_state = Path(args.exclude_state) if args.exclude_state else Path("states/excludeMarketTypes.json")
 
     with zipfile.ZipFile(args.zip) as zf:
-        # ---- read core maps ----
         regions = read_regions(zf)
         consts = read_constellations(zf)
         factions = read_factions(zf)
@@ -845,25 +850,23 @@ def main() -> int:
 
         log(f"[SDE] regions={len(regions)} constellations={len(consts)} systems={len(systems)} corps={len(corp_names)}")
 
-        # ---- published types base (types2) ----
         types_base = read_published_types_base(zf)
         types2_ids = set(types_base.keys())
         log(f"[DELTA] new SDE types2 size: {len(types2_ids)}")
 
-        # types3 = types2 - types1
         types3_ids = sorted([tid for tid in types2_ids if tid not in baseline_ids])
         log(f"[DELTA] types3 (types2 - types1) size: {len(types3_ids)}")
 
-        # prune packaged exceptions if type disappears from SDE
+        # prune packaged if type disappeared
         before = len(packaged_map)
         packaged_map = {tid: row for tid, row in packaged_map.items() if tid in types2_ids}
         pruned = before - len(packaged_map)
         if pruned:
             log(f"[PACKAGED] pruned {pruned} exceptions (types no longer in SDE).")
 
-        # ---- ESI packaged only for types3 ----
         type_name_by_id = {tid: t["type"] for tid, t in types_base.items()}
         sde_volume_by_id = {tid: float(t["volume"]) for tid, t in types_base.items()}
+
         refresh_packaged_for_new_types(
             new_type_ids=types3_ids,
             type_name_by_id=type_name_by_id,
@@ -871,17 +874,14 @@ def main() -> int:
             packaged_map=packaged_map,
         )
 
-        # write packaged exceptions output
         write_packaged_exceptions(out_esi / "packaged.jsonl.gz", packaged_map)
         log(f"[PACKAGED] wrote exceptions: {len(packaged_map)} -> {out_esi/'packaged.jsonl.gz'}")
 
-        # ---- market groups/meta for types output ----
         market_groups = read_market_groups(zf)
         groups_meta = read_groups_meta(zf)
         categories = read_categories(zf)
         contraband = read_contraband_set(zf)
 
-        # build types output
         types_rows = build_types_out(
             types_base=types_base,
             packaged_map=packaged_map,
@@ -891,11 +891,9 @@ def main() -> int:
             contraband=contraband,
         )
 
-        # marketTree outputs
         market_tree_rows = build_market_tree_jsonl(types_rows)
-        market_tree_txt = build_market_tree_txt(market_groups, types_base)
+        market_tree_txt = build_market_tree_txt(market_groups, types_base, contraband)
 
-        # ---- stations + cynoDock + services ----
         type_names = read_type_name_map(zf)
         planet_orbits = read_planet_orbits(zf, systems)
         moon_orbits = read_moon_orbits(zf, planet_orbits)
@@ -912,19 +910,16 @@ def main() -> int:
             type_names=type_names,
         )
 
-        # system cynoJumpSecurity
         system_cyno_jump: Dict[int, str] = {}
         for sid in systems.keys():
             labels = system_station_labels.get(sid, set())
             scount = int(stations_count.get(sid, 0))
             system_cyno_jump[sid] = system_cyno(labels, scount)
 
-        # inject cynoJumpSecurity into stations + remove internal key
         for r in stations_rows:
             sid = int(r.pop("_solarSystemID", -1))
             r["cynoJumpSecurity"] = system_cyno_jump.get(sid, "no jump")
 
-        # ---- solarsystems counts ----
         moons_count = count_moons_by_system(zf)
         belts_count = count_asteroid_belts_by_system(zf)
 
@@ -939,14 +934,11 @@ def main() -> int:
             system_cyno_jump=system_cyno_jump,
         )
 
-        # ---- excludedMarketTypes ----
         excluded_rows = build_excluded_market_types(exclude_config, types_rows, market_tree_rows)
 
-        # exclude state (etag = sha256(config))
         cfg_etag = sha256_file(exclude_config)
         write_text(out_sde / "excludeMarketTypes.state.json", json.dumps({"etag": cfg_etag}, ensure_ascii=False, indent=2) + "\n")
 
-        # ---- write all SDE outputs expected by workflow ----
         write_jsonl_gz(out_sde / "regions.jsonl.gz", build_regions_out(regions))
         write_jsonl_gz(out_sde / "constellations.jsonl.gz", build_constellations_out(consts, regions))
         write_jsonl_gz(out_sde / "solarsystems.jsonl.gz", sol_rows)
@@ -958,7 +950,6 @@ def main() -> int:
         write_jsonl_gz(out_sde / "excludedMarketTypes.jsonl.gz", excluded_rows)
         write_text(out_sde / "marketTree.txt", market_tree_txt)
 
-    # sanity checks for files your workflow mv's
     expected = [
         out_sde / "regions.jsonl.gz",
         out_sde / "constellations.jsonl.gz",
