@@ -107,3 +107,5 @@
 {"killID":133495630,"zkb":{"hash":"db6ca11366c2f6ba6d67d2513ea221ff336ff686","locationID":50008747,"labels":["tz:eu","cat:6","#:1","pvp","loc:lowsec"]},"rearm":0}
 {"killID":133495701,"zkb":{"hash":"117cdb8cb60934ab0deeac9880418129d6391c76","locationID":50012093,"labels":["tz:eu","cat:6","solo","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
 {"killID":133495639,"zkb":{"hash":"32ed4f631b1a8a27705f1ad76c6c927b07d8bf35","locationID":50008691,"labels":["tz:eu","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133495476,"zkb":{"hash":"72176c3642d3db39eaed4c71c828908e3a656147","locationID":50012263,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133495456,"zkb":{"hash":"00d553556785097df844e468192f1b39436a0761","locationID":50012263,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
