@@ -62,7 +62,7 @@ jobs:
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "7"
-      LOCK_TIME: 1800
+      LOCK_TIME: 16200
 
       # BigQuery
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
