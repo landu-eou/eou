@@ -71,7 +71,7 @@ jobs:
 
       # RedisQ
       REDISQ_BASE: https://zkillredisq.stream/listen.php
-      POLL_MAX_SECONDS: 1200
+      POLL_MAX_SECONDS: 14400
       NULL_STREAK_MAX: 10
       TTW: 1
 
