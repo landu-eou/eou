@@ -53,7 +53,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 300
 
     env:
       WORKFLOW_FILE: eou_gate_kills_rq-gh-bq.yml
