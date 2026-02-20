@@ -35,3 +35,13 @@
 {"killID":133509280,"zkb":{"hash":"68161e6c38df058e23bd7e57e16b78321b53b5d9","locationID":50009419,"labels":["tz:au","cat:6","#:1","pvp","loc:lowsec"]},"rearm":0}
 {"killID":133509274,"zkb":{"hash":"14391b4aa0eb66814a4d70fc925b42197a237568","locationID":50007909,"labels":["tz:au","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133509266,"zkb":{"hash":"29fda30ceffa21d41f9300697052725decd6aa7e","locationID":50007909,"labels":["tz:au","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133509271,"zkb":{"hash":"8a5392b214f8fcc057d3c03a1c3bbc0c489b0705","locationID":50011316,"labels":["tz:au","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133509269,"zkb":{"hash":"fb1f8d810f9297edaf1c27ba35c6e393149bfba3","locationID":50008690,"labels":["tz:au","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133509258,"zkb":{"hash":"e3b48e66d6c01a96a5828ad05be9b404fc072e68","locationID":50008690,"labels":["tz:au","cat:6","#:1","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133509265,"zkb":{"hash":"145adfee01d49201d97b6764e0be1c074f5d4dac","locationID":50008690,"labels":["tz:au","cat:6","#:5+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133509275,"zkb":{"hash":"d950b9bcbd492da83c63d1a2359b5c6a7b4f8efe","locationID":50008690,"labels":["tz:au","cat:6","#:5+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133509254,"zkb":{"hash":"3605e072a579fc9ec875d24d95ad6c0310a8af8f","locationID":50016287,"labels":["tz:au","cat:6","solo","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133509277,"zkb":{"hash":"4316a83cfa66f202500038a9037428f0d30665a0","locationID":50010858,"labels":["tz:au","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133509289,"zkb":{"hash":"8ae82278fd93d1b25cb7f930d9149bd695065b8b","locationID":50010858,"labels":["tz:au","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133509320,"zkb":{"hash":"2a2edd8ea106656e7b9eed2e77992383837131cf","locationID":50005655,"labels":["tz:au","cat:6","#:10+","pvp","loc:lowsec","isk:10b+","capital"]},"rearm":0}
+{"killID":133509306,"zkb":{"hash":"04fdb6e7d0163db49dc61a59cfe6dc5a9b616bb4","locationID":50005655,"labels":["tz:au","cat:6","#:10+","pvp","loc:lowsec","isk:1b+"]},"rearm":0}
