@@ -73,6 +73,7 @@ BLOCKS: List[List[str]] = [
     [
         "Stain",
         "Venal",
+        "Syndicate",
         "Curse",
         "Great Wildlands",
         "Outer Ring",
@@ -113,7 +114,6 @@ BLOCKS: List[List[str]] = [
         "Tenerifis",
         "Feythabolis",
         "Cloud Ring",
-        "Syndicate",
         "Insmother",
         "Detorid",
         "Scalding Pass",
