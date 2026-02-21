@@ -9,10 +9,10 @@ Tokens (EXACTAMENTE como "ESI Structures"):
 - Selección: PRIMARY_CHAR_ID primero; luego resto de char_id desc
 - Autenticadas (structures):
   - 401 -> sleep 30s, rota token, retry
-  - 420 -> sleep 30s, retry (no necesariamente rotar)
+  - 420 -> sleep 30s, retry (sin rotar necesariamente)
 - Presupuesto global RETRY_BUDGET=3 (401+420 autenticadas). Si se agota -> fail.
 
-No imprime secretos.
+No imprime secretos (solo logs seguros: char_id, structure_id, page, status, remaining_budget).
 """
 
 from __future__ import annotations
@@ -31,9 +31,9 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import requests
 
 
-# -------------------------------
+# =============================================================================
 # Utils
-# -------------------------------
+# =============================================================================
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -52,6 +52,7 @@ def _parse_http_date(value: Optional[str]) -> Optional[datetime]:
 
 
 def _parse_iso_utc(value: str) -> datetime:
+    # ESI suele devolver RFC3339 con Z
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     return datetime.fromisoformat(value).astimezone(timezone.utc)
@@ -85,13 +86,13 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
         return default
 
 
-# -------------------------------
+# =============================================================================
 # Tokens (Secrets) - EXACT policy
-# -------------------------------
+# =============================================================================
 
 class TokenPool:
     def __init__(self, primary_char_id: int, token_map: Dict[int, str]):
-        self.primary_char_id = primary_char_id
+        self.primary_char_id = int(primary_char_id)
         self.token_map = {int(k): str(v) for k, v in token_map.items() if str(v).strip()}
         self.order: List[int] = self._build_order()
         self.idx = 0
@@ -126,6 +127,7 @@ class TokenPool:
 
 
 def load_tokens_from_env() -> Dict[int, str]:
+    """Parsea EOU_ACCESS_TOKENS_1/2 y fusiona en {char_id:int -> token:str}."""
     t1 = os.environ.get("EOU_ACCESS_TOKENS_1", "").strip()
     t2 = os.environ.get("EOU_ACCESS_TOKENS_2", "").strip()
 
@@ -143,39 +145,15 @@ def load_tokens_from_env() -> Dict[int, str]:
                 continue
         return out
 
-    d = {}
+    d: Dict[int, str] = {}
     d.update(parse(t1))
     d.update(parse(t2))
     return d
 
 
-# -------------------------------
-# Google Sheets (estado) - sigue igual
-# -------------------------------
-
-def sheets_get_cell(
-    *,
-    access_token: str,
-    spreadsheet_id: str,
-    tab_name: str,
-    cell_a1: str,
-) -> str:
-    url = (
-        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}"
-        f"/values/{tab_name}!{cell_a1}?valueRenderOption=UNFORMATTED_VALUE"
-    )
-    r = requests.get(url, headers={"Authorization": f"Bearer {access_token}"}, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    values = data.get("values")
-    if not values or not values[0] or values[0][0] is None:
-        return ""
-    return str(values[0][0]).strip()
-
-
-# -------------------------------
+# =============================================================================
 # SDE/ESI local indices
-# -------------------------------
+# =============================================================================
 
 def _read_jsonl_gz(path: str) -> Iterable[Dict[str, Any]]:
     with gzip.open(path, "rt", encoding="utf-8") as f:
@@ -232,8 +210,9 @@ def load_structures_market_map(path: str) -> Tuple[List[int], Dict[int, str]]:
         ids.append(sid_i)
         if obj.get("station") is not None:
             names[sid_i] = str(obj.get("station"))
+    # dedupe, preserve order
     seen = set()
-    uniq = []
+    uniq: List[int] = []
     for i in ids:
         if i in seen:
             continue
@@ -255,9 +234,9 @@ def load_solarsystems_map(path: str) -> Dict[int, Tuple[str, str, str]]:
     return out
 
 
-# -------------------------------
+# =============================================================================
 # ESI HTTP client
-# -------------------------------
+# =============================================================================
 
 @dataclass
 class EsiResponse:
@@ -295,14 +274,14 @@ class EsiClient:
         for attempt in range(max_retries + 1):
             r = self.session.request(method, url, params=p, headers=h, timeout=timeout)
 
-            # 429: respetar Retry-After
+            # Rate limit 429 -> Retry-After
             if allow_429 and r.status_code == 429:
                 ra = r.headers.get("Retry-After")
                 sleep_s = _safe_int(ra, default=5)
                 time.sleep(max(1, sleep_s))
                 continue
 
-            # 5xx: backoff
+            # transient 5xx -> backoff
             if r.status_code in retry_on_status and attempt < max_retries:
                 time.sleep(retry_backoff_base ** attempt)
                 continue
@@ -338,16 +317,23 @@ class EsiClient:
         )
 
 
-# -------------------------------
+# =============================================================================
 # BigQuery helpers
-# -------------------------------
+# =============================================================================
 
 def run_cmd(cmd: List[str], *, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 def bq_query(project_id: str, sql: str) -> None:
-    cmd = ["bq", "--quiet", "query", f"--project_id={project_id}", "--use_legacy_sql=false", sql]
+    cmd = [
+        "bq",
+        "--quiet",
+        "query",
+        f"--project_id={project_id}",
+        "--use_legacy_sql=false",
+        sql,
+    ]
     cp = run_cmd(cmd, check=False)
     if cp.returncode != 0:
         raise RuntimeError(f"bq query failed: {cp.stderr.strip()}")
@@ -361,7 +347,9 @@ def bq_load_ndjson_gz(
     data_file: str,
 ) -> None:
     cmd = [
-        "bq", "--quiet", "load",
+        "bq",
+        "--quiet",
+        "load",
         f"--project_id={project_id}",
         "--source_format=NEWLINE_DELIMITED_JSON",
         "--replace=true",
@@ -407,14 +395,13 @@ def bq_create_or_replace_empty_table(
     bq_query(project_id, sql)
 
 
-# -------------------------------
+# =============================================================================
 # Main
-# -------------------------------
+# =============================================================================
 
 def main() -> int:
     base_url = os.environ.get("ESI_BASE_URL", "https://esi.evetech.net")
     datasource = os.environ.get("ESI_DATASOURCE", "tranquility")
-
     region_ids_raw = os.environ.get("REGION_IDS", "").strip()
 
     primary_char_id = int(os.environ.get("PRIMARY_CHAR_ID", "2124070822"))
@@ -458,28 +445,30 @@ def main() -> int:
 
     client = EsiClient(base_url=base_url, datasource=datasource)
 
-    # Regions list
+    # Region list
     if region_ids_raw:
         region_ids = [int(x.strip()) for x in region_ids_raw.split(",") if x.strip()]
     else:
         region_ids = client.list_regions()
 
-    # Tokens pool (Secrets) - EXACT policy
+    # Token pool (Secrets) - EXACT policy
     token_map = load_tokens_from_env()
     pool = TokenPool(primary_char_id=primary_char_id, token_map=token_map)
 
     # Global retry budget for authenticated (401+420) across entire run
     auth_retry_budget = retry_budget
 
-    def consume_budget_or_fail() -> None:
+    def consume_budget_or_fail(reason: str) -> None:
+        """Consume EXACTLY 1 retry from global budget. If no budget left -> fail immediately."""
         nonlocal auth_retry_budget
-        auth_retry_budget -= 1
-        if auth_retry_budget < 0:
-            # presupuesto agotado => falla run
+        if auth_retry_budget <= 0:
             raise RuntimeError("RETRY_BUDGET exhausted for authenticated requests (401/420).")
+        auth_retry_budget -= 1
 
-    # Writers + time reference
+    # Writers
     buy_count = sell_count = jita_buy_count = jita_sell_count = 0
+
+    # ✅ timeLeft = until - now (use one stable 'now' reference for the run)
     now_ref = _utc_now()
 
     max_expires: Optional[datetime] = None
@@ -510,7 +499,7 @@ def main() -> int:
         if isinstance(range_val, int):
             return range_val
         s = str(range_val)
-        if s == "station" or s == "solarsystem":
+        if s in ("station", "solarsystem"):
             return 0
         if s == "region":
             return 1000
@@ -526,29 +515,36 @@ def main() -> int:
         """
         - 401: sleep 30s, rotate token, retry (budget--)
         - 420: sleep 30s, retry (budget--)
-        - budget global across all calls
+        - budget global across entire run
         """
-        nonlocal auth_retry_budget
-
         if not pool.has_any():
             return None
 
         while True:
+            cid = pool.current_char_id()
             tok = pool.current_token()
             if not tok:
-                # no usable token
                 return None
 
             resp = client.get_structure_orders(structure_id, page=page, bearer_token=tok)
 
             if resp.status == 401:
-                consume_budget_or_fail()
+                consume_budget_or_fail("401")
+                # logging seguro (sin token)
+                print(
+                    f"auth_retry=401 structure_id={structure_id} page={page} "
+                    f"char_id={cid} remaining_budget={auth_retry_budget}"
+                )
                 time.sleep(30)
                 pool.rotate()
                 continue
 
             if resp.status == 420:
-                consume_budget_or_fail()
+                consume_budget_or_fail("420")
+                print(
+                    f"auth_retry=420 structure_id={structure_id} page={page} "
+                    f"char_id={cid} remaining_budget={auth_retry_budget}"
+                )
                 time.sleep(30)
                 # no rotation required
                 continue
@@ -560,11 +556,11 @@ def main() -> int:
          gzip.open(out_jita_buy, "wb", compresslevel=6) as w_jita_buy, \
          gzip.open(out_jita_sell, "wb", compresslevel=6) as w_jita_sell:
 
-        # -----------------------
+        # ---------------------------------------------------------------------
         # Regions (no auth)
-        # -----------------------
+        # ---------------------------------------------------------------------
         for rid in region_ids:
-            # tolerancia mínima a 420 sin tocar auth budget (porque esto no es auth)
+            # Local retry for 420 (non-auth); no toca auth_retry_budget
             local_420_budget = 2
 
             resp = client.get_region_orders(rid, page=1)
@@ -577,6 +573,7 @@ def main() -> int:
                 continue
 
             update_cache_headers(resp.headers)
+
             pages = _safe_int(resp.headers.get("X-Pages"), default=1)
             pages = max(1, pages)
 
@@ -601,7 +598,6 @@ def main() -> int:
                             continue
 
                         is_buy = bool(o.get("is_buy_order"))
-
                         issued_dt = _parse_iso_utc(str(o.get("issued")))
                         duration_days = int(o.get("duration"))
                         until_dt = issued_dt + timedelta(days=duration_days)
@@ -654,9 +650,8 @@ def main() -> int:
                                 }
                                 write_row(w_jita_buy, j)
                                 jita_buy_count += 1
-
                         else:
-                            # ✅ sell tables: is_buy_order=false (ya viene del API)
+                            # ✅ sell tables: is_buy_order=false
                             solar, const, reg = system_info(sys_id)
                             out = dict(row_common)
                             out.update({
@@ -686,16 +681,16 @@ def main() -> int:
                     except Exception:
                         continue
 
-        # -----------------------
-        # Structures (auth) - with EXACT policy
-        # -----------------------
+        # ---------------------------------------------------------------------
+        # Structures (auth) - EXACT policy
+        # ---------------------------------------------------------------------
         if structure_ids and pool.has_any():
             for sid in structure_ids:
                 page1 = fetch_structure_page_with_policy(sid, page=1)
                 if page1 is None:
                     break
 
-                # 403/404: skip structure
+                # 403/404 -> skip structure
                 if page1.status in (403, 404):
                     continue
 
@@ -743,6 +738,7 @@ def main() -> int:
                             if is_buy:
                                 rint = range_to_int(o.get("range"))
                                 solar, const, reg = system_info(sys_id)
+
                                 out = dict(row_common)
                                 out.update({
                                     "station": station_name_from_location(loc_id),
@@ -771,6 +767,7 @@ def main() -> int:
                                     jita_buy_count += 1
                             else:
                                 solar, const, reg = system_info(sys_id)
+
                                 out = dict(row_common)
                                 out.update({
                                     "station": station_name_from_location(loc_id),
@@ -804,7 +801,6 @@ def main() -> int:
                 for page in range(2, pages + 1):
                     resp_p = fetch_structure_page_with_policy(sid, page=page)
                     if resp_p is None:
-                        # sin tokens utilizables
                         break
                     if resp_p.status in (403, 404):
                         break
@@ -814,7 +810,9 @@ def main() -> int:
                     update_cache_headers(resp_p.headers)
                     process_orders(resp_p)
 
-    # BigQuery: recrear/cargar tablas "de golpe"
+    # -------------------------------------------------------------------------
+    # BigQuery: recrear/cargar tablas en bloque (REPLACE)
+    # -------------------------------------------------------------------------
     table_specs = [
         (table_buy, schema_buy, out_buy, buy_count),
         (table_sell, schema_sell, out_sell, sell_count),
@@ -827,7 +825,7 @@ def main() -> int:
         if cnt > 0:
             bq_load_ndjson_gz(project_id, dataset, tname, schema_file, data_file)
 
-    # Outputs para finalize
+    # Outputs para GitHub Actions (Finalize)
     if max_expires is None:
         max_expires = _utc_now()
         max_last_modified = None
