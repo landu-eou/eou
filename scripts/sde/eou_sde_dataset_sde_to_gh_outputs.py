@@ -22,17 +22,20 @@ Key packaged strategy:
   - new types2 = SDE published types from ZIP
   - types3 = types2 - types1  (ONLY these call ESI)
 
-New exclude rules:
+Exclude rules:
   - "Market → ...": exact match only
   - "Market → ... → ...": exact + any descendant trees prefixed by "Market → ..."
 
-marketGroup null rule:
-  - if type has no marketGroup => "marketGroup": null (not "")
+types.jsonl.gz:
+  - marketGroup must be null if no marketGroup (not "")
 
 marketTree.txt icons:
   - folders: 📁
   - types: ☠️ if contraband else 📦
   - no other icons
+
+excludedMarketTypes.jsonl.gz (UPDATED):
+  - {"typeID":..., "type":..., "marketTree":...}
 """
 
 from __future__ import annotations
@@ -182,7 +185,6 @@ def refresh_packaged_for_new_types(
 ) -> None:
     """
     Update packaged_map in-place for ONLY new types (types3).
-
     Store exception ONLY when packaged_volume != volume.
     """
     if not new_type_ids:
@@ -532,7 +534,6 @@ def build_types_out(
 
         mgid = t.get("marketGroupID")
 
-        # IMPORTANT: marketGroup must be null if no marketGroup
         mgname: Optional[str] = None
         if mgid is not None and int(mgid) in market_groups:
             mgname = market_groups[int(mgid)][0]
@@ -576,14 +577,12 @@ def build_market_tree_txt(
     types_base: Dict[int, Dict],
     contraband: Set[int],
 ) -> str:
-    # parent -> children
     children: Dict[Optional[int], List[int]] = defaultdict(list)
     for mgid, (_name, parent) in market_groups.items():
         children[parent].append(mgid)
     for k in list(children.keys()):
         children[k].sort(key=lambda mgid: market_groups[mgid][0].lower())
 
-    # marketGroupID -> list of (typeID, typeName)
     group_types: Dict[int, List[Tuple[int, str]]] = defaultdict(list)
     for tid, t in types_base.items():
         mgid = t.get("marketGroupID")
@@ -634,12 +633,24 @@ def build_excluded_market_types(
     market_tree_rows: List[Dict],
 ) -> List[Dict]:
     """
-    New rule:
+    Builds excludedMarketTypes.jsonl.gz (UPDATED SCHEMA):
+      {"typeID":..., "type":..., "marketTree":...}
+
+    Rule:
       - "Market → A → B"           => exact match only
       - "Market → A → B → ..."     => exact + descendants prefixed by "Market → A → B → "
+      - Non "Market → ..." line: exact type match against types_rows[].type
     """
-    type_to_tree: Dict[str, Optional[str]] = {str(r.get("type", "")): r.get("marketTree") for r in types_rows}
+    # typeName -> (typeID, marketTree)
+    type_index: Dict[str, Tuple[int, Optional[str]]] = {}
+    for r in types_rows:
+        tname = str(r.get("type", ""))
+        tid = _get_int(r, "typeID")
+        if not tname or tid is None:
+            continue
+        type_index[tname] = (tid, r.get("marketTree"))
 
+    # marketTree -> [typeName...]
     tree_to_types: Dict[str, List[str]] = {}
     for r in market_tree_rows:
         mt = str(r.get("marketTree", ""))
@@ -668,16 +679,22 @@ def build_excluded_market_types(
 
             for mt in matched_trees:
                 for tname in tree_to_types.get(mt, []):
-                    out.append({"excludedType": tname, "marketTree": type_to_tree.get(tname)})
+                    if tname in type_index:
+                        tid, mtree = type_index[tname]
+                        out.append({"typeID": tid, "type": tname, "marketTree": mtree})
 
         else:
-            if line in type_to_tree:
-                out.append({"excludedType": line, "marketTree": type_to_tree.get(line)})
+            # exact type match
+            if line in type_index:
+                tid, mtree = type_index[line]
+                out.append({"typeID": tid, "type": line, "marketTree": mtree})
 
-    # De-dup + deterministic order
-    uniq = {(r["excludedType"], r.get("marketTree")): r for r in out}
+    # De-dup by typeID (stable) + deterministic sort
+    uniq: Dict[int, Dict] = {}
+    for r in out:
+        uniq[int(r["typeID"])] = r
     out2 = list(uniq.values())
-    out2.sort(key=lambda r: (str(r.get("excludedType", "")).lower(), str(r.get("marketTree", "") or "").lower()))
+    out2.sort(key=lambda r: int(r["typeID"]))
     return out2
 
 
@@ -857,7 +874,6 @@ def main() -> int:
         types3_ids = sorted([tid for tid in types2_ids if tid not in baseline_ids])
         log(f"[DELTA] types3 (types2 - types1) size: {len(types3_ids)}")
 
-        # prune packaged if type disappeared
         before = len(packaged_map)
         packaged_map = {tid: row for tid, row in packaged_map.items() if tid in types2_ids}
         pruned = before - len(packaged_map)
