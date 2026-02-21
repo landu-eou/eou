@@ -1,0 +1,15 @@
+[
+  {"name":"type","type":"STRING","mode":"NULLABLE"},
+  {"name":"orderPrice","type":"FLOAT","mode":"NULLABLE"},
+  {"name":"volRemain","type":"INTEGER","mode":"NULLABLE"},
+  {"name":"volTotal","type":"INTEGER","mode":"NULLABLE"},
+  {"name":"volMin","type":"INTEGER","mode":"NULLABLE"},
+  {"name":"station","type":"STRING","mode":"NULLABLE"},
+  {"name":"solarSystem","type":"STRING","mode":"NULLABLE"},
+  {"name":"constellation","type":"STRING","mode":"NULLABLE"},
+  {"name":"region","type":"STRING","mode":"NULLABLE"},
+  {"name":"issued","type":"TIMESTAMP","mode":"REQUIRED"},
+  {"name":"until","type":"TIMESTAMP","mode":"REQUIRED"},
+  {"name":"timeLeft","type":"STRING","mode":"NULLABLE"},
+  {"name":"orderID","type":"INTEGER","mode":"NULLABLE"}
+]
