@@ -1,500 +1,379 @@
-30002736        // Ainaille ← Ambrye ← Sinq Laison
-30002735        // Caretyn ← Ambrye ← Sinq Laison
-30042715        // Trossere ← Ambrye ← Sinq Laison
-30002733        // Pucherie ← Ambrye ← Sinq Laison
-30002731        // Vittenyn ← Ambrye ← Sinq Laison
-30002732        // Mirilene ← Ambrye ← Sinq Laison
-30002667        // Chelien ← Firille ← Sinq Laison
-30002664        // Alles ← Firille ← Sinq Laison
-30002663        // Foves ← Firille ← Sinq Laison
-30002666        // Basgerin ← Firille ← Sinq Laison
-30002662        // Pulin ← Firille ← Sinq Laison
-30002665        // Misneden ← Firille ← Sinq Laison
-30002712        // Alillere ← Nexus ← Sinq Laison
-30002717        // Aymaerne ← Nexus ← Sinq Laison
-30002715        // Bourynes ← Nexus ← Sinq Laison
-30002714        // Pozirblant ← Nexus ← Sinq Laison
-30002716        // Aurcel ← Nexus ← Sinq Laison
-30002713        // Abenync ← Nexus ← Sinq Laison
-30002676        // Parchanier ← Algintal ← Sinq Laison
-30002680        // Augnais ← Algintal ← Sinq Laison
-30002684        // Audaerne ← Algintal ← Sinq Laison
-30002678        // Alsottobier ← Algintal ← Sinq Laison
-30002677        // Fluekele ← Algintal ← Sinq Laison
-30002683        // Barmalie ← Algintal ← Sinq Laison
-30002679        // Jolia ← Algintal ← Sinq Laison
-30002681        // Deltole ← Algintal ← Sinq Laison
-30002682        // Colelie ← Algintal ← Sinq Laison
-30002720        // Thelan ← Aeman ← Sinq Laison
-30002721        // Rorsins ← Aeman ← Sinq Laison
-30002719        // Miroitem ← Aeman ← Sinq Laison
-30002718        // Rancer ← Aeman ← Sinq Laison
-30002722        // Lamadent ← Aeman ← Sinq Laison
-30002723        // Otou ← Aeman ← Sinq Laison
-30002655        // Vylade ← Coriault ← Sinq Laison
-30002660        // Eglennaert ← Coriault ← Sinq Laison
-30002661        // Botane ← Coriault ← Sinq Laison
-30002659        // Dodixie ← Coriault ← Sinq Laison
-30002658        // Agrallarier ← Coriault ← Sinq Laison
-30002657        // Aunia ← Coriault ← Sinq Laison
-30002656        // Auvergne ← Coriault ← Sinq Laison
-30012715        // Odotte ← Coriault ← Sinq Laison
-30003026        // Blameston ← Ysiette ← Everyshore
-30003030        // Ardallabier ← Ysiette ← Everyshore
-30003025        // Lirsautton ← Ysiette ← Everyshore
-30003024        // Marosier ← Ysiette ← Everyshore
-30003027        // Vaurent ← Ysiette ← Everyshore
-30003029        // Jaschercis ← Ysiette ← Everyshore
-30003028        // Aclan ← Ysiette ← Everyshore
-30003019        // Cherore ← Chasnaye ← Everyshore
-30003021        // Mosson ← Chasnaye ← Everyshore
-30003018        // Azer ← Chasnaye ← Everyshore
-30003017        // Harerget ← Chasnaye ← Everyshore
-30003020        // Torvi ← Chasnaye ← Everyshore
-30003022        // Mya ← Chasnaye ← Everyshore
-30003023        // Gerper ← Chasnaye ← Everyshore
-30003038        // Atlanins ← Giatole ← Everyshore
-30003042        // Alachene ← Giatole ← Everyshore
-30003043        // Uphene ← Giatole ← Everyshore
-30003041        // Colcer ← Giatole ← Everyshore
-30003039        // Leremblompes ← Giatole ← Everyshore
-30003040        // Bille ← Giatole ← Everyshore
-30003044        // Elarel ← Giatole ← Everyshore
-30003057        // Groothese ← Marele ← Everyshore
-30003059        // Adeel ← Marele ← Everyshore
-30003058        // Olide ← Marele ← Everyshore
-30003062        // Angatalie ← Marele ← Everyshore
-30003060        // Mannar ← Marele ← Everyshore
-30003061        // Mormelot ← Marele ← Everyshore
-30003012        // Amattens ← Osnins ← Everyshore
-30003016        // Junsoraert ← Osnins ← Everyshore
-30003009        // Arnatele ← Osnins ← Everyshore
-30003011        // Mormoen ← Osnins ← Everyshore
-30003010        // Halle ← Osnins ← Everyshore
-30003014        // Bereye ← Osnins ← Everyshore
-30003013        // Jurlesel ← Osnins ← Everyshore
-30003015        // Aice ← Osnins ← Everyshore
-30003045        // Enedore ← Elalan ← Everyshore
-30003053        // Avele ← Elalan ← Everyshore
-30003051        // Antollare ← Elalan ← Everyshore
-30003049        // Laic ← Elalan ← Everyshore
-30003054        // Scuelazyns ← Elalan ← Everyshore
-30003056        // Muer ← Elalan ← Everyshore
-30003050        // Odixie ← Elalan ← Everyshore
-30003047        // Averon ← Elalan ← Everyshore
-30003048        // Carirgnottin ← Elalan ← Everyshore
-30003052        // Tolle ← Elalan ← Everyshore
-30003055        // Aydoteaux ← Elalan ← Everyshore
-30003031        // Athinard ← Odilis ← Everyshore
-30003032        // Meves ← Odilis ← Everyshore
-30003034        // Mattere ← Odilis ← Everyshore
-30003033        // Ethernity ← Odilis ← Everyshore
-30003035        // Gicodel ← Odilis ← Everyshore
-30003036        // Frarolle ← Odilis ← Everyshore
-30003037        // Quier ← Odilis ← Everyshore
-60005827        // Everyshore →→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→ end station
-//-30004967        // Luminaire ← Crux ← Essence
-//-30004968        // Mies ← Crux ← Essence
-//-30004969        // Oursulaert ← Crux ← Essence
-//-30004971        // Duripant ← Crux ← Essence
-//-30004970        // Renyn ← Crux ← Essence
-//-30004972        // Algogille ← Crux ← Essence
-//-30014971        // Couster ← Crux ← Essence
-//-30005015        // Synchelle ← Thoulde ← Essence
-//-30034971        // Henebene ← Thoulde ← Essence
-//-30044971        // Mesokel ← Thoulde ← Essence
-//-30005016        // Wysalan ← Thoulde ← Essence
-//-30005021        // Adrel ← Thoulde ← Essence
-//-30005018        // Noghere ← Thoulde ← Essence
-//-30005017        // Yona ← Thoulde ← Essence
-//-30005019        // Aporulie ← Thoulde ← Essence
-//-30005020        // Seyllin ← Thoulde ← Essence
-//-30005022        // Ane ← Thoulde ← Essence
-//-30005023        // Clorteler ← Thoulde ← Essence
-//-30004993        // Villore ← Vieres ← Essence
-//-30005000        // Old Man Star ← Vieres ← Essence
-//-30004999        // Ladistier ← Vieres ← Essence
-//-30004997        // Vifrevaert ← Vieres ← Essence
-//-30004995        // Allamotte ← Vieres ← Essence
-//-30004994        // Arant ← Vieres ← Essence
-//-30004996        // Obalyu ← Vieres ← Essence
-//-30004998        // Parts ← Vieres ← Essence
-//-30005009        // Allebin ← Arand ← Essence
-//-30005013        // Perckhevin ← Arand ← Essence
-//-30005012        // Haine ← Arand ← Essence
-//-30005014        // Isenan ← Arand ← Essence
-//-30005010        // Atlulle ← Arand ← Essence
-//-30005011        // Droselory ← Arand ← Essence
-//-30004991        // Vitrauze ← Balrille ← Essence
-//-30004992        // Palmon ← Balrille ← Essence
-//-30004990        // Onne ← Balrille ← Essence
-//-30004987        // Deninard ← Balrille ← Essence
-//-30004989        // Annages ← Balrille ← Essence
-//-30004988        // Hulmate ← Balrille ← Essence
-//-30005006        // Aere ← Peccanouette ← Essence
-//-30005007        // Lisbaetanne ← Peccanouette ← Essence
-//-30005008        // Aeschee ← Peccanouette ← Essence
-//-30005003        // Adirain ← Peccanouette ← Essence
-//-30005001        // Arnon ← Peccanouette ← Essence
-//-30005002        // Laurvier ← Peccanouette ← Essence
-//-30005004        // Attyn ← Peccanouette ← Essence
-//-30004978        // Pemene ← Patrie ← Essence
-//-30004975        // Mesybier ← Patrie ← Essence
-//-30004973        // Caslemon ← Patrie ← Essence
-//-30004974        // Jolevier ← Patrie ← Essence
-//-30004976        // Charmerout ← Patrie ← Essence
-//-30004977        // Yvangier ← Patrie ← Essence
-//-30004979        // Heydieles ← Jeon ← Essence
-//-30004984        // Abune ← Jeon ← Essence
-//-30004982        // Indregulle ← Jeon ← Essence
-//-30004985        // Deven ← Jeon ← Essence
-//-30004980        // Fliet ← Jeon ← Essence
-//-30004981        // Actee ← Jeon ← Essence
-//-30004983        // Amane ← Jeon ← Essence
-//-30004986        // Estaunitte ← Jeon ← Essence
-//-30005026        // Cat ← Eustron ← Essence
-//-30005028        // Andole ← Eustron ← Essence
-//-30005027        // Ommare ← Eustron ← Essence
-//-30005025        // Derririntel ← Eustron ← Essence
-//-30005024        // Atlangeins ← Eustron ← Essence
-//-30024971        // Hecarrin ← Eustron ← Essence
-//-60015030        // Essence →→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→ end station
-//-30005331        // Chantrousse ← Aideron ← Verge Vendor
-//-30005334        // Tierijev ← Aideron ← Verge Vendor
-//-30005332        // Osmomonne ← Aideron ← Verge Vendor
-//-30005330        // Arraron ← Aideron ← Verge Vendor
-//-30005333        // Stou ← Aideron ← Verge Vendor
-//-30005329        // Amoderia ← Aideron ← Verge Vendor
-//-30005295        // Murethand ← Woenckee ← Verge Vendor
-//-30005300        // Loes ← Woenckee ← Verge Vendor
-//-30005297        // Ouelletta ← Woenckee ← Verge Vendor
-//-30005296        // Melmaniel ← Woenckee ← Verge Vendor
-//-30005298        // Costolle ← Woenckee ← Verge Vendor
-//-30005299        // Muetralle ← Woenckee ← Verge Vendor
-//-30005320        // Hevrice ← Obray ← Verge Vendor
-//-30005321        // Jovainnon ← Obray ← Verge Vendor
-//-30005319        // Raneilles ← Obray ← Verge Vendor
-//-30005317        // Ekuenbiron ← Obray ← Verge Vendor
-//-30045305        // Clellinon ← Obray ← Verge Vendor
-//-30005316        // Luse ← Obray ← Verge Vendor
-//-30005318        // Vay ← Obray ← Verge Vendor
-//-30005315        // Eletta ← Obray ← Verge Vendor
-//-30035305        // Clacille ← Obray ← Verge Vendor
-//-30005305        // Cistuvaert ← Anwyns ← Verge Vendor
-//-30005307        // Aidart ← Anwyns ← Verge Vendor
-//-30015305        // Adallier ← Anwyns ← Verge Vendor
-//-30005304        // Alentene ← Anwyns ← Verge Vendor
-//-30005306        // Vaere ← Anwyns ← Verge Vendor
-//-30005302        // Alenia ← Anwyns ← Verge Vendor
-//-30025305        // Channace ← Anwyns ← Verge Vendor
-//-30005301        // Tourier ← Anwyns ← Verge Vendor
-//-30005303        // Merolles ← Anwyns ← Verge Vendor
-//-30005322        // Scolluzer ← Ancbeu ← Verge Vendor
-//-30005323        // Sortet ← Ancbeu ← Verge Vendor
-//-30005324        // Claulenne ← Ancbeu ← Verge Vendor
-//-30005325        // Masalle ← Ancbeu ← Verge Vendor
-//-30005326        // Annelle ← Ancbeu ← Verge Vendor
-//-30005327        // Chesiette ← Ancbeu ← Verge Vendor
-//-30005328        // Reblier ← Ancbeu ← Verge Vendor
-//-30005312        // Gisleres ← Kiartanne ← Verge Vendor
-//-30005314        // Theruesse ← Kiartanne ← Verge Vendor
-//-30005313        // Ellmay ← Kiartanne ← Verge Vendor
-//-30005309        // Ansalle ← Kiartanne ← Verge Vendor
-//-30005310        // Scheenins ← Kiartanne ← Verge Vendor
-//-30005308        // Jufvitte ← Kiartanne ← Verge Vendor
-//-30005311        // Amygnon ← Kiartanne ← Verge Vendor
-//-60011203        // Verge Vendor →→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→ end station
-//-30003089        // Kurniainen ← Tandoiras ← The Bleak Lands
-//-30003090        // Saidusairos ← Tandoiras ← The Bleak Lands
-//-30003088        // Oyonata ← Tandoiras ← The Bleak Lands
-//-30003087        // Haras ← Tandoiras ← The Bleak Lands
-//-30003086        // Sahtogas ← Tandoiras ← The Bleak Lands
-//-30003091        // Tannakan ← Tandoiras ← The Bleak Lands
-//-30003071        // Anka ← Vaarma ← The Bleak Lands
-//-30003076        // Gammel ← Vaarma ← The Bleak Lands
-//-30003070        // Sosala ← Vaarma ← The Bleak Lands
-//-30003074        // Sasiekko ← Vaarma ← The Bleak Lands
-//-30003079        // Saikamon ← Vaarma ← The Bleak Lands
-//-30003075        // Myyhera ← Vaarma ← The Bleak Lands
-//-30003073        // Netsalakka ← Vaarma ← The Bleak Lands
-//-30003072        // Iesa ← Vaarma ← The Bleak Lands
-//-30003077        // Uusanen ← Vaarma ← The Bleak Lands
-//-30003078        // Erkinen ← Vaarma ← The Bleak Lands
-//-30003092        // Komaa ← Ohvarainen ← The Bleak Lands
-//-30003096        // Kurmaru ← Ohvarainen ← The Bleak Lands
-//-30003093        // Ayeroilen ← Ohvarainen ← The Bleak Lands
-//-30003094        // Imata ← Ohvarainen ← The Bleak Lands
-//-30003095        // Furskeshin ← Ohvarainen ← The Bleak Lands
-//-30003097        // Satalama ← Ohvarainen ← The Bleak Lands
-//-30003069        // Kamela ← Sasen ← The Bleak Lands
-//-30003064        // Tuomuta ← Sasen ← The Bleak Lands
-//-30003066        // Kuomi ← Sasen ← The Bleak Lands
-//-30003065        // Otelen ← Sasen ← The Bleak Lands
-//-30003067        // Huola ← Sasen ← The Bleak Lands
-//-30003068        // Kourmonen ← Sasen ← The Bleak Lands
-//-30003063        // Lamaa ← Sasen ← The Bleak Lands
-//-30003081        // Ronne ← Ichida ← The Bleak Lands
-//-30003085        // Hakodan ← Ichida ← The Bleak Lands
-//-30003084        // Malpara ← Ichida ← The Bleak Lands
-//-30003082        // Hatori ← Ichida ← The Bleak Lands
-//-30003080        // Jarkkolen ← Ichida ← The Bleak Lands
-//-30003083        // Junsen ← Ichida ← The Bleak Lands
-//-60000073        // The Bleak Lands →→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→ end station
-//-30002994        // Hati ← Daredan ← Devoid
-//-30002992        // Akes ← Daredan ← Devoid
-//-30002991        // Uadelah ← Daredan ← Devoid
-//-30002989        // Laddiaha ← Daredan ← Devoid
-//-30002988        // Nakatre ← Daredan ← Devoid
-//-30002993        // Riavayed ← Daredan ← Devoid
-//-30002990        // Hakshma ← Daredan ← Devoid
-//-30002999        // Shastal ← Abthi ← Devoid
-//-30003000        // Thakala ← Abthi ← Devoid
-//-30002997        // Ehnoum ← Abthi ← Devoid
-//-30002998        // Upper Debyl ← Abthi ← Devoid
-//-30002996        // Lower Debyl ← Abthi ← Devoid
-//-30002995        // Naeel ← Abthi ← Devoid
-//-30002967        // Dihra ← Ryra ← Devoid
-//-30002966        // Thasinaz ← Ryra ← Devoid
-//-30002965        // Choonka ← Ryra ← Devoid
-//-30002968        // Dital ← Ryra ← Devoid
-//-30002964        // Esescama ← Ryra ← Devoid
-//-30002963        // Odin ← Ryra ← Devoid
-//-30002970        // Ohide ← Kisana ← Devoid
-//-30002971        // Sasoutikh ← Kisana ← Devoid
-//-30002972        // Gheth ← Kisana ← Devoid
-//-30002974        // Mehatoor ← Kisana ← Devoid
-//-30002969        // Eredan ← Kisana ← Devoid
-//-30002973        // Lisudeh ← Kisana ← Devoid
-//-30002958        // Raa ← Semou ← Devoid
-//-30002957        // Tzvi ← Semou ← Devoid
-//-30002961        // Oyeman ← Semou ← Devoid
-//-30002959        // Sifilar ← Semou ← Devoid
-//-30002960        // Arzad ← Semou ← Devoid
-//-30002962        // Ezzara ← Semou ← Devoid
-//-30002979        // Tararan ← Jayai ← Devoid
-//-30002980        // Sosan ← Jayai ← Devoid
-//-30002978        // Asghed ← Jayai ← Devoid
-//-30002981        // Halmah ← Jayai ← Devoid
-//-30002977        // Arayar ← Jayai ← Devoid
-//-30002976        // Labapi ← Jayai ← Devoid
-//-30002975        // Roushzar ← Jayai ← Devoid
-//-30003001        // Mili ← Enka ← Devoid
-//-30003003        // Halenan ← Enka ← Devoid
-//-30003005        // Uktiad ← Enka ← Devoid
-//-30003007        // Arveyil ← Enka ← Devoid
-//-30003008        // Palpis ← Enka ← Devoid
-//-30003006        // Nidebora ← Enka ← Devoid
-//-30003004        // Ulerah ← Enka ← Devoid
-//-30003002        // Faktun ← Enka ← Devoid
-//-30002986        // Mendori ← Kabo ← Devoid
-//-30002982        // Rahadalon ← Kabo ← Devoid
-//-30002985        // Itsyamil ← Kabo ← Devoid
-//-30002987        // Ussad ← Kabo ← Devoid
-//-30002984        // Ibash ← Kabo ← Devoid
-//-30002983        // Soosat ← Kabo ← Devoid
-//-60008068        // Devoid →→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→ end station
-//-30000072        // Nakah ← Bedaleya ← Derelik
-//-30000075        // Assah ← Bedaleya ← Derelik
-//-30000074        // Hasateem ← Bedaleya ← Derelik
-//-30000071        // Jangar ← Bedaleya ← Derelik
-//-30000070        // Gomati ← Bedaleya ← Derelik
-//-30000073        // Irshah ← Bedaleya ← Derelik
-//-30000012        // Asabona ← Anares ← Derelik
-//-30000016        // Nazhgete ← Anares ← Derelik
-//-30000015        // Sendaya ← Anares ← Derelik
-//-30000014        // Shamahi ← Anares ← Derelik
-//-30000013        // Onsooh ← Anares ← Derelik
-//-30000010        // Chidah ← Anares ← Derelik
-//-30000009        // Sooma ← Anares ← Derelik
-//-30000011        // Shenela ← Anares ← Derelik
-//-30000038        // Dooz ← Sazdih ← Derelik
-//-30000043        // Sari ← Sazdih ← Derelik
-//-30000040        // Uzistoon ← Sazdih ← Derelik
-//-30000039        // Bayuka ← Sazdih ← Derelik
-//-30000041        // Bairshir ← Sazdih ← Derelik
-//-30000042        // Moh ← Sazdih ← Derelik
-//-30000100        // Timeor ← Mal ← Derelik
-//-30000097        // Shach ← Mal ← Derelik
-//-30000096        // Mahnagh ← Mal ← Derelik
-//-30000095        // Asilem ← Mal ← Derelik
-//-30000104        // Mahti ← Mal ← Derelik
-//-30000102        // Dysa ← Mal ← Derelik
-//-30000098        // Kehrara ← Mal ← Derelik
-//-30000099        // Arena ← Mal ← Derelik
-//-30000103        // Serad ← Mal ← Derelik
-//-30000101        // Uhtafal ← Mal ← Derelik
-//-30000105        // Abha ← Mal ← Derelik
-//-30000058        // Amphar ← Mekashtad ← Derelik
-//-30000068        // Usroh ← Mekashtad ← Derelik
-//-30000061        // Agha ← Mekashtad ← Derelik
-//-30000057        // Nikh ← Mekashtad ← Derelik
-//-30000059        // Salashayama ← Mekashtad ← Derelik
-//-30000065        // Akhrad ← Mekashtad ← Derelik
-//-30000067        // Sharir ← Mekashtad ← Derelik
-//-30000062        // Iosantin ← Mekashtad ← Derelik
-//-30000060        // Janus ← Mekashtad ← Derelik
-//-30000063        // Orva ← Mekashtad ← Derelik
-//-30000069        // Thiarer ← Mekashtad ← Derelik
-//-30000066        // Pirohdim ← Mekashtad ← Derelik
-//-30000064        // Zet ← Mekashtad ← Derelik
-//-30000028        // Eshtah ← Kalangin ← Derelik
-//-30000027        // Psasa ← Kalangin ← Derelik
-//-30000024        // Kiereend ← Kalangin ← Derelik
-//-30000025        // Rashy ← Kalangin ← Derelik
-//-30000026        // Ordize ← Kalangin ← Derelik
-//-30000029        // Lachailes ← Kalangin ← Derelik
-//-30000030        // Kasrasi ← Kalangin ← Derelik
-//-30000023        // Fovihi ← Kalangin ← Derelik
-//-30000006        // Zaid ← San Matar ← Derelik
-//-30000008        // Nirbhi ← San Matar ← Derelik
-//-30000007        // Yuzier ← San Matar ← Derelik
-//-30000003        // Akpivem ← San Matar ← Derelik
-//-30000001        // Tanoo ← San Matar ← Derelik
-//-30000005        // Sasta ← San Matar ← Derelik
-//-30000004        // Jark ← San Matar ← Derelik
-//-30000002        // Lashesih ← San Matar ← Derelik
-//-30000032        // Hasiari ← Hevaka ← Derelik
-//-30000034        // Alkez ← Hevaka ← Derelik
-//-30000033        // Radima ← Hevaka ← Derelik
-//-30000031        // Mohas ← Hevaka ← Derelik
-//-30000035        // Nimambal ← Hevaka ← Derelik
-//-30000036        // Yishinoon ← Hevaka ← Derelik
-//-30000037        // Uplingur ← Hevaka ← Derelik
-//-30000114        // Ubtes ← Joas ← Derelik
-//-30000116        // Kenobanala ← Joas ← Derelik
-//-30000115        // Bimener ← Joas ← Derelik
-//-30000113        // Astabih ← Joas ← Derelik
-//-30000117        // Khabi ← Joas ← Derelik
-//-30000118        // Uanzin ← Joas ← Derelik
-//-30000112        // Arnola ← Joas ← Derelik
-//-30000076        // Tidacha ← Orshed ← Derelik
-//-30000079        // Milu ← Orshed ← Derelik
-//-30000077        // Odlib ← Orshed ← Derelik
-//-30000078        // Jofan ← Orshed ← Derelik
-//-30000080        // Yadi ← Orshed ← Derelik
-//-30000081        // Buftiar ← Orshed ← Derelik
-//-30000052        // Maspah ← Mossas ← Derelik
-//-30000055        // Zemalu ← Mossas ← Derelik
-//-30000054        // Shala ← Mossas ← Derelik
-//-30000053        // Ibaria ← Mossas ← Derelik
-//-30000051        // Juddi ← Mossas ← Derelik
-//-30000056        // Khankenirdia ← Mossas ← Derelik
-//-30000109        // Berta ← Subi ← Derelik
-//-30000110        // Bekirdod ← Subi ← Derelik
-//-30000111        // Hothomouh ← Subi ← Derelik
-//-30000108        // Nieril ← Subi ← Derelik
-//-30000107        // Gamis ← Subi ← Derelik
-//-30000106        // Shedoo ← Subi ← Derelik
-//-30000048        // Ihal ← Ananah ← Derelik
-//-30000049        // Camal ← Ananah ← Derelik
-//-30000045        // Jaymass ← Ananah ← Derelik
-//-30000044        // Faspera ← Ananah ← Derelik
-//-30000046        // Mifrata ← Ananah ← Derelik
-//-30000047        // Majamar ← Ananah ← Derelik
-//-30000050        // Fera ← Ananah ← Derelik
-//-30000018        // Kazna ← Mamouna ← Derelik
-//-30000020        // Lilmad ← Mamouna ← Derelik
-//-30000017        // Futzchag ← Mamouna ← Derelik
-//-30000022        // Jayneleb ← Mamouna ← Derelik
-//-30000019        // Podion ← Mamouna ← Derelik
-//-30000090        // Ilahed ← Aguh ← Derelik
-//-30000093        // Ishkad ← Aguh ← Derelik
-//-30000091        // Eshwil ← Aguh ← Derelik
-//-30000089        // Sosa ← Aguh ← Derelik
-//-30000092        // Aranir ← Aguh ← Derelik
-//-30000094        // Hahyil ← Aguh ← Derelik
-//-30000085        // Bar ← Oraron ← Derelik
-//-30000086        // Sucha ← Oraron ← Derelik
-//-30000084        // Asghatil ← Oraron ← Derelik
-//-30000082        // Jarizza ← Oraron ← Derelik
-//-30000083        // Ejahi ← Oraron ← Derelik
-//-30000087        // Gelhan ← Oraron ← Derelik
-//-30000088        // Akeva ← Oraron ← Derelik
-//-60007564        // Derelik →→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→ end station
-//-30002509        // Odatrik ← Ortner ← Heimatar
-//-30002510        // Rens ← Ortner ← Heimatar
-//-30002507        // Abudban ← Ortner ← Heimatar
-//-30002506        // Osoggur ← Ortner ← Heimatar
-//-30002508        // Trytedald ← Ortner ← Heimatar
-//-30012505        // Malukker ← Ortner ← Heimatar
-//-30002511        // Ameinaka ← Ortner ← Heimatar
-//-30002505        // Hulm ← Ortner ← Heimatar
-//-30002518        // Edmalbrurdus ← Osta ← Heimatar
-//-30032505        // Todeko ← Osta ← Heimatar
-//-30002519        // Kronsur ← Osta ← Heimatar
-//-30002521        // Sist ← Osta ← Heimatar
-//-30002520        // Dumkirinur ← Osta ← Heimatar
-//-30002522        // Obrolber ← Osta ← Heimatar
-//-30002523        // Austraka ← Osta ← Heimatar
-//-30002531        // Gerek ← Wiedadur ← Heimatar
-//-30002535        // Ebasgerdur ← Wiedadur ← Heimatar
-//-30002534        // Rokofur ← Wiedadur ← Heimatar
-//-30002533        // Gerbold ← Wiedadur ← Heimatar
-//-30002532        // Tongofur ← Wiedadur ← Heimatar
-//-30002536        // Ebodold ← Wiedadur ← Heimatar
-//-30002549        // Offugen ← Akimamur ← Heimatar
-//-30002552        // Eddar ← Akimamur ← Heimatar
-//-30002550        // Roniko ← Akimamur ← Heimatar
-//-30002554        // Wiskeber ← Akimamur ← Heimatar
-//-30002551        // Aralgrund ← Akimamur ← Heimatar
-//-30002553        // Bogelek ← Akimamur ← Heimatar
-//-30002580        // Katugumur ← Benurad ← Heimatar
-//-30002575        // Sotrenzur ← Benurad ← Heimatar
-//-30002574        // Hrondedir ← Benurad ← Heimatar
-//-30002576        // Hrondmund ← Benurad ← Heimatar
-//-30002577        // Bundindus ← Benurad ← Heimatar
-//-30002578        // Otraren ← Benurad ← Heimatar
-//-30002579        // Hedgiviter ← Benurad ← Heimatar
-//-30002556        // Gusandall ← Evannater ← Heimatar
-//-30002561        // Auren ← Evannater ← Heimatar
-//-30002560        // Gultratren ← Evannater ← Heimatar
-//-30002559        // Ingunn ← Evannater ← Heimatar
-//-30002555        // Eifer ← Evannater ← Heimatar
-//-30002558        // Endrulf ← Evannater ← Heimatar
-//-30002557        // Atgur ← Evannater ← Heimatar
-//-30002548        // Emolgranlan ← Sveipar ← Heimatar
-//-30002547        // Ammold ← Sveipar ← Heimatar
-//-30002546        // Isendeldik ← Sveipar ← Heimatar
-//-30002545        // Lustrevik ← Sveipar ← Heimatar
-//-30002544        // Pator ← Sveipar ← Heimatar
-//-30002543        // Eystur ← Sveipar ← Heimatar
-//-30012547        // Hadaugago ← Sveipar ← Heimatar
-//-30002573        // Vullat ← Erada ← Heimatar
-//-30042547        // Loguttur ← Erada ← Heimatar
-//-30002570        // Magiko ← Erada ← Heimatar
-//-30022547        // Krilmokenur ← Erada ← Heimatar
-//-30002568        // Onga ← Erada ← Heimatar
-//-30032547        // Larkugei ← Erada ← Heimatar
-//-30002569        // Osaumuni ← Erada ← Heimatar
-//-30002571        // Oremmulf ← Erada ← Heimatar
-//-30002572        // Hurjafren ← Erada ← Heimatar
-//-30002528        // Balginia ← Odengsolf ← Heimatar
-//-30002527        // Illinfrik ← Odengsolf ← Heimatar
-//-30002530        // Avesber ← Odengsolf ← Heimatar
-//-30002529        // Gyng ← Odengsolf ← Heimatar
-//-30002526        // Frarn ← Odengsolf ← Heimatar
-//-30002525        // Meirakulf ← Odengsolf ← Heimatar
-//-30002524        // Ivar ← Odengsolf ← Heimatar
-//-30042505        // Usteli ← Odengsolf ← Heimatar
-//-30002512        // Alakgur ← Huvilma ← Heimatar
-//-30002515        // Olfeim ← Huvilma ← Heimatar
-//-30002513        // Dammalin ← Huvilma ← Heimatar
-//-30002514        // Bosboger ← Huvilma ← Heimatar
-//-30002516        // Lulm ← Huvilma ← Heimatar
-//-30002517        // Gulmorogod ← Huvilma ← Heimatar
-//-30002537        // Amamake ← Hed ← Heimatar
-//-30002542        // Auga ← Hed ← Heimatar
-//-30002541        // Dal ← Hed ← Heimatar
-//-30002540        // Lantorn ← Hed ← Heimatar
-//-30002539        // Siseide ← Hed ← Heimatar
-//-30002538        // Vard ← Hed ← Heimatar
-//-30002562        // Trer ← Urtfer ← Heimatar
-//-30002563        // Egmur ← Urtfer ← Heimatar
-//-30002564        // Javrendei ← Urtfer ← Heimatar
-//-30002565        // Appen ← Urtfer ← Heimatar
-//-30002566        // Klir ← Urtfer ← Heimatar
-//-30002567        // Jorus ← Urtfer ← Heimatar
-//-60001837        // Heimatar →→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→ end station
+30004997        // Vifrevaert ← Vieres ← Essence
+30004995        // Allamotte ← Vieres ← Essence
+30004994        // Arant ← Vieres ← Essence
+30004996        // Obalyu ← Vieres ← Essence
+30004998        // Parts ← Vieres ← Essence
+30005009        // Allebin ← Arand ← Essence
+30005013        // Perckhevin ← Arand ← Essence
+30005012        // Haine ← Arand ← Essence
+30005014        // Isenan ← Arand ← Essence
+30005010        // Atlulle ← Arand ← Essence
+30005011        // Droselory ← Arand ← Essence
+30004991        // Vitrauze ← Balrille ← Essence
+30004992        // Palmon ← Balrille ← Essence
+30004990        // Onne ← Balrille ← Essence
+30004987        // Deninard ← Balrille ← Essence
+30004989        // Annages ← Balrille ← Essence
+30004988        // Hulmate ← Balrille ← Essence
+30005006        // Aere ← Peccanouette ← Essence
+30005007        // Lisbaetanne ← Peccanouette ← Essence
+30005008        // Aeschee ← Peccanouette ← Essence
+30005003        // Adirain ← Peccanouette ← Essence
+30005001        // Arnon ← Peccanouette ← Essence
+30005002        // Laurvier ← Peccanouette ← Essence
+30005004        // Attyn ← Peccanouette ← Essence
+30004978        // Pemene ← Patrie ← Essence
+30004975        // Mesybier ← Patrie ← Essence
+30004973        // Caslemon ← Patrie ← Essence
+30004974        // Jolevier ← Patrie ← Essence
+30004976        // Charmerout ← Patrie ← Essence
+30004977        // Yvangier ← Patrie ← Essence
+30004979        // Heydieles ← Jeon ← Essence
+30004984        // Abune ← Jeon ← Essence
+30004982        // Indregulle ← Jeon ← Essence
+30004985        // Deven ← Jeon ← Essence
+30004980        // Fliet ← Jeon ← Essence
+30004981        // Actee ← Jeon ← Essence
+30004983        // Amane ← Jeon ← Essence
+30004986        // Estaunitte ← Jeon ← Essence
+30005026        // Cat ← Eustron ← Essence
+30005028        // Andole ← Eustron ← Essence
+30005027        // Ommare ← Eustron ← Essence
+30005025        // Derririntel ← Eustron ← Essence
+30005024        // Atlangeins ← Eustron ← Essence
+30024971        // Hecarrin ← Eustron ← Essence
+30005331        // Chantrousse ← Aideron ← Verge Vendor
+30005334        // Tierijev ← Aideron ← Verge Vendor
+30005332        // Osmomonne ← Aideron ← Verge Vendor
+30005330        // Arraron ← Aideron ← Verge Vendor
+30005333        // Stou ← Aideron ← Verge Vendor
+30005329        // Amoderia ← Aideron ← Verge Vendor
+30005295        // Murethand ← Woenckee ← Verge Vendor
+30005300        // Loes ← Woenckee ← Verge Vendor
+30005297        // Ouelletta ← Woenckee ← Verge Vendor
+30005296        // Melmaniel ← Woenckee ← Verge Vendor
+30005298        // Costolle ← Woenckee ← Verge Vendor
+30005299        // Muetralle ← Woenckee ← Verge Vendor
+30005320        // Hevrice ← Obray ← Verge Vendor
+30005321        // Jovainnon ← Obray ← Verge Vendor
+30005319        // Raneilles ← Obray ← Verge Vendor
+30005317        // Ekuenbiron ← Obray ← Verge Vendor
+30045305        // Clellinon ← Obray ← Verge Vendor
+30005316        // Luse ← Obray ← Verge Vendor
+30005318        // Vay ← Obray ← Verge Vendor
+30005315        // Eletta ← Obray ← Verge Vendor
+30035305        // Clacille ← Obray ← Verge Vendor
+30005305        // Cistuvaert ← Anwyns ← Verge Vendor
+30005307        // Aidart ← Anwyns ← Verge Vendor
+30015305        // Adallier ← Anwyns ← Verge Vendor
+30005304        // Alentene ← Anwyns ← Verge Vendor
+30005306        // Vaere ← Anwyns ← Verge Vendor
+30005302        // Alenia ← Anwyns ← Verge Vendor
+30025305        // Channace ← Anwyns ← Verge Vendor
+30005301        // Tourier ← Anwyns ← Verge Vendor
+30005303        // Merolles ← Anwyns ← Verge Vendor
+30005322        // Scolluzer ← Ancbeu ← Verge Vendor
+30005323        // Sortet ← Ancbeu ← Verge Vendor
+30005324        // Claulenne ← Ancbeu ← Verge Vendor
+30005325        // Masalle ← Ancbeu ← Verge Vendor
+30005326        // Annelle ← Ancbeu ← Verge Vendor
+30005327        // Chesiette ← Ancbeu ← Verge Vendor
+30005328        // Reblier ← Ancbeu ← Verge Vendor
+30005312        // Gisleres ← Kiartanne ← Verge Vendor
+30005314        // Theruesse ← Kiartanne ← Verge Vendor
+30005313        // Ellmay ← Kiartanne ← Verge Vendor
+30005309        // Ansalle ← Kiartanne ← Verge Vendor
+30005310        // Scheenins ← Kiartanne ← Verge Vendor
+30005308        // Jufvitte ← Kiartanne ← Verge Vendor
+30005311        // Amygnon ← Kiartanne ← Verge Vendor
+30003089        // Kurniainen ← Tandoiras ← The Bleak Lands
+30003090        // Saidusairos ← Tandoiras ← The Bleak Lands
+30003088        // Oyonata ← Tandoiras ← The Bleak Lands
+30003087        // Haras ← Tandoiras ← The Bleak Lands
+30003086        // Sahtogas ← Tandoiras ← The Bleak Lands
+30003091        // Tannakan ← Tandoiras ← The Bleak Lands
+30003071        // Anka ← Vaarma ← The Bleak Lands
+30003076        // Gammel ← Vaarma ← The Bleak Lands
+30003070        // Sosala ← Vaarma ← The Bleak Lands
+30003074        // Sasiekko ← Vaarma ← The Bleak Lands
+30003079        // Saikamon ← Vaarma ← The Bleak Lands
+30003075        // Myyhera ← Vaarma ← The Bleak Lands
+30003073        // Netsalakka ← Vaarma ← The Bleak Lands
+30003072        // Iesa ← Vaarma ← The Bleak Lands
+30003077        // Uusanen ← Vaarma ← The Bleak Lands
+30003078        // Erkinen ← Vaarma ← The Bleak Lands
+30003092        // Komaa ← Ohvarainen ← The Bleak Lands
+30003096        // Kurmaru ← Ohvarainen ← The Bleak Lands
+30003093        // Ayeroilen ← Ohvarainen ← The Bleak Lands
+30003094        // Imata ← Ohvarainen ← The Bleak Lands
+30003095        // Furskeshin ← Ohvarainen ← The Bleak Lands
+30003097        // Satalama ← Ohvarainen ← The Bleak Lands
+30003069        // Kamela ← Sasen ← The Bleak Lands
+30003064        // Tuomuta ← Sasen ← The Bleak Lands
+30003066        // Kuomi ← Sasen ← The Bleak Lands
+30003065        // Otelen ← Sasen ← The Bleak Lands
+30003067        // Huola ← Sasen ← The Bleak Lands
+30003068        // Kourmonen ← Sasen ← The Bleak Lands
+30003063        // Lamaa ← Sasen ← The Bleak Lands
+30003081        // Ronne ← Ichida ← The Bleak Lands
+30003085        // Hakodan ← Ichida ← The Bleak Lands
+30003084        // Malpara ← Ichida ← The Bleak Lands
+30003082        // Hatori ← Ichida ← The Bleak Lands
+30003080        // Jarkkolen ← Ichida ← The Bleak Lands
+30003083        // Junsen ← Ichida ← The Bleak Lands
+30002994        // Hati ← Daredan ← Devoid
+30002992        // Akes ← Daredan ← Devoid
+30002991        // Uadelah ← Daredan ← Devoid
+30002989        // Laddiaha ← Daredan ← Devoid
+30002988        // Nakatre ← Daredan ← Devoid
+30002993        // Riavayed ← Daredan ← Devoid
+30002990        // Hakshma ← Daredan ← Devoid
+30002999        // Shastal ← Abthi ← Devoid
+30003000        // Thakala ← Abthi ← Devoid
+30002997        // Ehnoum ← Abthi ← Devoid
+30002998        // Upper Debyl ← Abthi ← Devoid
+30002996        // Lower Debyl ← Abthi ← Devoid
+30002995        // Naeel ← Abthi ← Devoid
+30002967        // Dihra ← Ryra ← Devoid
+30002966        // Thasinaz ← Ryra ← Devoid
+30002965        // Choonka ← Ryra ← Devoid
+30002968        // Dital ← Ryra ← Devoid
+30002964        // Esescama ← Ryra ← Devoid
+30002963        // Odin ← Ryra ← Devoid
+30002970        // Ohide ← Kisana ← Devoid
+30002971        // Sasoutikh ← Kisana ← Devoid
+30002972        // Gheth ← Kisana ← Devoid
+30002974        // Mehatoor ← Kisana ← Devoid
+30002969        // Eredan ← Kisana ← Devoid
+30002973        // Lisudeh ← Kisana ← Devoid
+30002958        // Raa ← Semou ← Devoid
+30002957        // Tzvi ← Semou ← Devoid
+30002961        // Oyeman ← Semou ← Devoid
+30002959        // Sifilar ← Semou ← Devoid
+30002960        // Arzad ← Semou ← Devoid
+30002962        // Ezzara ← Semou ← Devoid
+30002979        // Tararan ← Jayai ← Devoid
+30002980        // Sosan ← Jayai ← Devoid
+30002978        // Asghed ← Jayai ← Devoid
+30002981        // Halmah ← Jayai ← Devoid
+30002977        // Arayar ← Jayai ← Devoid
+30002976        // Labapi ← Jayai ← Devoid
+30002975        // Roushzar ← Jayai ← Devoid
+30003001        // Mili ← Enka ← Devoid
+30003003        // Halenan ← Enka ← Devoid
+30003005        // Uktiad ← Enka ← Devoid
+30003007        // Arveyil ← Enka ← Devoid
+30003008        // Palpis ← Enka ← Devoid
+30003006        // Nidebora ← Enka ← Devoid
+30003004        // Ulerah ← Enka ← Devoid
+30003002        // Faktun ← Enka ← Devoid
+30002986        // Mendori ← Kabo ← Devoid
+30002982        // Rahadalon ← Kabo ← Devoid
+30002985        // Itsyamil ← Kabo ← Devoid
+30002987        // Ussad ← Kabo ← Devoid
+30002984        // Ibash ← Kabo ← Devoid
+30002983        // Soosat ← Kabo ← Devoid
+30000072        // Nakah ← Bedaleya ← Derelik
+30000075        // Assah ← Bedaleya ← Derelik
+30000074        // Hasateem ← Bedaleya ← Derelik
+30000071        // Jangar ← Bedaleya ← Derelik
+30000070        // Gomati ← Bedaleya ← Derelik
+30000073        // Irshah ← Bedaleya ← Derelik
+30000012        // Asabona ← Anares ← Derelik
+30000016        // Nazhgete ← Anares ← Derelik
+30000015        // Sendaya ← Anares ← Derelik
+30000014        // Shamahi ← Anares ← Derelik
+30000013        // Onsooh ← Anares ← Derelik
+30000010        // Chidah ← Anares ← Derelik
+30000009        // Sooma ← Anares ← Derelik
+30000011        // Shenela ← Anares ← Derelik
+30000038        // Dooz ← Sazdih ← Derelik
+30000043        // Sari ← Sazdih ← Derelik
+30000040        // Uzistoon ← Sazdih ← Derelik
+30000039        // Bayuka ← Sazdih ← Derelik
+30000041        // Bairshir ← Sazdih ← Derelik
+30000042        // Moh ← Sazdih ← Derelik
+30000100        // Timeor ← Mal ← Derelik
+30000097        // Shach ← Mal ← Derelik
+30000096        // Mahnagh ← Mal ← Derelik
+30000095        // Asilem ← Mal ← Derelik
+30000104        // Mahti ← Mal ← Derelik
+30000102        // Dysa ← Mal ← Derelik
+30000098        // Kehrara ← Mal ← Derelik
+30000099        // Arena ← Mal ← Derelik
+30000103        // Serad ← Mal ← Derelik
+30000101        // Uhtafal ← Mal ← Derelik
+30000105        // Abha ← Mal ← Derelik
+30000058        // Amphar ← Mekashtad ← Derelik
+30000068        // Usroh ← Mekashtad ← Derelik
+30000061        // Agha ← Mekashtad ← Derelik
+30000057        // Nikh ← Mekashtad ← Derelik
+30000059        // Salashayama ← Mekashtad ← Derelik
+30000065        // Akhrad ← Mekashtad ← Derelik
+30000067        // Sharir ← Mekashtad ← Derelik
+30000062        // Iosantin ← Mekashtad ← Derelik
+30000060        // Janus ← Mekashtad ← Derelik
+30000063        // Orva ← Mekashtad ← Derelik
+30000069        // Thiarer ← Mekashtad ← Derelik
+30000066        // Pirohdim ← Mekashtad ← Derelik
+30000064        // Zet ← Mekashtad ← Derelik
+30000028        // Eshtah ← Kalangin ← Derelik
+30000027        // Psasa ← Kalangin ← Derelik
+30000024        // Kiereend ← Kalangin ← Derelik
+30000025        // Rashy ← Kalangin ← Derelik
+30000026        // Ordize ← Kalangin ← Derelik
+30000029        // Lachailes ← Kalangin ← Derelik
+30000030        // Kasrasi ← Kalangin ← Derelik
+30000023        // Fovihi ← Kalangin ← Derelik
+30000006        // Zaid ← San Matar ← Derelik
+30000008        // Nirbhi ← San Matar ← Derelik
+30000007        // Yuzier ← San Matar ← Derelik
+30000003        // Akpivem ← San Matar ← Derelik
+30000001        // Tanoo ← San Matar ← Derelik
+30000005        // Sasta ← San Matar ← Derelik
+30000004        // Jark ← San Matar ← Derelik
+30000002        // Lashesih ← San Matar ← Derelik
+30000032        // Hasiari ← Hevaka ← Derelik
+30000034        // Alkez ← Hevaka ← Derelik
+30000033        // Radima ← Hevaka ← Derelik
+30000031        // Mohas ← Hevaka ← Derelik
+30000035        // Nimambal ← Hevaka ← Derelik
+30000036        // Yishinoon ← Hevaka ← Derelik
+30000037        // Uplingur ← Hevaka ← Derelik
+30000114        // Ubtes ← Joas ← Derelik
+30000116        // Kenobanala ← Joas ← Derelik
+30000115        // Bimener ← Joas ← Derelik
+30000113        // Astabih ← Joas ← Derelik
+30000117        // Khabi ← Joas ← Derelik
+30000118        // Uanzin ← Joas ← Derelik
+30000112        // Arnola ← Joas ← Derelik
+30000076        // Tidacha ← Orshed ← Derelik
+30000079        // Milu ← Orshed ← Derelik
+30000077        // Odlib ← Orshed ← Derelik
+30000078        // Jofan ← Orshed ← Derelik
+30000080        // Yadi ← Orshed ← Derelik
+30000081        // Buftiar ← Orshed ← Derelik
+30000052        // Maspah ← Mossas ← Derelik
+30000055        // Zemalu ← Mossas ← Derelik
+30000054        // Shala ← Mossas ← Derelik
+30000053        // Ibaria ← Mossas ← Derelik
+30000051        // Juddi ← Mossas ← Derelik
+30000056        // Khankenirdia ← Mossas ← Derelik
+30000109        // Berta ← Subi ← Derelik
+30000110        // Bekirdod ← Subi ← Derelik
+30000111        // Hothomouh ← Subi ← Derelik
+30000108        // Nieril ← Subi ← Derelik
+30000107        // Gamis ← Subi ← Derelik
+30000106        // Shedoo ← Subi ← Derelik
+30000048        // Ihal ← Ananah ← Derelik
+30000049        // Camal ← Ananah ← Derelik
+30000045        // Jaymass ← Ananah ← Derelik
+30000044        // Faspera ← Ananah ← Derelik
+30000046        // Mifrata ← Ananah ← Derelik
+30000047        // Majamar ← Ananah ← Derelik
+30000050        // Fera ← Ananah ← Derelik
+30000018        // Kazna ← Mamouna ← Derelik
+30000020        // Lilmad ← Mamouna ← Derelik
+30000017        // Futzchag ← Mamouna ← Derelik
+30000022        // Jayneleb ← Mamouna ← Derelik
+30000019        // Podion ← Mamouna ← Derelik
+30000090        // Ilahed ← Aguh ← Derelik
+30000093        // Ishkad ← Aguh ← Derelik
+30000091        // Eshwil ← Aguh ← Derelik
+30000089        // Sosa ← Aguh ← Derelik
+30000092        // Aranir ← Aguh ← Derelik
+30000094        // Hahyil ← Aguh ← Derelik
+30000085        // Bar ← Oraron ← Derelik
+30000086        // Sucha ← Oraron ← Derelik
+30000084        // Asghatil ← Oraron ← Derelik
+30000082        // Jarizza ← Oraron ← Derelik
+30000083        // Ejahi ← Oraron ← Derelik
+30000087        // Gelhan ← Oraron ← Derelik
+30000088        // Akeva ← Oraron ← Derelik
+30002509        // Odatrik ← Ortner ← Heimatar
+30002510        // Rens ← Ortner ← Heimatar
+30002507        // Abudban ← Ortner ← Heimatar
+30002506        // Osoggur ← Ortner ← Heimatar
+30002508        // Trytedald ← Ortner ← Heimatar
+30012505        // Malukker ← Ortner ← Heimatar
+30002511        // Ameinaka ← Ortner ← Heimatar
+30002505        // Hulm ← Ortner ← Heimatar
+30002518        // Edmalbrurdus ← Osta ← Heimatar
+30032505        // Todeko ← Osta ← Heimatar
+30002519        // Kronsur ← Osta ← Heimatar
+30002521        // Sist ← Osta ← Heimatar
+30002520        // Dumkirinur ← Osta ← Heimatar
+30002522        // Obrolber ← Osta ← Heimatar
+30002523        // Austraka ← Osta ← Heimatar
+30002531        // Gerek ← Wiedadur ← Heimatar
+30002535        // Ebasgerdur ← Wiedadur ← Heimatar
+30002534        // Rokofur ← Wiedadur ← Heimatar
+30002533        // Gerbold ← Wiedadur ← Heimatar
+30002532        // Tongofur ← Wiedadur ← Heimatar
+30002536        // Ebodold ← Wiedadur ← Heimatar
+30002549        // Offugen ← Akimamur ← Heimatar
+30002552        // Eddar ← Akimamur ← Heimatar
+30002550        // Roniko ← Akimamur ← Heimatar
+30002554        // Wiskeber ← Akimamur ← Heimatar
+30002551        // Aralgrund ← Akimamur ← Heimatar
+30002553        // Bogelek ← Akimamur ← Heimatar
+30002580        // Katugumur ← Benurad ← Heimatar
+30002575        // Sotrenzur ← Benurad ← Heimatar
+30002574        // Hrondedir ← Benurad ← Heimatar
+30002576        // Hrondmund ← Benurad ← Heimatar
+30002577        // Bundindus ← Benurad ← Heimatar
+30002578        // Otraren ← Benurad ← Heimatar
+30002579        // Hedgiviter ← Benurad ← Heimatar
+30002556        // Gusandall ← Evannater ← Heimatar
+30002561        // Auren ← Evannater ← Heimatar
+30002560        // Gultratren ← Evannater ← Heimatar
+30002559        // Ingunn ← Evannater ← Heimatar
+30002555        // Eifer ← Evannater ← Heimatar
+30002558        // Endrulf ← Evannater ← Heimatar
+30002557        // Atgur ← Evannater ← Heimatar
+30002548        // Emolgranlan ← Sveipar ← Heimatar
+30002547        // Ammold ← Sveipar ← Heimatar
+30002546        // Isendeldik ← Sveipar ← Heimatar
+30002545        // Lustrevik ← Sveipar ← Heimatar
+30002544        // Pator ← Sveipar ← Heimatar
+30002543        // Eystur ← Sveipar ← Heimatar
+30012547        // Hadaugago ← Sveipar ← Heimatar
+30002573        // Vullat ← Erada ← Heimatar
+30042547        // Loguttur ← Erada ← Heimatar
+30002570        // Magiko ← Erada ← Heimatar
+30022547        // Krilmokenur ← Erada ← Heimatar
+30002568        // Onga ← Erada ← Heimatar
+30032547        // Larkugei ← Erada ← Heimatar
+30002569        // Osaumuni ← Erada ← Heimatar
+30002571        // Oremmulf ← Erada ← Heimatar
+30002572        // Hurjafren ← Erada ← Heimatar
+30002528        // Balginia ← Odengsolf ← Heimatar
+30002527        // Illinfrik ← Odengsolf ← Heimatar
+30002530        // Avesber ← Odengsolf ← Heimatar
+30002529        // Gyng ← Odengsolf ← Heimatar
+30002526        // Frarn ← Odengsolf ← Heimatar
+30002525        // Meirakulf ← Odengsolf ← Heimatar
+30002524        // Ivar ← Odengsolf ← Heimatar
+30042505        // Usteli ← Odengsolf ← Heimatar
+30002512        // Alakgur ← Huvilma ← Heimatar
+30002515        // Olfeim ← Huvilma ← Heimatar
+30002513        // Dammalin ← Huvilma ← Heimatar
+30002514        // Bosboger ← Huvilma ← Heimatar
+30002516        // Lulm ← Huvilma ← Heimatar
+30002517        // Gulmorogod ← Huvilma ← Heimatar
+30002537        // Amamake ← Hed ← Heimatar
+30002542        // Auga ← Hed ← Heimatar
+30002541        // Dal ← Hed ← Heimatar
+30002540        // Lantorn ← Hed ← Heimatar
+30002539        // Siseide ← Hed ← Heimatar
+30002538        // Vard ← Hed ← Heimatar
+30002562        // Trer ← Urtfer ← Heimatar
+30002563        // Egmur ← Urtfer ← Heimatar
+30002564        // Javrendei ← Urtfer ← Heimatar
+30002565        // Appen ← Urtfer ← Heimatar
+30002566        // Klir ← Urtfer ← Heimatar
+30002567        // Jorus ← Urtfer ← Heimatar
+60001837        // Heimatar →→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→→ end station
 //-30002383        // Aeddin ← Fittakan ← Molden Heath
 //-30002384        // Gulfonodi ← Fittakan ← Molden Heath
 //-30002385        // Teonusude ← Fittakan ← Molden Heath
