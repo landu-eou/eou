@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """EOU · ESI Market Orders (regions + structures) → BigQuery Sandbox
 
-- Descarga todas las páginas (X-Pages) de /markets/{region_id}/orders
-- Descarga todas las páginas (X-Pages) de /markets/structures/{structure_id}
-- Aplica filtros (excludedMarketTypes, buy/sell, Jita 4-4)
-- Joins con ficheros SDE (types, stations, solarsystems) y structures.jsonl.gz
-- Genera NDJSON (gzip) y carga a BigQuery en bloque (4 tablas)
+Tokens (EXACTAMENTE como "ESI Structures"):
+- NO OAuth aquí.
+- Consume access tokens desde GitHub Secrets env:
+  - EOU_ACCESS_TOKENS_1
+  - EOU_ACCESS_TOKENS_2
+- Selección: PRIMARY_CHAR_ID primero; luego resto de char_id desc
+- Autenticadas (structures):
+  - 401 -> sleep 30s, rota token, retry
+  - 420 -> sleep 30s, retry (no necesariamente rotar)
+- Presupuesto global RETRY_BUDGET=3 (401+420 autenticadas). Si se agota -> fail.
 
 No imprime secretos.
 """
@@ -47,7 +52,6 @@ def _parse_http_date(value: Optional[str]) -> Optional[datetime]:
 
 
 def _parse_iso_utc(value: str) -> datetime:
-    # ESI suele devolver RFC3339 con Z
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     return datetime.fromisoformat(value).astimezone(timezone.utc)
@@ -82,7 +86,71 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
 
 
 # -------------------------------
-# Google Sheets: leer token EVE
+# Tokens (Secrets) - EXACT policy
+# -------------------------------
+
+class TokenPool:
+    def __init__(self, primary_char_id: int, token_map: Dict[int, str]):
+        self.primary_char_id = primary_char_id
+        self.token_map = {int(k): str(v) for k, v in token_map.items() if str(v).strip()}
+        self.order: List[int] = self._build_order()
+        self.idx = 0
+
+    def _build_order(self) -> List[int]:
+        ids = list(self.token_map.keys())
+        order: List[int] = []
+        if self.primary_char_id in self.token_map:
+            order.append(self.primary_char_id)
+        rest = sorted([i for i in ids if i != self.primary_char_id], reverse=True)
+        order.extend(rest)
+        return order
+
+    def has_any(self) -> bool:
+        return len(self.order) > 0
+
+    def current_char_id(self) -> Optional[int]:
+        if not self.order:
+            return None
+        return self.order[self.idx]
+
+    def current_token(self) -> str:
+        cid = self.current_char_id()
+        if cid is None:
+            return ""
+        return self.token_map.get(cid, "")
+
+    def rotate(self) -> None:
+        if not self.order:
+            return
+        self.idx = (self.idx + 1) % len(self.order)
+
+
+def load_tokens_from_env() -> Dict[int, str]:
+    t1 = os.environ.get("EOU_ACCESS_TOKENS_1", "").strip()
+    t2 = os.environ.get("EOU_ACCESS_TOKENS_2", "").strip()
+
+    def parse(s: str) -> Dict[int, str]:
+        if not s:
+            return {}
+        obj = json.loads(s)
+        if not isinstance(obj, dict):
+            return {}
+        out: Dict[int, str] = {}
+        for k, v in obj.items():
+            try:
+                out[int(k)] = str(v)
+            except Exception:
+                continue
+        return out
+
+    d = {}
+    d.update(parse(t1))
+    d.update(parse(t2))
+    return d
+
+
+# -------------------------------
+# Google Sheets (estado) - sigue igual
 # -------------------------------
 
 def sheets_get_cell(
@@ -92,7 +160,6 @@ def sheets_get_cell(
     tab_name: str,
     cell_a1: str,
 ) -> str:
-    """Lee un valor (raw) de una celda A1 de Google Sheets v4."""
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}"
         f"/values/{tab_name}!{cell_a1}?valueRenderOption=UNFORMATTED_VALUE"
@@ -165,7 +232,6 @@ def load_structures_market_map(path: str) -> Tuple[List[int], Dict[int, str]]:
         ids.append(sid_i)
         if obj.get("station") is not None:
             names[sid_i] = str(obj.get("station"))
-    # dedupe, preserve order
     seen = set()
     uniq = []
     for i in ids:
@@ -205,9 +271,7 @@ class EsiClient:
         self.base_url = base_url.rstrip("/")
         self.datasource = datasource
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "EOU Market Orders (GitHub Actions)"
-        })
+        self.session.headers.update({"User-Agent": "EOU Market Orders (GitHub Actions)"})
 
     def _request(
         self,
@@ -220,7 +284,7 @@ class EsiClient:
         retry_backoff_base: float = 1.5,
         retry_on_status: Tuple[int, ...] = (502, 503, 504, 520),
         allow_429: bool = True,
-        timeout: int = 60,
+        timeout: int = 90,
     ) -> EsiResponse:
         url = f"{self.base_url}{path}"
         p = dict(params or {})
@@ -231,19 +295,14 @@ class EsiClient:
         for attempt in range(max_retries + 1):
             r = self.session.request(method, url, params=p, headers=h, timeout=timeout)
 
-            # Rate limiting (429)
+            # 429: respetar Retry-After
             if allow_429 and r.status_code == 429:
                 ra = r.headers.get("Retry-After")
                 sleep_s = _safe_int(ra, default=5)
                 time.sleep(max(1, sleep_s))
                 continue
 
-            # Error rate limiting (420)
-            if r.status_code == 420:
-                reset = _safe_int(r.headers.get("X-ESI-Error-Limit-Reset"), default=60)
-                time.sleep(max(5, reset))
-                continue
-
+            # 5xx: backoff
             if r.status_code in retry_on_status and attempt < max_retries:
                 time.sleep(retry_backoff_base ** attempt)
                 continue
@@ -268,18 +327,14 @@ class EsiClient:
             "GET",
             f"/latest/markets/{region_id}/orders/",
             params={"order_type": "all", "page": page},
-            max_retries=6,
-            timeout=90,
         )
 
-    def get_structure_orders(self, structure_id: int, page: int, eve_access_token: str) -> EsiResponse:
+    def get_structure_orders(self, structure_id: int, page: int, bearer_token: str) -> EsiResponse:
         return self._request(
             "GET",
             f"/latest/markets/structures/{structure_id}/",
             params={"page": page},
-            headers={"Authorization": f"Bearer {eve_access_token}"},
-            max_retries=6,
-            timeout=90,
+            headers={"Authorization": f"Bearer {bearer_token}"},
         )
 
 
@@ -292,14 +347,7 @@ def run_cmd(cmd: List[str], *, check: bool = True) -> subprocess.CompletedProces
 
 
 def bq_query(project_id: str, sql: str) -> None:
-    cmd = [
-        "bq",
-        "--quiet",
-        "query",
-        f"--project_id={project_id}",
-        "--use_legacy_sql=false",
-        sql,
-    ]
+    cmd = ["bq", "--quiet", "query", f"--project_id={project_id}", "--use_legacy_sql=false", sql]
     cp = run_cmd(cmd, check=False)
     if cp.returncode != 0:
         raise RuntimeError(f"bq query failed: {cp.stderr.strip()}")
@@ -313,9 +361,7 @@ def bq_load_ndjson_gz(
     data_file: str,
 ) -> None:
     cmd = [
-        "bq",
-        "--quiet",
-        "load",
+        "bq", "--quiet", "load",
         f"--project_id={project_id}",
         "--source_format=NEWLINE_DELIMITED_JSON",
         "--replace=true",
@@ -371,10 +417,8 @@ def main() -> int:
 
     region_ids_raw = os.environ.get("REGION_IDS", "").strip()
 
-    token_sheets_access = os.environ.get("GOOGLE_SHEETS_ACCESS_TOKEN", "").strip()
-    token_sheet_id = os.environ.get("TOKEN_SHEETS_ID", "").strip()
-    token_tab = os.environ.get("TOKEN_TAB_NAME", "access_tokens").strip()
-    token_cell = os.environ.get("TOKEN_CELL_A1", "D12").strip()
+    primary_char_id = int(os.environ.get("PRIMARY_CHAR_ID", "2124070822"))
+    retry_budget = int(os.environ.get("RETRY_BUDGET", "3"))
 
     sde_types = os.environ["SDE_TYPES_PATH"]
     sde_excluded = os.environ["SDE_EXCLUDED_TYPES_PATH"]
@@ -394,10 +438,11 @@ def main() -> int:
     table_jita_buy = os.environ.get("BQ_TABLE_JITA44_BUY", "jita44_buy_orders")
     table_jita_sell = os.environ.get("BQ_TABLE_JITA44_SELL", "jita44_sell_orders")
 
-    schema_buy = "schemas/eou_market_orders_esi-gh-bq_buy_orders.json"
-    schema_sell = "schemas/eou_market_orders_esi-gh-bq_sell_orders.json"
-    schema_jita_buy = "schemas/eou_market_orders_esi-gh-bq_jita44_buy_orders.json"
-    schema_jita_sell = "schemas/eou_market_orders_esi-gh-bq_jita44_sell_orders.json"
+    # ✅ schemas moved to schemas/esi/...
+    schema_buy = "schemas/esi/eou_market_orders_esi-gh-bq_buy_orders.json"
+    schema_sell = "schemas/esi/eou_market_orders_esi-gh-bq_sell_orders.json"
+    schema_jita_buy = "schemas/esi/eou_market_orders_esi-gh-bq_jita44_buy_orders.json"
+    schema_jita_sell = "schemas/esi/eou_market_orders_esi-gh-bq_jita44_sell_orders.json"
 
     out_buy = os.path.join(out_dir, "buy_orders.jsonl.gz")
     out_sell = os.path.join(out_dir, "sell_orders.jsonl.gz")
@@ -413,32 +458,27 @@ def main() -> int:
 
     client = EsiClient(base_url=base_url, datasource=datasource)
 
-    # Region list
+    # Regions list
     if region_ids_raw:
         region_ids = [int(x.strip()) for x in region_ids_raw.split(",") if x.strip()]
     else:
         region_ids = client.list_regions()
 
-    # Token provider (EVE)
-    eve_token_cache: Optional[str] = None
+    # Tokens pool (Secrets) - EXACT policy
+    token_map = load_tokens_from_env()
+    pool = TokenPool(primary_char_id=primary_char_id, token_map=token_map)
 
-    def get_eve_access_token(force_refresh: bool = False) -> str:
-        nonlocal eve_token_cache
-        if eve_token_cache and not force_refresh:
-            return eve_token_cache
-        if not token_sheets_access or not token_sheet_id:
-            eve_token_cache = ""
-            return eve_token_cache
-        token = sheets_get_cell(
-            access_token=token_sheets_access,
-            spreadsheet_id=token_sheet_id,
-            tab_name=token_tab,
-            cell_a1=token_cell,
-        )
-        eve_token_cache = token
-        return token
+    # Global retry budget for authenticated (401+420) across entire run
+    auth_retry_budget = retry_budget
 
-    # Writers
+    def consume_budget_or_fail() -> None:
+        nonlocal auth_retry_budget
+        auth_retry_budget -= 1
+        if auth_retry_budget < 0:
+            # presupuesto agotado => falla run
+            raise RuntimeError("RETRY_BUDGET exhausted for authenticated requests (401/420).")
+
+    # Writers + time reference
     buy_count = sell_count = jita_buy_count = jita_sell_count = 0
     now_ref = _utc_now()
 
@@ -479,28 +519,75 @@ def main() -> int:
     def write_row(writer: gzip.GzipFile, obj: Dict[str, Any]) -> None:
         writer.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
 
+    # -----------------------
+    # Authenticated structure fetch with EXACT retry policy
+    # -----------------------
+    def fetch_structure_page_with_policy(structure_id: int, page: int) -> Optional[EsiResponse]:
+        """
+        - 401: sleep 30s, rotate token, retry (budget--)
+        - 420: sleep 30s, retry (budget--)
+        - budget global across all calls
+        """
+        nonlocal auth_retry_budget
+
+        if not pool.has_any():
+            return None
+
+        while True:
+            tok = pool.current_token()
+            if not tok:
+                # no usable token
+                return None
+
+            resp = client.get_structure_orders(structure_id, page=page, bearer_token=tok)
+
+            if resp.status == 401:
+                consume_budget_or_fail()
+                time.sleep(30)
+                pool.rotate()
+                continue
+
+            if resp.status == 420:
+                consume_budget_or_fail()
+                time.sleep(30)
+                # no rotation required
+                continue
+
+            return resp
+
     with gzip.open(out_buy, "wb", compresslevel=6) as w_buy, \
          gzip.open(out_sell, "wb", compresslevel=6) as w_sell, \
          gzip.open(out_jita_buy, "wb", compresslevel=6) as w_jita_buy, \
          gzip.open(out_jita_sell, "wb", compresslevel=6) as w_jita_sell:
 
         # -----------------------
-        # Regions
+        # Regions (no auth)
         # -----------------------
         for rid in region_ids:
+            # tolerancia mínima a 420 sin tocar auth budget (porque esto no es auth)
+            local_420_budget = 2
+
             resp = client.get_region_orders(rid, page=1)
+            while resp.status == 420 and local_420_budget > 0:
+                local_420_budget -= 1
+                time.sleep(30)
+                resp = client.get_region_orders(rid, page=1)
+
             if resp.status != 200:
                 continue
 
             update_cache_headers(resp.headers)
-
             pages = _safe_int(resp.headers.get("X-Pages"), default=1)
-            if pages < 1:
-                pages = 1
+            pages = max(1, pages)
 
             for page in range(1, pages + 1):
                 if page > 1:
+                    local_420_budget_p = 2
                     resp = client.get_region_orders(rid, page=page)
+                    while resp.status == 420 and local_420_budget_p > 0:
+                        local_420_budget_p -= 1
+                        time.sleep(30)
+                        resp = client.get_region_orders(rid, page=page)
 
                 if resp.status != 200 or not isinstance(resp.json_data, list):
                     continue
@@ -518,6 +605,8 @@ def main() -> int:
                         issued_dt = _parse_iso_utc(str(o.get("issued")))
                         duration_days = int(o.get("duration"))
                         until_dt = issued_dt + timedelta(days=duration_days)
+
+                        # ✅ timeLeft = until - now
                         time_left = _format_hh_mm_ss(until_dt - now_ref)
 
                         row_common = {
@@ -567,6 +656,7 @@ def main() -> int:
                                 jita_buy_count += 1
 
                         else:
+                            # ✅ sell tables: is_buy_order=false (ya viene del API)
                             solar, const, reg = system_info(sys_id)
                             out = dict(row_common)
                             out.update({
@@ -597,28 +687,15 @@ def main() -> int:
                         continue
 
         # -----------------------
-        # Structures
+        # Structures (auth) - with EXACT policy
         # -----------------------
-        if structure_ids:
-            eve_token = get_eve_access_token(force_refresh=False)
-
+        if structure_ids and pool.has_any():
             for sid in structure_ids:
-                if not eve_token:
-                    break
-
-                page1: Optional[EsiResponse] = None
-                for _ in range(10):
-                    resp = client.get_structure_orders(sid, page=1, eve_access_token=eve_token)
-                    if resp.status == 401:
-                        time.sleep(5)
-                        eve_token = get_eve_access_token(force_refresh=True)
-                        continue
-                    page1 = resp
-                    break
-
+                page1 = fetch_structure_page_with_policy(sid, page=1)
                 if page1 is None:
-                    continue
+                    break
 
+                # 403/404: skip structure
                 if page1.status in (403, 404):
                     continue
 
@@ -628,10 +705,9 @@ def main() -> int:
                 update_cache_headers(page1.headers)
 
                 pages = _safe_int(page1.headers.get("X-Pages"), default=1)
-                if pages < 1:
-                    pages = 1
+                pages = max(1, pages)
 
-                def process_structure_orders(resp: EsiResponse) -> None:
+                def process_orders(resp: EsiResponse) -> None:
                     nonlocal buy_count, sell_count, jita_buy_count, jita_sell_count
 
                     for o in resp.json_data:
@@ -645,6 +721,8 @@ def main() -> int:
                             issued_dt = _parse_iso_utc(str(o.get("issued")))
                             duration_days = int(o.get("duration"))
                             until_dt = issued_dt + timedelta(days=duration_days)
+
+                            # ✅ timeLeft = until - now
                             time_left = _format_hh_mm_ss(until_dt - now_ref)
 
                             row_common = {
@@ -665,7 +743,6 @@ def main() -> int:
                             if is_buy:
                                 rint = range_to_int(o.get("range"))
                                 solar, const, reg = system_info(sys_id)
-
                                 out = dict(row_common)
                                 out.update({
                                     "station": station_name_from_location(loc_id),
@@ -692,7 +769,6 @@ def main() -> int:
                                     }
                                     write_row(w_jita_buy, j)
                                     jita_buy_count += 1
-
                             else:
                                 solar, const, reg = system_info(sys_id)
                                 out = dict(row_common)
@@ -723,30 +799,20 @@ def main() -> int:
                         except Exception:
                             continue
 
-                process_structure_orders(page1)
+                process_orders(page1)
 
                 for page in range(2, pages + 1):
-                    resp_p: Optional[EsiResponse] = None
-                    for _ in range(10):
-                        rr = client.get_structure_orders(sid, page=page, eve_access_token=eve_token)
-                        if rr.status == 401:
-                            time.sleep(5)
-                            eve_token = get_eve_access_token(force_refresh=True)
-                            continue
-                        resp_p = rr
-                        break
-
+                    resp_p = fetch_structure_page_with_policy(sid, page=page)
                     if resp_p is None:
-                        continue
-
+                        # sin tokens utilizables
+                        break
                     if resp_p.status in (403, 404):
                         break
-
                     if resp_p.status != 200 or not isinstance(resp_p.json_data, list):
                         continue
 
                     update_cache_headers(resp_p.headers)
-                    process_structure_orders(resp_p)
+                    process_orders(resp_p)
 
     # BigQuery: recrear/cargar tablas "de golpe"
     table_specs = [
@@ -757,14 +823,11 @@ def main() -> int:
     ]
 
     for tname, schema_file, data_file, cnt in table_specs:
-        # Crear o reemplazar la tabla con schema limpio (sin restos de versiones anteriores)
         bq_create_or_replace_empty_table(project_id, dataset, tname, schema_file)
-
-        # Si hay datos, cargar en bloque (REPLACE). Si no, se queda vacía con schema correcto.
         if cnt > 0:
             bq_load_ndjson_gz(project_id, dataset, tname, schema_file, data_file)
 
-    # Outputs para GitHub Actions (Finalize)
+    # Outputs para finalize
     if max_expires is None:
         max_expires = _utc_now()
         max_last_modified = None
