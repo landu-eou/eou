@@ -14,9 +14,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 
-# =========================
-# Utilidades de tiempo
-# =========================
+# === Sheets scopes (Google) ===
+# Usamos el scope de Sheets para escritura. (cloud-platform no es suficiente para Sheets)
+SHEETS_SCOPES = "https://www.googleapis.com/auth/spreadsheets"
+
+
 def excel_serial_from_epoch(epoch: int) -> float:
     # Google Sheets usa serial tipo Excel (epoch/86400 + 25569) en UTC
     return (epoch / 86400.0) + 25569.0
@@ -31,32 +33,27 @@ def epoch_from_iso(iso: str) -> int:
     return int(dt.timestamp())
 
 
-# =========================
-# Token refresh (gcloud)
-# =========================
-def refresh_access_token_with_gcloud() -> str:
+def _gcloud_refresh_access_token() -> str:
     """
-    Devuelve un access token nuevo usando las credenciales activas de gcloud.
-    Requiere que setup-gcloud esté instalado y que auth@v2 ya haya configurado credenciales.
+    Refresca el access token desde Application Default Credentials (ADC).
+    En GitHub Actions, ADC queda configurado por google-github-actions/auth (vía cred file / env).
+    Usamos gcloud para pedir un token NUEVO con scopes correctos (Sheets).
     """
-    p = subprocess.run(
-        ["gcloud", "auth", "print-access-token"],
-        capture_output=True,
-        text=True,
-    )
+    cmd = [
+        "gcloud",
+        "auth",
+        "application-default",
+        "print-access-token",
+        f"--scopes={SHEETS_SCOPES}",
+    ]
+    p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
-        # stderr mínimo (no “bonito”)
-        raise RuntimeError("gcloud auth print-access-token failed")
-    token = (p.stdout or "").strip()
-    if not token:
-        raise RuntimeError("empty access token from gcloud")
-    return token
+        # stderr mínimo: dejamos que el caller decida
+        return ""
+    return (p.stdout or "").strip()
 
 
-# =========================
-# HTTP Sheets write
-# =========================
-def post_json(url: str, token: str, payload: Dict[str, Any]) -> None:
+def _post_json(url: str, token: str, payload: Dict[str, Any]) -> None:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -71,9 +68,6 @@ def post_json(url: str, token: str, payload: Dict[str, Any]) -> None:
         _ = resp.read()
 
 
-# =========================
-# CLI
-# =========================
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--sheets-id", required=True)
@@ -82,27 +76,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--status", default="")
     p.add_argument("--next-run-seconds", default="", help="segundos desde ahora; opcional")
     p.add_argument("--last-modified-iso", default="", help="ISO 8601 (Z); opcional")
-    # Política anti-bucle: máximo 10 retries en caso de 401
-    p.add_argument("--max-token-retries", type=int, default=10)
-    p.add_argument("--token-retry-sleep-ms", type=int, default=5000)
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
 
-    # Token inicial: el que inyecta el workflow (salida de auth@v2).
+    # Token inicial (rápido). Si caduca durante workflows largos, lo refrescamos con gcloud.
     token = os.environ.get("SHEETS_ACCESS_TOKEN", "").strip()
     if not token:
-        raise SystemExit("Missing SHEETS_ACCESS_TOKEN")
+        # Si no viene, intentamos obtenerlo vía ADC directamente.
+        token = _gcloud_refresh_access_token().strip()
+        if not token:
+            raise SystemExit("Missing SHEETS_ACCESS_TOKEN and unable to refresh via gcloud ADC")
 
     row = args.row
     tab = args.tab
     data_updates: List[Dict[str, Any]] = []
 
-    # =========================
-    # Construcción del batchUpdate (misma lógica)
-    # =========================
     if args.status:
         data_updates.append({"range": f"{tab}!B{row}:B{row}", "values": [[args.status]]})
 
@@ -121,34 +112,35 @@ def main() -> int:
         return 0
 
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{args.sheets_id}/values:batchUpdate"
-    payload = {
-        "valueInputOption": "RAW",
-        "data": data_updates,
-    }
+    payload = {"valueInputOption": "RAW", "data": data_updates}
 
-    # =========================
-    # Retry policy: solo para 401 (token inválido/caducado)
-    # 401 -> sleep 5000ms -> refresh token -> retry
-    # max 10 retries, si no: exit 1 (intervención humana)
-    # =========================
-    sleep_s = max(0.0, args.token_retry_sleep_ms / 1000.0)
-
-    attempts_left = max(0, args.max_token_retries)
-    while True:
+    # Retry policy:
+    # - 401/403 => asumimos token inválido/caducado/scope insuficiente.
+    # - sleep 5000ms
+    # - refrescar token
+    # - retry hasta 10
+    max_retries = 10
+    for attempt in range(0, max_retries + 1):
         try:
-            post_json(url, token, payload)
+            _post_json(url, token, payload)
             return 0
         except urllib.error.HTTPError as e:
-            if e.code == 401 and attempts_left > 0:
-                time.sleep(sleep_s)
-                token = refresh_access_token_with_gcloud()
-                attempts_left -= 1
+            code = e.code
+            # 401: token inválido/caducado
+            # 403: a menudo scopes insuficientes o credencial no autorizada (también puede ser sharing)
+            if code in (401, 403) and attempt < max_retries:
+                time.sleep(5.0)
+                new_tok = _gcloud_refresh_access_token().strip()
+                if new_tok:
+                    token = new_tok
                 continue
-            # error mínimo a stderr y falla
-            raise SystemExit(f"Sheets API HTTPError: {e.code}") from e
-        except Exception as e:
-            # No hacemos retries aquí: tu política pedía retry por token inválido.
-            raise SystemExit("Sheets write failed") from e
+            # error final: mínimo
+            raise SystemExit(f"Sheets API HTTPError: {code}")
+        except Exception:
+            # No reintentamos “a ciegas” errores no-HTTP: fallo duro con ruido mínimo
+            raise SystemExit("Sheets API error")
+
+    raise SystemExit("Sheets API error: retries exceeded")
 
 
 if __name__ == "__main__":
