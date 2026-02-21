@@ -2,39 +2,19 @@
 """
 EOU · ESI Market Orders (regions + structures) → BigQuery Sandbox
 
-✅ Tokens (EXACTAMENTE como "ESI Structures"):
-- NO OAuth aquí.
-- Consume access tokens desde GitHub Secrets env:
-  - EOU_ACCESS_TOKENS_1
-  - EOU_ACCESS_TOKENS_2
-- Selección: PRIMARY_CHAR_ID primero; luego resto de char_id desc
-- Autenticadas (structures):
-  - Si 401: sleep 30s, rota token, retry (consume 1 del presupuesto global)
-  - Si 420: sleep 30s, retry (consume 1 del presupuesto global)
-- Presupuesto GLOBAL: RETRY_BUDGET=3 sumando 401+420 autenticadas
-- Si se agota: el run FALLA (como pediste)
+Cambios vs versión anterior:
+✅ Quitado GZIP para evitar `bq load --compression` (no soportado en tu entorno).
+✅ Ahora escribe NDJSON plano (*.jsonl) y lo carga con bq load estándar.
 
-✅ Correcciones:
-- sell => is_buy_order = false
-- timeLeft = until - now (hh:mm:ss, hh puede ser > 24)
-
-✅ Logs añadidos (sin imprimir tokens):
-- Inicio de cada estructura: structure_id, idx, total, (nombre si está en structures.jsonl.gz)
-- Resultado de page=1 por estructura: status, X-Pages (si existe)
-- En 401/420: log con structure_id, page, char_id actual, remaining_budget
-- Resumen final de estructuras: ok / skipped_403 / skipped_404 / bad_status / errors
-- Si se agota el budget: log explícito del structure_id/page/char_id que lo agotó
-- Token “shape” (para detectar el problema típico Bearer Bearer):
-  - has_bearer_prefix (True/False) y length, por char_id
-
-✅ Normalización de token:
-- Si el secret guarda "Bearer <token>", lo normalizamos a "<token>".
-  (Evita Authorization: Bearer Bearer <token> -> 401)
+Se mantiene:
+- Tokens + rotación + budget EXACTOS
+- Logs por estructura
+- timeLeft = until - now
+- create/replace tablas y load replace
 """
 
 from __future__ import annotations
 
-import gzip
 import json
 import os
 import subprocess
@@ -45,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+import gzip
 import requests
 
 
@@ -107,10 +88,6 @@ def _log(msg: str) -> None:
 
 
 def normalize_token(tok: str) -> str:
-    """
-    Normaliza tokens que vengan como "Bearer <jwt>" dentro del secret.
-    Evita enviar "Authorization: Bearer Bearer <jwt>".
-    """
     tok = (tok or "").strip()
     if tok.lower().startswith("bearer "):
         parts = tok.split(None, 1)
@@ -165,7 +142,6 @@ class TokenPool:
 
 
 def load_tokens_from_env() -> Dict[int, str]:
-    """Parsea EOU_ACCESS_TOKENS_1/2 y fusiona en {char_id:int -> token:str}."""
     t1 = os.environ.get("EOU_ACCESS_TOKENS_1", "").strip()
     t2 = os.environ.get("EOU_ACCESS_TOKENS_2", "").strip()
 
@@ -304,7 +280,6 @@ class EsiClient:
         url = f"{self.base_url}{path}"
         p = dict(params or {})
         p.setdefault("datasource", self.datasource)
-
         h = dict(headers or {})
 
         for attempt in range(max_retries + 1):
@@ -373,7 +348,7 @@ def bq_query(project_id: str, sql: str) -> None:
         raise RuntimeError(f"bq query failed: {cp.stderr.strip()}")
 
 
-def bq_load_ndjson_gz(
+def bq_load_ndjson(
     project_id: str,
     dataset: str,
     table: str,
@@ -387,7 +362,6 @@ def bq_load_ndjson_gz(
         f"--project_id={project_id}",
         "--source_format=NEWLINE_DELIMITED_JSON",
         "--replace=true",
-        "--compression=GZIP",
         f"--schema={schema_file}",
         f"{project_id}:{dataset}.{table}",
         data_file,
@@ -464,10 +438,11 @@ def main() -> int:
     schema_jita_buy = "schemas/esi/eou_market_orders_esi-gh-bq_jita44_buy_orders.json"
     schema_jita_sell = "schemas/esi/eou_market_orders_esi-gh-bq_jita44_sell_orders.json"
 
-    out_buy = os.path.join(out_dir, "buy_orders.jsonl.gz")
-    out_sell = os.path.join(out_dir, "sell_orders.jsonl.gz")
-    out_jita_buy = os.path.join(out_dir, "jita44_buy_orders.jsonl.gz")
-    out_jita_sell = os.path.join(out_dir, "jita44_sell_orders.jsonl.gz")
+    # ✅ NDJSON plano (sin gzip)
+    out_buy = os.path.join(out_dir, "buy_orders.jsonl")
+    out_sell = os.path.join(out_dir, "sell_orders.jsonl")
+    out_jita_buy = os.path.join(out_dir, "jita44_buy_orders.jsonl")
+    out_jita_sell = os.path.join(out_dir, "jita44_sell_orders.jsonl")
 
     _log("loading indices...")
     types_map = load_types_map(sde_types)
@@ -490,8 +465,7 @@ def main() -> int:
     _log(f"structures_market_count={len(structure_ids)}")
     _log(f"tokens_count={pool.count()} primary_char_id={primary_char_id}")
 
-    # Log token shape (sin imprimir tokens): detecta si vienen con "Bearer "
-    # (Solo una vez, al inicio)
+    # Token shape logs
     if pool.has_any():
         for cid in pool.order:
             raw = (pool.token_map.get(cid, "") or "").strip()
@@ -548,8 +522,8 @@ def main() -> int:
             return 1000
         return _safe_int(s, default=0)
 
-    def write_row(writer: gzip.GzipFile, obj: Dict[str, Any]) -> None:
-        writer.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
+    def write_row(writer, obj: Dict[str, Any]) -> None:
+        writer.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
     def fetch_structure_page_with_policy(structure_id: int, page: int) -> Optional[EsiResponse]:
         if not pool.has_any():
@@ -557,7 +531,7 @@ def main() -> int:
 
         while True:
             cid = pool.current_char_id()
-            tok = pool.current_token()  # <-- normalizado aquí
+            tok = pool.current_token()
             if not tok:
                 return None
 
@@ -590,18 +564,15 @@ def main() -> int:
     struct_bad_status = 0
     struct_errors = 0
 
-    with gzip.open(out_buy, "wb", compresslevel=6) as w_buy, \
-         gzip.open(out_sell, "wb", compresslevel=6) as w_sell, \
-         gzip.open(out_jita_buy, "wb", compresslevel=6) as w_jita_buy, \
-         gzip.open(out_jita_sell, "wb", compresslevel=6) as w_jita_sell:
+    with open(out_buy, "w", encoding="utf-8") as w_buy, \
+         open(out_sell, "w", encoding="utf-8") as w_sell, \
+         open(out_jita_buy, "w", encoding="utf-8") as w_jita_buy, \
+         open(out_jita_sell, "w", encoding="utf-8") as w_jita_sell:
 
-        # ---------------------------------------------------------------------
         # Regions (no auth)
-        # ---------------------------------------------------------------------
         _log("phase=regions start")
         for rid in region_ids:
             local_420_budget = 2
-
             resp = client.get_region_orders(rid, page=1)
             while resp.status == 420 and local_420_budget > 0:
                 local_420_budget -= 1
@@ -613,9 +584,7 @@ def main() -> int:
 
             update_cache_headers(resp.headers)
 
-            pages = _safe_int(resp.headers.get("X-Pages"), default=1)
-            pages = max(1, pages)
-
+            pages = max(1, _safe_int(resp.headers.get("X-Pages"), default=1))
             for page in range(1, pages + 1):
                 if page > 1:
                     local_420_budget_p = 2
@@ -714,17 +683,13 @@ def main() -> int:
                                 }
                                 write_row(w_jita_sell, j)
                                 jita_sell_count += 1
-
                     except Exception:
                         continue
 
         _log("phase=regions end")
 
-        # ---------------------------------------------------------------------
-        # Structures (auth) - logs por estructura
-        # ---------------------------------------------------------------------
+        # Structures (auth)
         _log("phase=structures start")
-
         if structure_ids and pool.has_any():
             total_structs = len(structure_ids)
 
@@ -765,12 +730,10 @@ def main() -> int:
 
                 update_cache_headers(page1.headers)
 
-                pages = _safe_int(page1.headers.get("X-Pages"), default=1)
-                pages = max(1, pages)
+                pages = max(1, _safe_int(page1.headers.get("X-Pages"), default=1))
 
                 def process_orders(resp: EsiResponse) -> None:
                     nonlocal buy_count, sell_count, jita_buy_count, jita_sell_count
-
                     for o in resp.json_data:
                         try:
                             type_id = int(o.get("type_id"))
@@ -855,7 +818,6 @@ def main() -> int:
                                     }
                                     write_row(w_jita_sell, j)
                                     jita_sell_count += 1
-
                         except Exception:
                             continue
 
@@ -872,26 +834,16 @@ def main() -> int:
                     if resp_p.status != 200 or not isinstance(resp_p.json_data, list):
                         _log(f"structure_bad structure_id={sid} page={page} status={resp_p.status}")
                         continue
-
                     update_cache_headers(resp_p.headers)
                     process_orders(resp_p)
 
                 struct_ok += 1
                 _log(f"structure_done status=ok structure_id={sid} pages={pages}")
 
-        else:
-            if not structure_ids:
-                _log("phase=structures skip reason=no_structures")
-            elif not pool.has_any():
-                _log("phase=structures skip reason=no_tokens")
-
         _log("phase=structures end")
 
-    # -------------------------------------------------------------------------
-    # BigQuery: recrear/cargar tablas en bloque (REPLACE)
-    # -------------------------------------------------------------------------
+    # BigQuery load
     _log("phase=bq start")
-
     table_specs = [
         (table_buy, schema_buy, out_buy, buy_count),
         (table_sell, schema_sell, out_sell, sell_count),
@@ -903,7 +855,7 @@ def main() -> int:
         _log(f"bq_table_prepare table={dataset}.{tname} rows={cnt}")
         bq_create_or_replace_empty_table(project_id, dataset, tname, schema_file)
         if cnt > 0:
-            bq_load_ndjson_gz(project_id, dataset, tname, schema_file, data_file)
+            bq_load_ndjson(project_id, dataset, tname, schema_file, data_file)
 
     _log("phase=bq end")
 
