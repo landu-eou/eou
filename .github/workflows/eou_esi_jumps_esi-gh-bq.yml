@@ -293,7 +293,7 @@ jobs:
       # - descarga ESI body
       # - mapea system_id -> solarSystem (SDE)
       # - reconcile: filtra faltantes comparando con BQ
-      # - error si falta mapping => aborta antes de tocar Sheets/BQ/State
+      # - Diagnóstico: logs útiles si vuelve a fallar
       # ============================================================
       - name: Prepare load (download ESI + validate mapping + build ndjson)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' }}
@@ -303,8 +303,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           mode="${{ steps.mode.outputs.mode }}"
           lm_iso="${{ steps.esi.outputs.last_modified_iso }}"
+
+          echo "::group::Prepare load - diagnostics context"
+          echo "mode=${mode}"
+          echo "lm_iso=${lm_iso}"
+          echo "::endgroup::"
 
           curl -sS -L "${ESI_URL}" -o esi_body.json
 
@@ -313,16 +319,35 @@ jobs:
             > sde_map.json
 
           if [[ "${mode}" == "reconcile" ]]; then
+            echo "::group::BQ existing snapshot query"
+            echo "Querying existing solarSystem for snapshot_ts=${lm_iso}"
+            echo "::endgroup::"
+
+            set +e
             existing_csv="$(
               bq --project_id="${GCP_PROJECT_ID}" query --quiet --use_legacy_sql=false --format=csv --headless \
                 "SELECT solarSystem
                  FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
                  WHERE snapshot_ts = TIMESTAMP('${lm_iso}')" 2>&1
-            )" || {
-              echo "bq query failed while building existing_map.json" >&2
-              echo "${existing_csv}" >&2
+            )"
+            bq_status=$?
+            set -e
+
+            if [[ "${bq_status}" -ne 0 ]]; then
+              echo "::error::bq query failed while building existing_map.json"
+              echo "---- bq raw output ----"
+              echo "${existing_csv}"
+              echo "-----------------------"
               exit 1
-            }
+            fi
+
+            # Log defensivo si viene vacío/extraño
+            if ! printf '%s\n' "${existing_csv}" | head -n 1 | grep -q '^[^[:space:]]'; then
+              echo "::warning::bq returned unexpected content (empty or malformed)"
+              echo "---- raw bq output ----"
+              echo "${existing_csv}"
+              echo "-----------------------"
+            fi
 
             printf '%s\n' "${existing_csv}" \
               | jq -Rn '
@@ -337,6 +362,8 @@ jobs:
             echo '{}' > existing_map.json
           fi
 
+          echo "::group::Build load.ndjson"
+          set +e
           if [[ "${mode}" == "reconcile" ]]; then
             jq -c --arg ts "${lm_iso}" --slurpfile map sde_map.json --slurpfile exist existing_map.json '
               .[] |
@@ -346,7 +373,7 @@ jobs:
                 ship_jumps: (.ship_jumps|tonumber)
               } |
               select( ($exist[0][.solarSystem] // false) | not )
-            ' esi_body.json > load.ndjson
+            ' esi_body.json > load.ndjson 2> jq_error.log
           else
             jq -c --arg ts "${lm_iso}" --slurpfile map sde_map.json '
               .[] |
@@ -355,7 +382,21 @@ jobs:
                 solarSystem: ($map[0][(.system_id|tostring)] // error("missing solarSystem mapping for system_id=" + (.system_id|tostring))),
                 ship_jumps: (.ship_jumps|tonumber)
               }
-            ' esi_body.json > load.ndjson
+            ' esi_body.json > load.ndjson 2> jq_error.log
+          fi
+          jq_status=$?
+          set -e
+          echo "::endgroup::"
+
+          if [[ "${jq_status}" -ne 0 ]]; then
+            echo "::error::jq failed while building load.ndjson"
+            echo "---- jq stderr ----"
+            cat jq_error.log || true
+            echo "-------------------"
+            echo "---- first 30 lines of esi_body.json ----"
+            head -n 30 esi_body.json || true
+            echo "-----------------------------------------"
+            exit 1
           fi
 
           echo "load_lines=$(wc -l < load.ndjson | tr -d ' ')" >> "${GITHUB_OUTPUT}"
