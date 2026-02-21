@@ -3,16 +3,11 @@ name: ESI Market Orders (ESI → GH → BQ)
 on:
   workflow_dispatch:
 
-# Permisos mínimos:
-# - actions:read   -> Guard por REST (listar runs)
-# - contents:read  -> checkout
-# - id-token:write -> WIF/OIDC hacia Google
 permissions:
   actions: read
   contents: read
   id-token: write
 
-# Candado oficial: evita solapamiento real.
 concurrency:
   group: eou_market_orders_esi-gh-bq
   cancel-in-progress: false
@@ -23,11 +18,6 @@ jobs:
     timeout-minutes: 45
 
     env:
-      # =====================================================================
-      # 0) CONFIGURACIÓN
-      # =====================================================================
-
-      # --- Identidad del workflow ---
       WORKFLOW_FILE: eou_market_orders_esi-gh-bq.yml
 
       # --- Google Sheets (estado compartido) ---
@@ -38,15 +28,14 @@ jobs:
       # --- Locking / planificación ---
       LOCK_TIME: 180  # segundos
 
-      # --- Google Sheet con el EVE access token (para estructuras) ---
-      # Si tu refresh de tokens escribe en otra celda, cambia esto aquí.
-      TOKEN_SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
-      TOKEN_TAB_NAME: access_tokens
-      TOKEN_CELL_A1: D12
+      # --- Tokens (solo consumo desde Secrets, estilo "ESI Structures") ---
+      PRIMARY_CHAR_ID: "2124070822"
+      RETRY_BUDGET: "3"
 
       # --- ESI ---
       ESI_BASE_URL: https://esi.evetech.net
       ESI_DATASOURCE: tranquility
+
       # Lista CSV de region_id (ej: "10000002,10000032").
       # Si está vacío -> se consulta /universe/regions para obtener todas.
       REGION_IDS: ""
@@ -75,10 +64,6 @@ jobs:
       BQ_TABLE_JITA44_SELL: jita44_sell_orders
 
     steps:
-      # =====================================================================
-      # 1) GUARD (COMÚN) — decide si este run debe trabajar o salir (busy)
-      # =====================================================================
-
       - name: Guard - compute decision
         id: guard_calc
         env:
@@ -141,9 +126,6 @@ jobs:
         run: |
           echo "proceed=$(cat /tmp/proceed)" >> "$GITHUB_OUTPUT"
 
-      # =====================================================================
-      # 2) AUTH GOOGLE (COMÚN) — WIF/OIDC (sin claves)
-      # =====================================================================
       - name: Auth to Google (WIF)
         id: gcp_auth
         uses: google-github-actions/auth@v2
@@ -155,17 +137,11 @@ jobs:
             https://www.googleapis.com/auth/spreadsheets
             https://www.googleapis.com/auth/cloud-platform
 
-      # =====================================================================
-      # 3) BUSY EXIT (COMÚN) — si no procede, salir sin tocar nada
-      # =====================================================================
       - name: Exit if skipped (busy)
         if: steps.guard.outputs.proceed != 'true'
         run: |
           exit 0
 
-      # =====================================================================
-      # 3b) SHEETS GUARD (COMÚN) — si now < next_run, salir sin hacer trabajo
-      # =====================================================================
       - name: Sheets guard - compute decision (now < next_run)
         id: sheets_guard
         if: steps.guard.outputs.proceed == 'true'
@@ -196,11 +172,6 @@ jobs:
         run: |
           exit 0
 
-      # =====================================================================
-      # 4) LOCK INICIAL (COMÚN)
-      #    - status=in_progress
-      #    - next_run (col D) como VALOR numérico (serial Sheets), no string
-      # =====================================================================
       - name: Initial lock (in_progress + next_run as value)
         if: steps.guard.outputs.proceed == 'true' && steps.sheets_guard.outputs.proceed == 'true'
         env:
@@ -224,9 +195,6 @@ jobs:
               ]
             }"
 
-      # =====================================================================
-      # 5) 🛠️ OBJETIVO (este workflow)
-      # =====================================================================
       - name: Checkout
         if: steps.guard.outputs.proceed == 'true' && steps.sheets_guard.outputs.proceed == 'true'
         uses: actions/checkout@v4
@@ -241,7 +209,7 @@ jobs:
         if: steps.guard.outputs.proceed == 'true' && steps.sheets_guard.outputs.proceed == 'true'
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements/eou_market_orders_esi-gh-bq_requirements.txt
+          pip install -r requirements/esi/eou_market_orders_esi-gh-bq_requirements.txt
 
       - name: Setup gcloud
         if: steps.guard.outputs.proceed == 'true' && steps.sheets_guard.outputs.proceed == 'true'
@@ -252,17 +220,13 @@ jobs:
         id: objective
         env:
           GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+          # ✅ Tokens EXACTAMENTE como "ESI Structures" (solo consumo, no refresh)
+          EOU_ACCESS_TOKENS_1: ${{ secrets.EOU_ACCESS_TOKENS_1 }}
+          EOU_ACCESS_TOKENS_2: ${{ secrets.EOU_ACCESS_TOKENS_2 }}
         run: |
           set -euo pipefail
           python scripts/esi/eou_market_orders_esi-gh-bq_run.py | tee /tmp/objective_out.txt
-
-          # Publicar outputs para el finalize
-          # Formato esperado (una línea por output): key=value
           grep -E '^(max_expires_epoch|max_last_modified_epoch)=' /tmp/objective_out.txt >> "$GITHUB_OUTPUT" || true
-
-      # =====================================================================
-      # 6) FINALIZE (COMÚN) — completed/failed + next_run y last_modified como VALOR
-      # =====================================================================
 
       - name: Finalize (completed)
         if: steps.guard.outputs.proceed == 'true' && steps.sheets_guard.outputs.proceed == 'true' && success()
@@ -274,7 +238,6 @@ jobs:
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
 
-          # next_run = max(Expires) + 5 min
           now_epoch="$(date -u +%s)"
           base_epoch="${MAX_EXPIRES_EPOCH:-$now_epoch}"
           if [ -z "$base_epoch" ] || [ "$base_epoch" = "0" ]; then base_epoch="$now_epoch"; fi
@@ -293,7 +256,6 @@ jobs:
               ]
             }"
 
-          # last_modified (col I) solo si existe
           lm_epoch="${MAX_LAST_MODIFIED_EPOCH:-}"
           if [ -n "$lm_epoch" ] && [ "$lm_epoch" != "0" ]; then
             lm_serial="$(awk "BEGIN { printf \"%.10f\", (${lm_epoch}/86400) + 25569 }")"
@@ -318,7 +280,6 @@ jobs:
           set -euo pipefail
           row="${SHEETS_WORKFLOW_ROW}"
 
-          # next_run = fin del run + 5 min
           epoch="$(date -u -d "+300 seconds" +%s)"
           serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
 
