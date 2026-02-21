@@ -659,3 +659,13 @@
 {"killID":133549736,"zkb":{"hash":"ca9eb287a6c3712e72c639f4a4bca32a449975ce","locationID":50002573,"labels":["tz:eu","cat:6","#:5+","pvp","loc:lowsec"]},"rearm":0}
 {"killID":133549714,"zkb":{"hash":"221cc3c35b1395ce37b4a0bfa3bed85492442fda","locationID":50002573,"labels":["tz:eu","cat:6","#:5+","pvp","loc:lowsec"]},"rearm":0}
 {"killID":133549758,"zkb":{"hash":"fad213b6517af7dee888befaf5df042564947cc8","locationID":50002573,"labels":["tz:eu","cat:6","#:1","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133549606,"zkb":{"hash":"a10e4d6b92d714aa5a0e310d3c7b3fa27e2400ee","locationID":50002774,"labels":["tz:eu","cat:6","#:5+","pvp","loc:highsec","isk:1b+","capital"]},"rearm":0}
+{"killID":133549773,"zkb":{"hash":"beca39186dd1e5dbbc2bf4acfdae9476d581623c","locationID":50003614,"labels":["tz:eu","cat:6","#:25+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133549764,"zkb":{"hash":"ff49aa43409879fc6776e124b9fa0429266aad5e","locationID":50011241,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133549711,"zkb":{"hash":"def2f5e58ac9381fc1146d9716d4fc9685d73161","locationID":50011241,"labels":["tz:eu","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133549742,"zkb":{"hash":"6cda55279fc9f951b6062f3beacc4f6378317a27","locationID":50001584,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133549746,"zkb":{"hash":"efca0bacd4dfecbc95eca4173097304a499281e8","locationID":50001584,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133549792,"zkb":{"hash":"862bac6021de113a2929772adad6170a473a836c","locationID":50001584,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133549793,"zkb":{"hash":"ec987e1c5cd694dc125b8672a7bd29aa5e7df015","locationID":50001584,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133549630,"zkb":{"hash":"8b0562853cedb412a264b2195e8ed719110a521b","locationID":50002774,"labels":["tz:eu","cat:6","#:1","pvp","loc:highsec"]},"rearm":0}
+{"killID":133549759,"zkb":{"hash":"e38824d6f6b736d29ec436fc12de852cf84a0bff","locationID":50004870,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec","isk:1b+"]},"rearm":0}
