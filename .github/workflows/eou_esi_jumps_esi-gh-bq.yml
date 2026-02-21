@@ -1,16 +1,3 @@
-# Repo file tree used by this workflow
-#
-# .github/
-#   workflows/
-#     eou_esi_jumps_esi-gh-bq.yml
-#
-# data/
-#   sde/
-#     solarsystems.jsonl.gz
-#
-# states/
-#   system_jumps.json
-
 name: ESI System Jumps (ESI → GH → BQ)
 
 on:
@@ -45,7 +32,7 @@ jobs:
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "5"
-      LOCK_TIME: "120" # segundos
+      LOCK_TIME: "60" # segundos
 
       # ESI + estado local
       ESI_URL: https://esi.evetech.net/universe/system_jumps
@@ -326,12 +313,26 @@ jobs:
             > sde_map.json
 
           if [[ "${mode}" == "reconcile" ]]; then
-            bq --project_id="${GCP_PROJECT_ID}" query --quiet --format=json --use_legacy_sql=false \
-              "SELECT solarSystem
-               FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
-               WHERE snapshot_ts = TIMESTAMP('${lm_iso}')" \
-              | jq 'map(.solarSystem) | map({(.): true}) | add // {}' \
-              > existing_map.json
+            existing_csv="$(
+              bq --project_id="${GCP_PROJECT_ID}" query --quiet --use_legacy_sql=false --format=csv --headless \
+                "SELECT solarSystem
+                 FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
+                 WHERE snapshot_ts = TIMESTAMP('${lm_iso}')" 2>&1
+            )" || {
+              echo "bq query failed while building existing_map.json" >&2
+              echo "${existing_csv}" >&2
+              exit 1
+            }
+
+            printf '%s\n' "${existing_csv}" \
+              | jq -Rn '
+                  [ inputs
+                    | gsub("\r$";"")
+                    | select(length>0)
+                  ]
+                  | map({(.): true})
+                  | add // {}
+                ' > existing_map.json
           else
             echo '{}' > existing_map.json
           fi
