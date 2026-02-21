@@ -22,13 +22,14 @@ EOU · ESI Market Orders (regions + structures) → BigQuery Sandbox
 - Inicio de cada estructura: structure_id, idx, total, (nombre si está en structures.jsonl.gz)
 - Resultado de page=1 por estructura: status, X-Pages (si existe)
 - En 401/420: log con structure_id, page, char_id actual, remaining_budget
-- Resumen final de estructuras: ok / skipped_403 / skipped_404 / bad_status / auth_401 / rate_420 / errors
+- Resumen final de estructuras: ok / skipped_403 / skipped_404 / bad_status / errors
 - Si se agota el budget: log explícito del structure_id/page/char_id que lo agotó
+- Token “shape” (para detectar el problema típico Bearer Bearer):
+  - has_bearer_prefix (True/False) y length, por char_id
 
-NOTA sobre tu imagen:
-- Que un token funcione para UNA estructura (p.ej. 1021681819954) no garantiza que el fallo sea “scope”.
-  Con estos logs verás exactamente qué structure_id(s) devuelven 401/403/404/otros y cuántas.
-
+✅ Normalización de token:
+- Si el secret guarda "Bearer <token>", lo normalizamos a "<token>".
+  (Evita Authorization: Bearer Bearer <token> -> 401)
 """
 
 from __future__ import annotations
@@ -68,7 +69,6 @@ def _parse_http_date(value: Optional[str]) -> Optional[datetime]:
 
 
 def _parse_iso_utc(value: str) -> datetime:
-    # ESI suele devolver RFC3339 con Z
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     return datetime.fromisoformat(value).astimezone(timezone.utc)
@@ -103,8 +103,19 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
 
 
 def _log(msg: str) -> None:
-    # log simple, estable
     print(msg, flush=True)
+
+
+def normalize_token(tok: str) -> str:
+    """
+    Normaliza tokens que vengan como "Bearer <jwt>" dentro del secret.
+    Evita enviar "Authorization: Bearer Bearer <jwt>".
+    """
+    tok = (tok or "").strip()
+    if tok.lower().startswith("bearer "):
+        parts = tok.split(None, 1)
+        tok = parts[1].strip() if len(parts) > 1 else ""
+    return tok
 
 
 # =============================================================================
@@ -138,11 +149,14 @@ class TokenPool:
             return None
         return self.order[self.idx]
 
-    def current_token(self) -> str:
+    def current_token_raw(self) -> str:
         cid = self.current_char_id()
         if cid is None:
             return ""
         return self.token_map.get(cid, "")
+
+    def current_token(self) -> str:
+        return normalize_token(self.current_token_raw())
 
     def rotate(self) -> None:
         if not self.order:
@@ -221,25 +235,18 @@ def load_stations_map(path: str) -> Dict[int, str]:
 
 
 def load_structures_market_map(path: str) -> Tuple[List[int], Dict[int, str]]:
-    """
-    Devuelve:
-      - lista de structure_id con market=true
-      - map {structure_id -> name} si existe
-    """
     ids: List[int] = []
     names: Dict[int, str] = {}
     for obj in _read_jsonl_gz(path):
         sid = obj.get("stationID")
         if sid is None:
             continue
-        is_market = bool(obj.get("market", False))
-        if not is_market:
+        if not bool(obj.get("market", False)):
             continue
         sid_i = int(sid)
         ids.append(sid_i)
         if obj.get("station") is not None:
             names[sid_i] = str(obj.get("station"))
-    # dedupe, preserve order
     seen = set()
     uniq: List[int] = []
     for i in ids:
@@ -303,14 +310,12 @@ class EsiClient:
         for attempt in range(max_retries + 1):
             r = self.session.request(method, url, params=p, headers=h, timeout=timeout)
 
-            # Rate limit 429 -> Retry-After
             if allow_429 and r.status_code == 429:
                 ra = r.headers.get("Retry-After")
                 sleep_s = _safe_int(ra, default=5)
                 time.sleep(max(1, sleep_s))
                 continue
 
-            # transient 5xx -> backoff
             if r.status_code in retry_on_status and attempt < max_retries:
                 time.sleep(retry_backoff_base ** attempt)
                 continue
@@ -454,7 +459,6 @@ def main() -> int:
     table_jita_buy = os.environ.get("BQ_TABLE_JITA44_BUY", "jita44_buy_orders")
     table_jita_sell = os.environ.get("BQ_TABLE_JITA44_SELL", "jita44_sell_orders")
 
-    # ✅ schemas moved to schemas/esi/...
     schema_buy = "schemas/esi/eou_market_orders_esi-gh-bq_buy_orders.json"
     schema_sell = "schemas/esi/eou_market_orders_esi-gh-bq_sell_orders.json"
     schema_jita_buy = "schemas/esi/eou_market_orders_esi-gh-bq_jita44_buy_orders.json"
@@ -465,7 +469,6 @@ def main() -> int:
     out_jita_buy = os.path.join(out_dir, "jita44_buy_orders.jsonl.gz")
     out_jita_sell = os.path.join(out_dir, "jita44_sell_orders.jsonl.gz")
 
-    # Load indices
     _log("loading indices...")
     types_map = load_types_map(sde_types)
     excluded = load_excluded_types_set(sde_excluded)
@@ -475,13 +478,11 @@ def main() -> int:
 
     client = EsiClient(base_url=base_url, datasource=datasource)
 
-    # Region list
     if region_ids_raw:
         region_ids = [int(x.strip()) for x in region_ids_raw.split(",") if x.strip()]
     else:
         region_ids = client.list_regions()
 
-    # Token pool (Secrets) - EXACT policy
     token_map = load_tokens_from_env()
     pool = TokenPool(primary_char_id=primary_char_id, token_map=token_map)
 
@@ -489,11 +490,18 @@ def main() -> int:
     _log(f"structures_market_count={len(structure_ids)}")
     _log(f"tokens_count={pool.count()} primary_char_id={primary_char_id}")
 
-    # Global retry budget for authenticated (401+420) across entire run
+    # Log token shape (sin imprimir tokens): detecta si vienen con "Bearer "
+    # (Solo una vez, al inicio)
+    if pool.has_any():
+        for cid in pool.order:
+            raw = (pool.token_map.get(cid, "") or "").strip()
+            _log(
+                f"token_shape char_id={cid} has_bearer_prefix={raw.lower().startswith('bearer ')} len={len(raw)}"
+            )
+
     auth_retry_budget = retry_budget
 
     def consume_budget_or_fail(reason: str, structure_id: int, page: int, char_id: Optional[int]) -> None:
-        """Consume EXACTLY 1 retry from global budget. If no budget left -> fail immediately."""
         nonlocal auth_retry_budget
         if auth_retry_budget <= 0:
             _log(
@@ -503,10 +511,7 @@ def main() -> int:
             raise RuntimeError("RETRY_BUDGET exhausted for authenticated requests (401/420).")
         auth_retry_budget -= 1
 
-    # Writers
     buy_count = sell_count = jita_buy_count = jita_sell_count = 0
-
-    # ✅ timeLeft = until - now (use one stable 'now' reference for the run)
     now_ref = _utc_now()
 
     max_expires: Optional[datetime] = None
@@ -546,21 +551,13 @@ def main() -> int:
     def write_row(writer: gzip.GzipFile, obj: Dict[str, Any]) -> None:
         writer.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
 
-    # -----------------------
-    # Authenticated structure fetch with EXACT retry policy + logs
-    # -----------------------
     def fetch_structure_page_with_policy(structure_id: int, page: int) -> Optional[EsiResponse]:
-        """
-        - 401: sleep 30s, rotate token, retry (budget--)
-        - 420: sleep 30s, retry (budget--)
-        - budget global across entire run
-        """
         if not pool.has_any():
             return None
 
         while True:
             cid = pool.current_char_id()
-            tok = pool.current_token()
+            tok = pool.current_token()  # <-- normalizado aquí
             if not tok:
                 return None
 
@@ -583,23 +580,15 @@ def main() -> int:
                     f"char_id={cid} remaining_budget={auth_retry_budget}"
                 )
                 time.sleep(30)
-                # no rotation required
                 continue
 
             return resp
 
-    # -----------------------
-    # Structure stats for summary
-    # -----------------------
     struct_ok = 0
     struct_skipped_403 = 0
     struct_skipped_404 = 0
     struct_bad_status = 0
     struct_errors = 0
-
-    # (Estas dos son “eventos” vistos en logs, pero el run puede fallar antes)
-    struct_seen_401 = 0
-    struct_seen_420 = 0
 
     with gzip.open(out_buy, "wb", compresslevel=6) as w_buy, \
          gzip.open(out_sell, "wb", compresslevel=6) as w_sell, \
@@ -611,7 +600,6 @@ def main() -> int:
         # ---------------------------------------------------------------------
         _log("phase=regions start")
         for rid in region_ids:
-            # Local retry for 420 (non-auth); no toca auth_retry_budget
             local_420_budget = 2
 
             resp = client.get_region_orders(rid, page=1)
@@ -652,8 +640,6 @@ def main() -> int:
                         issued_dt = _parse_iso_utc(str(o.get("issued")))
                         duration_days = int(o.get("duration"))
                         until_dt = issued_dt + timedelta(days=duration_days)
-
-                        # ✅ timeLeft = until - now
                         time_left = _format_hh_mm_ss(until_dt - now_ref)
 
                         row_common = {
@@ -702,8 +688,8 @@ def main() -> int:
                                 write_row(w_jita_buy, j)
                                 jita_buy_count += 1
                         else:
-                            # ✅ sell tables: is_buy_order=false
                             solar, const, reg = system_info(sys_id)
+
                             out = dict(row_common)
                             out.update({
                                 "station": station_name_from_location(loc_id),
@@ -750,7 +736,6 @@ def main() -> int:
                 try:
                     page1 = fetch_structure_page_with_policy(sid, page=1)
                 except RuntimeError:
-                    # Ya se imprimió log en consume_budget_or_fail()
                     raise
                 except Exception as e:
                     struct_errors += 1
@@ -761,16 +746,9 @@ def main() -> int:
                     _log("structure_abort reason=no_tokens")
                     break
 
-                # Si el primer hit no es 200, lo reportamos con detalle
                 st = page1.status
                 xpages = page1.headers.get("X-Pages", "")
                 _log(f"structure_page1 status={st} structure_id={sid} xpages={xpages}")
-
-                # Track “seen” (solo informativo)
-                if st == 401:
-                    struct_seen_401 += 1
-                if st == 420:
-                    struct_seen_420 += 1
 
                 if st == 403:
                     struct_skipped_403 += 1
@@ -800,12 +778,9 @@ def main() -> int:
                                 continue
 
                             is_buy = bool(o.get("is_buy_order"))
-
                             issued_dt = _parse_iso_utc(str(o.get("issued")))
                             duration_days = int(o.get("duration"))
                             until_dt = issued_dt + timedelta(days=duration_days)
-
-                            # ✅ timeLeft = until - now
                             time_left = _format_hh_mm_ss(until_dt - now_ref)
 
                             row_common = {
@@ -884,28 +859,16 @@ def main() -> int:
                         except Exception:
                             continue
 
-                # Procesa page1
                 process_orders(page1)
 
-                # Procesa pages restantes
                 for page in range(2, pages + 1):
-                    try:
-                        resp_p = fetch_structure_page_with_policy(sid, page=page)
-                    except RuntimeError:
-                        raise
-                    except Exception as e:
-                        struct_errors += 1
-                        _log(f"structure_error structure_id={sid} page={page} err={type(e).__name__}")
-                        resp_p = None
-
+                    resp_p = fetch_structure_page_with_policy(sid, page=page)
                     if resp_p is None:
-                        _log(f"structure_abort structure_id={sid} reason=no_tokens_or_error")
+                        _log(f"structure_abort structure_id={sid} reason=no_tokens")
                         break
-
                     if resp_p.status in (403, 404):
                         _log(f"structure_stop structure_id={sid} page={page} status={resp_p.status}")
                         break
-
                     if resp_p.status != 200 or not isinstance(resp_p.json_data, list):
                         _log(f"structure_bad structure_id={sid} page={page} status={resp_p.status}")
                         continue
@@ -944,9 +907,6 @@ def main() -> int:
 
     _log("phase=bq end")
 
-    # -------------------------------------------------------------------------
-    # Summary logs
-    # -------------------------------------------------------------------------
     _log(
         "summary "
         f"rows_buy={buy_count} rows_sell={sell_count} "
@@ -956,11 +916,9 @@ def main() -> int:
         "structures_summary "
         f"ok={struct_ok} skipped_403={struct_skipped_403} skipped_404={struct_skipped_404} "
         f"bad_status={struct_bad_status} errors={struct_errors} "
-        f"seen_401_events={struct_seen_401} seen_420_events={struct_seen_420} "
         f"remaining_auth_budget={auth_retry_budget}"
     )
 
-    # Outputs para GitHub Actions (Finalize)
     if max_expires is None:
         max_expires = _utc_now()
         max_last_modified = None
