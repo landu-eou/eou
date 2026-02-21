@@ -1,18 +1,34 @@
 #!/usr/bin/env python3
-"""EOU · ESI Market Orders (regions + structures) → BigQuery Sandbox
+"""
+EOU · ESI Market Orders (regions + structures) → BigQuery Sandbox
 
-Tokens (EXACTAMENTE como "ESI Structures"):
+✅ Tokens (EXACTAMENTE como "ESI Structures"):
 - NO OAuth aquí.
 - Consume access tokens desde GitHub Secrets env:
   - EOU_ACCESS_TOKENS_1
   - EOU_ACCESS_TOKENS_2
 - Selección: PRIMARY_CHAR_ID primero; luego resto de char_id desc
 - Autenticadas (structures):
-  - 401 -> sleep 30s, rota token, retry
-  - 420 -> sleep 30s, retry (sin rotar necesariamente)
-- Presupuesto global RETRY_BUDGET=3 (401+420 autenticadas). Si se agota -> fail.
+  - Si 401: sleep 30s, rota token, retry (consume 1 del presupuesto global)
+  - Si 420: sleep 30s, retry (consume 1 del presupuesto global)
+- Presupuesto GLOBAL: RETRY_BUDGET=3 sumando 401+420 autenticadas
+- Si se agota: el run FALLA (como pediste)
 
-No imprime secretos (solo logs seguros: char_id, structure_id, page, status, remaining_budget).
+✅ Correcciones:
+- sell => is_buy_order = false
+- timeLeft = until - now (hh:mm:ss, hh puede ser > 24)
+
+✅ Logs añadidos (sin imprimir tokens):
+- Inicio de cada estructura: structure_id, idx, total, (nombre si está en structures.jsonl.gz)
+- Resultado de page=1 por estructura: status, X-Pages (si existe)
+- En 401/420: log con structure_id, page, char_id actual, remaining_budget
+- Resumen final de estructuras: ok / skipped_403 / skipped_404 / bad_status / auth_401 / rate_420 / errors
+- Si se agota el budget: log explícito del structure_id/page/char_id que lo agotó
+
+NOTA sobre tu imagen:
+- Que un token funcione para UNA estructura (p.ej. 1021681819954) no garantiza que el fallo sea “scope”.
+  Con estos logs verás exactamente qué structure_id(s) devuelven 401/403/404/otros y cuántas.
+
 """
 
 from __future__ import annotations
@@ -86,6 +102,11 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
         return default
 
 
+def _log(msg: str) -> None:
+    # log simple, estable
+    print(msg, flush=True)
+
+
 # =============================================================================
 # Tokens (Secrets) - EXACT policy
 # =============================================================================
@@ -108,6 +129,9 @@ class TokenPool:
 
     def has_any(self) -> bool:
         return len(self.order) > 0
+
+    def count(self) -> int:
+        return len(self.order)
 
     def current_char_id(self) -> Optional[int]:
         if not self.order:
@@ -197,6 +221,11 @@ def load_stations_map(path: str) -> Dict[int, str]:
 
 
 def load_structures_market_map(path: str) -> Tuple[List[int], Dict[int, str]]:
+    """
+    Devuelve:
+      - lista de structure_id con market=true
+      - map {structure_id -> name} si existe
+    """
     ids: List[int] = []
     names: Dict[int, str] = {}
     for obj in _read_jsonl_gz(path):
@@ -437,6 +466,7 @@ def main() -> int:
     out_jita_sell = os.path.join(out_dir, "jita44_sell_orders.jsonl.gz")
 
     # Load indices
+    _log("loading indices...")
     types_map = load_types_map(sde_types)
     excluded = load_excluded_types_set(sde_excluded)
     stations_map = load_stations_map(sde_stations)
@@ -455,13 +485,21 @@ def main() -> int:
     token_map = load_tokens_from_env()
     pool = TokenPool(primary_char_id=primary_char_id, token_map=token_map)
 
+    _log(f"regions_count={len(region_ids)}")
+    _log(f"structures_market_count={len(structure_ids)}")
+    _log(f"tokens_count={pool.count()} primary_char_id={primary_char_id}")
+
     # Global retry budget for authenticated (401+420) across entire run
     auth_retry_budget = retry_budget
 
-    def consume_budget_or_fail(reason: str) -> None:
+    def consume_budget_or_fail(reason: str, structure_id: int, page: int, char_id: Optional[int]) -> None:
         """Consume EXACTLY 1 retry from global budget. If no budget left -> fail immediately."""
         nonlocal auth_retry_budget
         if auth_retry_budget <= 0:
+            _log(
+                f"RETRY_BUDGET_EXHAUSTED reason={reason} structure_id={structure_id} "
+                f"page={page} char_id={char_id}"
+            )
             raise RuntimeError("RETRY_BUDGET exhausted for authenticated requests (401/420).")
         auth_retry_budget -= 1
 
@@ -509,7 +547,7 @@ def main() -> int:
         writer.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
 
     # -----------------------
-    # Authenticated structure fetch with EXACT retry policy
+    # Authenticated structure fetch with EXACT retry policy + logs
     # -----------------------
     def fetch_structure_page_with_policy(structure_id: int, page: int) -> Optional[EsiResponse]:
         """
@@ -529,9 +567,8 @@ def main() -> int:
             resp = client.get_structure_orders(structure_id, page=page, bearer_token=tok)
 
             if resp.status == 401:
-                consume_budget_or_fail("401")
-                # logging seguro (sin token)
-                print(
+                consume_budget_or_fail("401", structure_id, page, cid)
+                _log(
                     f"auth_retry=401 structure_id={structure_id} page={page} "
                     f"char_id={cid} remaining_budget={auth_retry_budget}"
                 )
@@ -540,8 +577,8 @@ def main() -> int:
                 continue
 
             if resp.status == 420:
-                consume_budget_or_fail("420")
-                print(
+                consume_budget_or_fail("420", structure_id, page, cid)
+                _log(
                     f"auth_retry=420 structure_id={structure_id} page={page} "
                     f"char_id={cid} remaining_budget={auth_retry_budget}"
                 )
@@ -551,6 +588,19 @@ def main() -> int:
 
             return resp
 
+    # -----------------------
+    # Structure stats for summary
+    # -----------------------
+    struct_ok = 0
+    struct_skipped_403 = 0
+    struct_skipped_404 = 0
+    struct_bad_status = 0
+    struct_errors = 0
+
+    # (Estas dos son “eventos” vistos en logs, pero el run puede fallar antes)
+    struct_seen_401 = 0
+    struct_seen_420 = 0
+
     with gzip.open(out_buy, "wb", compresslevel=6) as w_buy, \
          gzip.open(out_sell, "wb", compresslevel=6) as w_sell, \
          gzip.open(out_jita_buy, "wb", compresslevel=6) as w_jita_buy, \
@@ -559,6 +609,7 @@ def main() -> int:
         # ---------------------------------------------------------------------
         # Regions (no auth)
         # ---------------------------------------------------------------------
+        _log("phase=regions start")
         for rid in region_ids:
             # Local retry for 420 (non-auth); no toca auth_retry_budget
             local_420_budget = 2
@@ -681,20 +732,57 @@ def main() -> int:
                     except Exception:
                         continue
 
-        # ---------------------------------------------------------------------
-        # Structures (auth) - EXACT policy
-        # ---------------------------------------------------------------------
-        if structure_ids and pool.has_any():
-            for sid in structure_ids:
-                page1 = fetch_structure_page_with_policy(sid, page=1)
-                if page1 is None:
-                    break
+        _log("phase=regions end")
 
-                # 403/404 -> skip structure
-                if page1.status in (403, 404):
+        # ---------------------------------------------------------------------
+        # Structures (auth) - logs por estructura
+        # ---------------------------------------------------------------------
+        _log("phase=structures start")
+
+        if structure_ids and pool.has_any():
+            total_structs = len(structure_ids)
+
+            for idx, sid in enumerate(structure_ids, start=1):
+                sname = structures_map.get(sid, "")
+                label = f"{sid}" + (f' "{sname}"' if sname else "")
+                _log(f"structure_start idx={idx}/{total_structs} structure_id={label}")
+
+                try:
+                    page1 = fetch_structure_page_with_policy(sid, page=1)
+                except RuntimeError:
+                    # Ya se imprimió log en consume_budget_or_fail()
+                    raise
+                except Exception as e:
+                    struct_errors += 1
+                    _log(f"structure_error structure_id={sid} err={type(e).__name__}")
                     continue
 
-                if page1.status != 200 or not isinstance(page1.json_data, list):
+                if page1 is None:
+                    _log("structure_abort reason=no_tokens")
+                    break
+
+                # Si el primer hit no es 200, lo reportamos con detalle
+                st = page1.status
+                xpages = page1.headers.get("X-Pages", "")
+                _log(f"structure_page1 status={st} structure_id={sid} xpages={xpages}")
+
+                # Track “seen” (solo informativo)
+                if st == 401:
+                    struct_seen_401 += 1
+                if st == 420:
+                    struct_seen_420 += 1
+
+                if st == 403:
+                    struct_skipped_403 += 1
+                    _log(f"structure_skip status=403 structure_id={sid}")
+                    continue
+                if st == 404:
+                    struct_skipped_404 += 1
+                    _log(f"structure_skip status=404 structure_id={sid}")
+                    continue
+                if st != 200 or not isinstance(page1.json_data, list):
+                    struct_bad_status += 1
+                    _log(f"structure_bad status={st} structure_id={sid}")
                     continue
 
                 update_cache_headers(page1.headers)
@@ -796,23 +884,51 @@ def main() -> int:
                         except Exception:
                             continue
 
+                # Procesa page1
                 process_orders(page1)
 
+                # Procesa pages restantes
                 for page in range(2, pages + 1):
-                    resp_p = fetch_structure_page_with_policy(sid, page=page)
+                    try:
+                        resp_p = fetch_structure_page_with_policy(sid, page=page)
+                    except RuntimeError:
+                        raise
+                    except Exception as e:
+                        struct_errors += 1
+                        _log(f"structure_error structure_id={sid} page={page} err={type(e).__name__}")
+                        resp_p = None
+
                     if resp_p is None:
+                        _log(f"structure_abort structure_id={sid} reason=no_tokens_or_error")
                         break
+
                     if resp_p.status in (403, 404):
+                        _log(f"structure_stop structure_id={sid} page={page} status={resp_p.status}")
                         break
+
                     if resp_p.status != 200 or not isinstance(resp_p.json_data, list):
+                        _log(f"structure_bad structure_id={sid} page={page} status={resp_p.status}")
                         continue
 
                     update_cache_headers(resp_p.headers)
                     process_orders(resp_p)
 
+                struct_ok += 1
+                _log(f"structure_done status=ok structure_id={sid} pages={pages}")
+
+        else:
+            if not structure_ids:
+                _log("phase=structures skip reason=no_structures")
+            elif not pool.has_any():
+                _log("phase=structures skip reason=no_tokens")
+
+        _log("phase=structures end")
+
     # -------------------------------------------------------------------------
     # BigQuery: recrear/cargar tablas en bloque (REPLACE)
     # -------------------------------------------------------------------------
+    _log("phase=bq start")
+
     table_specs = [
         (table_buy, schema_buy, out_buy, buy_count),
         (table_sell, schema_sell, out_sell, sell_count),
@@ -821,9 +937,28 @@ def main() -> int:
     ]
 
     for tname, schema_file, data_file, cnt in table_specs:
+        _log(f"bq_table_prepare table={dataset}.{tname} rows={cnt}")
         bq_create_or_replace_empty_table(project_id, dataset, tname, schema_file)
         if cnt > 0:
             bq_load_ndjson_gz(project_id, dataset, tname, schema_file, data_file)
+
+    _log("phase=bq end")
+
+    # -------------------------------------------------------------------------
+    # Summary logs
+    # -------------------------------------------------------------------------
+    _log(
+        "summary "
+        f"rows_buy={buy_count} rows_sell={sell_count} "
+        f"rows_jita_buy={jita_buy_count} rows_jita_sell={jita_sell_count}"
+    )
+    _log(
+        "structures_summary "
+        f"ok={struct_ok} skipped_403={struct_skipped_403} skipped_404={struct_skipped_404} "
+        f"bad_status={struct_bad_status} errors={struct_errors} "
+        f"seen_401_events={struct_seen_401} seen_420_events={struct_seen_420} "
+        f"remaining_auth_budget={auth_retry_budget}"
+    )
 
     # Outputs para GitHub Actions (Finalize)
     if max_expires is None:
