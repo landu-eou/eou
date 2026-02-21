@@ -1,0 +1,335 @@
+name: ESI Market Orders (ESI → GH → BQ)
+
+on:
+  workflow_dispatch:
+
+# Permisos mínimos:
+# - actions:read   -> Guard por REST (listar runs)
+# - contents:read  -> checkout
+# - id-token:write -> WIF/OIDC hacia Google
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+# Candado oficial: evita solapamiento real.
+concurrency:
+  group: eou_market_orders_esi-gh-bq
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      # =====================================================================
+      # 0) CONFIGURACIÓN
+      # =====================================================================
+
+      # --- Identidad del workflow ---
+      WORKFLOW_FILE: eou_market_orders_esi-gh-bq.yml
+
+      # --- Google Sheets (estado compartido) ---
+      SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
+      SHEET_TAB: workflows
+      SHEETS_WORKFLOW_ROW: "11"
+
+      # --- Locking / planificación ---
+      LOCK_TIME: 180  # segundos
+
+      # --- Google Sheet con el EVE access token (para estructuras) ---
+      # Si tu refresh de tokens escribe en otra celda, cambia esto aquí.
+      TOKEN_SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
+      TOKEN_TAB_NAME: access_tokens
+      TOKEN_CELL_A1: D12
+
+      # --- ESI ---
+      ESI_BASE_URL: https://esi.evetech.net
+      ESI_DATASOURCE: tranquility
+      # Lista CSV de region_id (ej: "10000002,10000032").
+      # Si está vacío -> se consulta /universe/regions para obtener todas.
+      REGION_IDS: ""
+
+      # Estructuras a consultar salen de este fichero (JSONL.GZ) del repo.
+      STRUCTURES_FILE: data/esi/structures.jsonl.gz
+
+      # --- Filtro Jita 4-4 ---
+      JITA44_LOCATION_ID: "60003760"
+
+      # --- SDE/ESI join inputs en repo ---
+      SDE_TYPES_PATH: data/sde/types.jsonl.gz
+      SDE_EXCLUDED_TYPES_PATH: data/sde/excludedMarketTypes.jsonl.gz
+      SDE_STATIONS_PATH: data/sde/stations.jsonl.gz
+      SDE_SOLARSYSTEMS_PATH: data/sde/solarsystems.jsonl.gz
+
+      # --- Salidas locales ---
+      OUT_DIR: .tmp_eou_market_orders
+
+      # --- BigQuery (Sandbox) ---
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      BQ_DATASET: eou
+      BQ_TABLE_BUY: buy_orders
+      BQ_TABLE_SELL: sell_orders
+      BQ_TABLE_JITA44_BUY: jita44_buy_orders
+      BQ_TABLE_JITA44_SELL: jita44_sell_orders
+
+    steps:
+      # =====================================================================
+      # 1) GUARD (COMÚN) — decide si este run debe trabajar o salir (busy)
+      # =====================================================================
+
+      - name: Guard - compute decision
+        id: guard_calc
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          WF_FILE: ${{ env.WORKFLOW_FILE }}
+        run: |
+          set -euo pipefail
+
+          api="https://api.github.com/repos/${REPO}/actions/workflows/${WF_FILE}/runs?per_page=50"
+          json="$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api}")"
+
+          proceed="true"
+
+          this="$(jq --arg rid "$RUN_ID" -c '
+            (.workflow_runs // [])
+            | map(select(.id == ($rid|tonumber)))
+            | .[0] // empty
+          ' <<< "$json")"
+
+          if [ -n "$this" ]; then
+            this_created="$(jq -r '.created_at' <<< "$this")"
+            this_num="$(jq -r '.run_number' <<< "$this")"
+
+            alive_at_creation="$(jq --arg rid "$RUN_ID" --arg tc "$this_created" '
+              (.workflow_runs // [])
+              | map(
+                  select(.id != ($rid|tonumber))
+                  | select(.created_at < $tc)
+                  | select(.updated_at > $tc)
+                )
+              | length
+            ' <<< "$json")"
+
+            if [ "$alive_at_creation" -gt 0 ]; then
+              proceed="false"
+            else
+              leader="$(jq '
+                (.workflow_runs // [])
+                | map(select(.status=="queued" or .status=="in_progress"))
+                | map(.run_number)
+                | min // empty
+              ' <<< "$json")"
+
+              if [ -n "$leader" ] && [ "$leader" != "$this_num" ]; then
+                proceed="false"
+              fi
+            fi
+          fi
+
+          echo "$proceed" > /tmp/proceed
+
+      - name: Guard - publish decision
+        id: guard
+        run: |
+          echo "proceed=$(cat /tmp/proceed)" >> "$GITHUB_OUTPUT"
+
+      # =====================================================================
+      # 2) AUTH GOOGLE (COMÚN) — WIF/OIDC (sin claves)
+      # =====================================================================
+      - name: Auth to Google (WIF)
+        id: gcp_auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: |
+            https://www.googleapis.com/auth/spreadsheets
+            https://www.googleapis.com/auth/cloud-platform
+
+      # =====================================================================
+      # 3) BUSY EXIT (COMÚN) — si no procede, salir sin tocar nada
+      # =====================================================================
+      - name: Exit if skipped (busy)
+        if: steps.guard.outputs.proceed != 'true'
+        run: |
+          exit 0
+
+      # =====================================================================
+      # 3b) SHEETS GUARD (COMÚN) — si now < next_run, salir sin hacer trabajo
+      # =====================================================================
+      - name: Sheets guard - compute decision (now < next_run)
+        id: sheets_guard
+        if: steps.guard.outputs.proceed == 'true'
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          row="${SHEETS_WORKFLOW_ROW}"
+
+          now_epoch="$(date -u +%s)"
+          now_serial="$(awk "BEGIN { printf \"%.10f\", (${now_epoch}/86400) + 25569 }")"
+
+          url="https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values/${SHEET_TAB}!D${row}?valueRenderOption=UNFORMATTED_VALUE"
+          next_val="$(curl -fsSL -H "Authorization: Bearer ${ACCESS_TOKEN}" "$url" | jq -r '.values[0][0] // empty')"
+
+          proceed="true"
+          if [ -n "$next_val" ]; then
+            cmp="$(awk -v a="$now_serial" -v b="$next_val" 'BEGIN{print (a<b)?1:0}')"
+            if [ "$cmp" = "1" ]; then
+              proceed="false"
+            fi
+          fi
+
+          echo "proceed=$proceed" >> "$GITHUB_OUTPUT"
+
+      - name: Exit if skipped (next_run)
+        if: steps.guard.outputs.proceed == 'true' && steps.sheets_guard.outputs.proceed != 'true'
+        run: |
+          exit 0
+
+      # =====================================================================
+      # 4) LOCK INICIAL (COMÚN)
+      #    - status=in_progress
+      #    - next_run (col D) como VALOR numérico (serial Sheets), no string
+      # =====================================================================
+      - name: Initial lock (in_progress + next_run as value)
+        if: steps.guard.outputs.proceed == 'true' && steps.sheets_guard.outputs.proceed == 'true'
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          row="${SHEETS_WORKFLOW_ROW}"
+
+          epoch="$(date -u -d "+${LOCK_TIME} seconds" +%s)"
+          serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
+
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "{
+              \"valueInputOption\":\"RAW\",
+              \"data\":[
+                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"in_progress\"]]},
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${serial}]]}
+              ]
+            }"
+
+      # =====================================================================
+      # 5) 🛠️ OBJETIVO (este workflow)
+      # =====================================================================
+      - name: Checkout
+        if: steps.guard.outputs.proceed == 'true' && steps.sheets_guard.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        if: steps.guard.outputs.proceed == 'true' && steps.sheets_guard.outputs.proceed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python deps
+        if: steps.guard.outputs.proceed == 'true' && steps.sheets_guard.outputs.proceed == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/eou_market_orders_esi-gh-bq_requirements.txt
+
+      - name: Setup gcloud
+        if: steps.guard.outputs.proceed == 'true' && steps.sheets_guard.outputs.proceed == 'true'
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: OBJECTIVE - Fetch ESI + Build NDJSON + Load to BigQuery
+        if: steps.guard.outputs.proceed == 'true' && steps.sheets_guard.outputs.proceed == 'true'
+        id: objective
+        env:
+          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          python scripts/esi/eou_market_orders_esi-gh-bq_run.py | tee /tmp/objective_out.txt
+
+          # Publicar outputs para el finalize
+          # Formato esperado (una línea por output): key=value
+          grep -E '^(max_expires_epoch|max_last_modified_epoch)=' /tmp/objective_out.txt >> "$GITHUB_OUTPUT" || true
+
+      # =====================================================================
+      # 6) FINALIZE (COMÚN) — completed/failed + next_run y last_modified como VALOR
+      # =====================================================================
+
+      - name: Finalize (completed)
+        if: steps.guard.outputs.proceed == 'true' && steps.sheets_guard.outputs.proceed == 'true' && success()
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+          MAX_EXPIRES_EPOCH: ${{ steps.objective.outputs.max_expires_epoch }}
+          MAX_LAST_MODIFIED_EPOCH: ${{ steps.objective.outputs.max_last_modified_epoch }}
+        run: |
+          set -euo pipefail
+          row="${SHEETS_WORKFLOW_ROW}"
+
+          # next_run = max(Expires) + 5 min
+          now_epoch="$(date -u +%s)"
+          base_epoch="${MAX_EXPIRES_EPOCH:-$now_epoch}"
+          if [ -z "$base_epoch" ] || [ "$base_epoch" = "0" ]; then base_epoch="$now_epoch"; fi
+          epoch=$(( base_epoch + 300 ))
+          serial_next="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
+
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "{
+              \"valueInputOption\":\"RAW\",
+              \"data\":[
+                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"completed\"]]},
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${serial_next}]]}
+              ]
+            }"
+
+          # last_modified (col I) solo si existe
+          lm_epoch="${MAX_LAST_MODIFIED_EPOCH:-}"
+          if [ -n "$lm_epoch" ] && [ "$lm_epoch" != "0" ]; then
+            lm_serial="$(awk "BEGIN { printf \"%.10f\", (${lm_epoch}/86400) + 25569 }")"
+
+            curl -fsSL -X POST \
+              -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+              -d "{
+                \"valueInputOption\":\"RAW\",
+                \"data\":[
+                  {\"range\":\"${SHEET_TAB}!I${row}:I${row}\",\"values\":[[${lm_serial}]]}
+                ]
+              }"
+          fi
+
+      - name: Finalize (failed)
+        if: steps.guard.outputs.proceed == 'true' && steps.sheets_guard.outputs.proceed == 'true' && failure()
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          row="${SHEETS_WORKFLOW_ROW}"
+
+          # next_run = fin del run + 5 min
+          epoch="$(date -u -d "+300 seconds" +%s)"
+          serial="$(awk "BEGIN { printf \"%.10f\", (${epoch}/86400) + 25569 }")"
+
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values:batchUpdate" \
+            -d "{
+              \"valueInputOption\":\"RAW\",
+              \"data\":[
+                {\"range\":\"${SHEET_TAB}!B${row}:B${row}\",\"values\":[[\"failed\"]]},
+                {\"range\":\"${SHEET_TAB}!D${row}:D${row}\",\"values\":[[${serial}]]}
+              ]
+            }"
