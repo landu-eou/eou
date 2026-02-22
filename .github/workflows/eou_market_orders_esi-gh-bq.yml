@@ -34,6 +34,8 @@ jobs:
       ESI_BASE_URL: https://esi.evetech.net
       ESI_DATASOURCE: tranquility
 
+      JITA44_LOCATION_ID: 60003760
+
       # Worker bounds + targets
       REGIONS_WORKERS_MIN: "2"
       REGIONS_TARGET_PAGES_PER_WORKER: "220"
