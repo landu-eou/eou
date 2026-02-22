@@ -1,4 +1,4 @@
-name: ESI Market Orders (ESI → GH)
+name: ESI Market Orders (ESI → GH Actions)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
 permissions:
   actions: read
   contents: write
-  id-token: write  # OBLIGATORIO para WIF/OIDC
+  id-token: write  # requerido para WIF/OIDC :contentReference[oaicite:2]{index=2}
 
 concurrency:
   group: eou_market_orders_esi-gh-bq
@@ -15,7 +15,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     env:
       WORKFLOW_FILE: eou_market_orders_esi-gh-bq.yml
@@ -26,7 +26,7 @@ jobs:
       SHEETS_WORKFLOW_ROW: "11"
       LOCK_TIME: "180"
 
-      # Tokens policy (EXACT like ESI Structures)
+      # Token policy (igual que ESI Structures)
       PRIMARY_CHAR_ID: "2124070822"
       RETRY_BUDGET: "3"
 
@@ -34,13 +34,11 @@ jobs:
       ESI_BASE_URL: https://esi.evetech.net
       ESI_DATASOURCE: tranquility
 
-      # Worker sizing (dynamic within min/max)
+      # Worker bounds + targets
       REGIONS_WORKERS_MIN: "2"
-      REGIONS_WORKERS_MAX: "6"
       REGIONS_TARGET_PAGES_PER_WORKER: "220"
 
       STRUCTS_WORKERS_MIN: "1"
-      STRUCTS_WORKERS_MAX: "3"
       STRUCTS_TARGET_PAGES_PER_WORKER: "60"
 
       # Inputs (source of truth)
@@ -51,13 +49,10 @@ jobs:
       SDE_SOLARSYSTEMS_PATH: data/sde/solarsystems.jsonl.gz
       STRUCTURES_FILE: data/esi/structures.jsonl.gz
 
-      # Jita44
-      JITA44_LOCATION_ID: "60003760"
-
       # Cache pages
       PAGES_CACHE_PATH: states/market_orders_pages.json
 
-      # Output
+      # Output dir
       OUT_DIR: .tmp_eou_market_orders
 
     steps:
@@ -80,6 +75,7 @@ jobs:
           access_token_scopes: |
             https://www.googleapis.com/auth/spreadsheets
             https://www.googleapis.com/auth/cloud-platform
+        # token_format/access_token output está documentado :contentReference[oaicite:3]{index=3}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -99,7 +95,7 @@ jobs:
           set -euo pipefail
           python scripts/esi/eou_market_orders_esi-gh-bq_sheets.py init
 
-      - name: Run (ESI ingest → local outputs + pages cache temp)
+      - name: Run (ESI ingest → outputs + pages cache temp)
         id: run
         env:
           GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
@@ -110,7 +106,7 @@ jobs:
           python scripts/esi/eou_market_orders_esi-gh-bq_run.py | tee /tmp/objective_out.txt
           grep -E '^(max_expires_epoch|max_last_modified_epoch)=' /tmp/objective_out.txt >> "$GITHUB_OUTPUT" || true
 
-      - name: Sheets finalize (status=completed, next_run=max(Expires)+5m, last_modified)
+      - name: Sheets finalize (status=completed, next_run=max(Expires)+5s, last_modified)
         if: success()
         env:
           GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
