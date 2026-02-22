@@ -6,6 +6,7 @@ on:
 permissions:
   actions: read
   contents: write
+  id-token: write  # OBLIGATORIO para WIF/OIDC
 
 concurrency:
   group: eou_market_orders_esi-gh-bq
@@ -68,6 +69,18 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/esi/eou_market_orders_esi-gh-bq_guard.sh
 
+      - name: Auth to Google (WIF)
+        id: gcp_auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          token_format: access_token
+          access_token_scopes: |
+            https://www.googleapis.com/auth/spreadsheets
+            https://www.googleapis.com/auth/cloud-platform
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -81,7 +94,7 @@ jobs:
 
       - name: Sheets init (status=in progress, next_run=now+LOCK_TIME)
         env:
-          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ secrets.GOOGLE_SHEETS_ACCESS_TOKEN }}
+          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
           python scripts/esi/eou_market_orders_esi-gh-bq_sheets.py init
@@ -89,7 +102,7 @@ jobs:
       - name: Run (ESI ingest → local outputs + pages cache temp)
         id: run
         env:
-          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ secrets.GOOGLE_SHEETS_ACCESS_TOKEN }}
+          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
           EOU_ACCESS_TOKENS_1: ${{ secrets.EOU_ACCESS_TOKENS_1 }}
           EOU_ACCESS_TOKENS_2: ${{ secrets.EOU_ACCESS_TOKENS_2 }}
         run: |
@@ -100,7 +113,7 @@ jobs:
       - name: Sheets finalize (status=completed, next_run=max(Expires)+5m, last_modified)
         if: success()
         env:
-          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ secrets.GOOGLE_SHEETS_ACCESS_TOKEN }}
+          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
           MAX_EXPIRES_EPOCH: ${{ steps.run.outputs.max_expires_epoch }}
           MAX_LAST_MODIFIED_EPOCH: ${{ steps.run.outputs.max_last_modified_epoch }}
         run: |
@@ -124,7 +137,7 @@ jobs:
       - name: Sheets fail (status=failed, next_run=now+5m)
         if: failure()
         env:
-          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ secrets.GOOGLE_SHEETS_ACCESS_TOKEN }}
+          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
         run: |
           set -euo pipefail
           python scripts/esi/eou_market_orders_esi-gh-bq_sheets.py fail
