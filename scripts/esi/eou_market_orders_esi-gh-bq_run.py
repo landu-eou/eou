@@ -154,7 +154,7 @@ def load_tokens_from_secrets(primary_char_id: int) -> List[Tuple[int, str]]:
         ordered.append((primary_char_id, merged[primary_char_id]))
     rest = sorted([cid for cid in merged.keys() if cid != primary_char_id], reverse=True)
     for cid in rest:
-        ordered.append((cid, merged[cid]])
+        ordered.append((cid, merged[cid]))
 
     return ordered
 
