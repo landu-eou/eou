@@ -98,19 +98,19 @@ jobs:
 
           # Cuenta runs in_progress excluyendo este RUN_ID
           other_count="$(python - <<'PY'
-import json, os
-data=json.loads(os.environ["JSON"])
-run_id=int(os.environ["RUN_ID"])
-runs=data.get("workflow_runs", [])
-c=0
-for r in runs:
-  try:
-    if int(r.get("id"))!=run_id:
-      c+=1
-  except Exception:
-    pass
-print(c)
-PY
+            import json, os
+            data=json.loads(os.environ["JSON"])
+            run_id=int(os.environ["RUN_ID"])
+            runs=data.get("workflow_runs", [])
+            c=0
+            for r in runs:
+              try:
+                if int(r.get("id"))!=run_id:
+                  c+=1
+              except Exception:
+                pass
+            print(c)
+            PY
           )"
 
           if [ "${other_count}" != "0" ]; then
