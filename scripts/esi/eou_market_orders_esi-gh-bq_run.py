@@ -39,9 +39,7 @@ def epoch_seconds(dt: datetime) -> int:
 def parse_http_date_to_epoch(value: str) -> Optional[int]:
     # ESI uses RFC1123 dates (e.g. Sun, 01 Feb 2026 22:44:34 GMT)
     try:
-        # Python can parse with strptime reliably
         dt = datetime.strptime(value, "%a, %d %b %Y %H:%M:%S %Z")
-        # strptime returns naive; treat as UTC
         dt = dt.replace(tzinfo=timezone.utc)
         return epoch_seconds(dt)
     except Exception:
@@ -78,7 +76,6 @@ def opt_env(name: str, default: str) -> str:
     return v if v is not None and v != "" else default
 
 def bsearch_excluded(excluded_sorted: List[int], type_id: int) -> bool:
-    # excludedMarketTypes.jsonl.gz está ordenado ascendente por typeID
     lo, hi = 0, len(excluded_sorted) - 1
     while lo <= hi:
         mid = (lo + hi) // 2
@@ -92,8 +89,6 @@ def bsearch_excluded(excluded_sorted: List[int], type_id: int) -> bool:
     return False
 
 def parse_range_to_int(r: Any) -> int:
-    # Regla del usuario:
-    # station=0, solarsystem=0, region=1000, otros strings numéricos → int
     if r is None:
         return 0
     if isinstance(r, int):
@@ -109,8 +104,6 @@ def parse_range_to_int(r: Any) -> int:
         return 0
 
 def compute_until_and_timeleft(issued_iso: str, duration_days: int) -> Tuple[str, str]:
-    # until = issued + duration_days (días)
-    # timeLeft = until - now (hh:mm:ss, hh puede ser >24; si negativo -> 00:00:00)
     issued = datetime.fromisoformat(issued_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
     until = issued + timedelta(days=int(duration_days))
     now = utc_now()
@@ -146,15 +139,12 @@ def load_tokens_from_secrets(primary_char_id: int) -> List[Tuple[int, str]]:
         if isinstance(v, str) and v:
             merged[cid] = v
 
-    # order:
-    # a) primary first if exists
-    # b) rest desc, excluding primary
     ordered: List[Tuple[int, str]] = []
     if primary_char_id in merged:
         ordered.append((primary_char_id, merged[primary_char_id]))
     rest = sorted([cid for cid in merged.keys() if cid != primary_char_id], reverse=True)
     for cid in rest:
-        ordered.append((cid, merged[cid]))
+        ordered.append((cid, merged[cid]))  # <-- FIX
 
     return ordered
 
@@ -248,7 +238,6 @@ def load_pages_cache(path: str) -> PagesCache:
     )
 
 def write_pages_cache_pretty_atomic(path: str, cache: PagesCache) -> None:
-    # Pretty + overwrite completo sin restos
     tmp = path + ".tmp"
     obj = {
         "planner": {
@@ -274,17 +263,12 @@ def write_pages_cache_pretty_atomic(path: str, cache: PagesCache) -> None:
 # =========================
 
 def compute_workers_needed(total_pages: int, min_workers: int, max_workers: int, target_pages_per_worker: int) -> int:
-    # Dinámico dentro de min..max en cada run
     if target_pages_per_worker <= 0:
         return max_workers
     needed = max(1, math.ceil(total_pages / target_pages_per_worker))
     return max(min_workers, min(max_workers, needed))
 
 def greedy_balance(items: List[Tuple[int, Any]], k: int) -> List[List[Any]]:
-    """
-    items = [(weight, payload), ...]
-    greedy LPT: ordena por weight desc y asigna al worker con menor carga.
-    """
     if k <= 0:
         return []
     bins: List[List[Any]] = [[] for _ in range(k)]
@@ -346,7 +330,7 @@ class EntityResult:
     pages_ok: int
     had_xpages: bool
     xpages: int
-    ignored: bool  # for structures ignored
+    ignored: bool
     max_expires_epoch: int
     max_last_modified_epoch: int
 
@@ -393,7 +377,6 @@ def fetch_entity_pages(
             "Accept": "application/json",
         }
         if is_authed and current_token:
-            # tokens come without "Bearer " per your logs; we add it here
             h["Authorization"] = f"Bearer {current_token}"
         return h
 
@@ -403,7 +386,6 @@ def fetch_entity_pages(
         resp = esi_get(session, url, build_headers(), params)
         status = resp.status_code
 
-        # track max Expires/Last-Modified (for next_run)
         exp_epoch = parse_expires_epoch(resp) or 0
         lm_epoch = parse_last_modified_epoch(resp) or 0
         if exp_epoch > max_expires_epoch:
@@ -418,7 +400,6 @@ def fetch_entity_pages(
                 had_xpages = True
                 xpages_val = xp
 
-            # Parse and stream-dedupe per worker
             try:
                 items = resp.json()
                 if not isinstance(items, list):
@@ -436,7 +417,6 @@ def fetch_entity_pages(
                     continue
                 dedupe_seen.add(order_id)
 
-                # Excluded market types filter
                 try:
                     type_id = int(o.get("type_id"))
                 except Exception:
@@ -444,25 +424,18 @@ def fetch_entity_pages(
                 if bsearch_excluded(excluded_type_ids_sorted, type_id):
                     continue
 
-                # buy/sell filter split later; here keep both and derive tables
                 is_buy = bool(o.get("is_buy_order", False))
 
                 issued = str(o.get("issued"))
                 duration = safe_int(o.get("duration", 0), 0)
                 until_iso, time_left = compute_until_and_timeleft(issued, duration)
 
-                # station/structure lookup for location_id
                 loc_id = safe_int(o.get("location_id", 0), 0)
                 sys_id = safe_int(o.get("system_id", 0), 0)
 
-                # resolve type name
                 type_name = type_id_to_name.get(type_id, str(type_id))
-
-                # region/constellation/solarSystem
                 solarSystem, constellation, region = solar_system_id_to_meta.get(sys_id, ("", "", ""))
 
-                # station name
-                station_name = ""
                 if loc_id < 1000000000000:
                     station_name = station_id_to_name.get(loc_id, str(loc_id))
                 else:
@@ -482,20 +455,14 @@ def fetch_entity_pages(
                     "until": until_iso,
                     "timeLeft": time_left,
                     "orderID": order_id,
+                    "ordeRange": parse_range_to_int(o.get("range")) if "range" in o else 0,
                 }
 
-                if "range" in o:
-                    row_common["ordeRange"] = parse_range_to_int(o.get("range"))
-                else:
-                    row_common["ordeRange"] = 0
-
-                # Write to global outputs
                 if is_buy:
                     out_rows.append({**row_common, "is_buy_order": True})
                 else:
                     out_rows.append({**row_common, "is_buy_order": False})
 
-                # Jita44 special tables (location_id filter)
                 if loc_id == jita44_location_id:
                     jita_row = {
                         "type": type_name,
@@ -516,7 +483,6 @@ def fetch_entity_pages(
                     else:
                         jita44_sell_rows.append(jita_row)
 
-            # Rule of gold: if we have X-Pages, stop at page==X-Pages
             if had_xpages:
                 log(f"entity_page status=200 kind={entity_kind} id={entity_id} page={page} xpages={xpages_val}")
                 if page < xpages_val:
@@ -531,10 +497,8 @@ def fetch_entity_pages(
                         max_expires_epoch=max_expires_epoch,
                         max_last_modified_epoch=max_last_modified_epoch,
                     )
-                # defensive (shouldn't happen)
                 return EntityResult(pages_ok, True, xpages_val, False, max_expires_epoch, max_last_modified_epoch)
 
-            # No X-Pages -> keep incrementing until 404
             log(f"entity_page status=200 kind={entity_kind} id={entity_id} page={page} xpages=none")
             page += 1
             continue
@@ -542,30 +506,25 @@ def fetch_entity_pages(
         if status == 404:
             log(f"entity_page status=404 kind={entity_kind} id={entity_id} page={page}")
             if entity_kind == "REGION":
-                # end of pagination
                 return EntityResult(pages_ok, had_xpages, xpages_val, False, max_expires_epoch, max_last_modified_epoch)
 
-            # STRUCTURE
             if page == 1:
                 if attempts_404_page1 == 0:
                     attempts_404_page1 += 1
                     time.sleep(SLEEP_STRUCTURE_404_PAGE1_RETRY_MS / 1000.0)
                     continue
-                # ignore structure (do not cache it)
                 log(f"structure_ignored reason=404_page1 kind=STRUCTURE id={entity_id} name={entity_name}")
                 return EntityResult(pages_ok, had_xpages, xpages_val, True, max_expires_epoch, max_last_modified_epoch)
 
-            # page > 1 => end pagination
             return EntityResult(pages_ok, had_xpages, xpages_val, False, max_expires_epoch, max_last_modified_epoch)
 
         if status == 401 and is_authed:
-            # rotate token, sleep, retry same page, consume budget
             retry_budget.consume_or_fail("401", entity_kind, entity_id, page, current_char_id)
             token_idx += 1
             if not auth_tokens:
                 raise RuntimeError("No tokens available for 401 rotation.")
             if token_idx >= len(auth_tokens):
-                token_idx = 0  # wrap (same as “rotate”)
+                token_idx = 0
             current_char_id, current_token = auth_tokens[token_idx]
             log(f"auth_retry=401 kind={entity_kind} id={entity_id} page={page} new_char_id={current_char_id}")
             time.sleep(SLEEP_AUTH_RETRY_SECONDS)
@@ -577,16 +536,13 @@ def fetch_entity_pages(
             sleep_retry_after_or_default(resp, SLEEP_ERROR_RETRY_SECONDS)
             continue
 
-        # Other 4xx: 400–499 except 401/404/420/429
         if 400 <= status <= 499:
             log(f"entity_page status={status} kind={entity_kind} id={entity_id} page={page}")
             if entity_kind == "STRUCTURE":
                 log(f"structure_ignored reason=other_4xx status={status} id={entity_id} name={entity_name}")
                 return EntityResult(pages_ok, had_xpages, xpages_val, True, max_expires_epoch, max_last_modified_epoch)
-            # REGION: fail run
             raise RuntimeError(f"Unexpected 4xx for REGION {entity_id} page={page}: status={status}")
 
-        # Any other unexpected status
         raise RuntimeError(f"Unexpected status {status} for {entity_kind} {entity_id} page={page}")
 
 # =========================
@@ -606,16 +562,6 @@ def worker_run_entities(
     solar_system_id_to_meta: Dict[int, Tuple[str, str, str]],
     jita44_location_id: int,
 ) -> Tuple[List[dict], List[dict], List[dict], Dict[int, int], Dict[int, int], int, int]:
-    """
-    Returns:
-      - all_rows (buy+sell; each row has is_buy_order boolean)
-      - jita44_buy_rows
-      - jita44_sell_rows
-      - pages_by_region (region_id -> pages_ok OR xpages when had_xpages)
-      - pages_by_structure (structure_id -> pages_ok OR xpages when had_xpages) excluding ignored
-      - max_expires_epoch
-      - max_last_modified_epoch
-    """
     seen_order_ids = set()
     all_rows: List[dict] = []
     jita44_buy_rows: List[dict] = []
@@ -711,27 +657,21 @@ def slow_update_max(
     other_current: int,
     global_sum_limit: int = GLOBAL_WORKERS_SUM_LIMIT,
 ) -> int:
-    # Keep sane
     current = max(current, min_workers * 2)
     recommended = max(recommended, min_workers)
 
-    # Enforce global sum limit later
     new_val = current
 
     if recommended > current:
-        # increase by +1 max per run
         new_val = current + 1
     else:
-        # decrease only if recommended < current/4
         if recommended < (current / 4.0):
             cap = math.ceil(current / 2.0)
             new_val = max(current - cap, min_workers * 2)
         else:
             new_val = current
 
-    # apply global sum constraint
     if new_val + other_current > global_sum_limit:
-        # reduce to fit, but never below min_workers*2
         new_val = max(min_workers * 2, global_sum_limit - other_current)
     return new_val
 
@@ -740,7 +680,6 @@ def slow_update_max(
 # =========================
 
 def main() -> int:
-    # Env
     out_dir = must_env("OUT_DIR")
     pages_cache_path = must_env("PAGES_CACHE_PATH")
 
@@ -766,15 +705,12 @@ def main() -> int:
     ensure_dir(out_dir)
     ensure_dir(os.path.dirname(pages_cache_path) or ".")
 
-    # Load cache (planner + previous pages)
     cache = load_pages_cache(pages_cache_path)
-    regions_max_bound = max(cache.planner.REGIONS_WORKERS_MAX, regions_min)  # max bound dynamic from cache
+    regions_max_bound = max(cache.planner.REGIONS_WORKERS_MAX, regions_min)
     structs_max_bound = max(cache.planner.STRUCTS_WORKERS_MAX, structs_min)
 
-    # Load indices
     log("loading indices...")
 
-    # regions truth
     regions_truth: List[Tuple[int, str]] = []
     for row in read_gz_jsonl(sde_regions_path):
         rid = safe_int(row.get("regionID", 0), 0)
@@ -782,7 +718,6 @@ def main() -> int:
         if rid > 0:
             regions_truth.append((rid, rname))
 
-    # structures truth (market==true)
     structures_truth: List[Tuple[int, str]] = []
     for row in read_gz_jsonl(structures_file):
         if not bool(row.get("market", False)):
@@ -792,7 +727,6 @@ def main() -> int:
         if sid > 0:
             structures_truth.append((sid, sname))
 
-    # types
     type_id_to_name: Dict[int, str] = {}
     for row in read_gz_jsonl(sde_types_path):
         tid = safe_int(row.get("typeID", 0), 0)
@@ -800,7 +734,6 @@ def main() -> int:
         if tid > 0 and isinstance(tname, str):
             type_id_to_name[tid] = tname
 
-    # excluded types (sorted ascending)
     excluded_ids: List[int] = []
     for row in read_gz_jsonl(sde_excluded_path):
         tid = safe_int(row.get("typeID", 0), 0)
@@ -808,7 +741,6 @@ def main() -> int:
             excluded_ids.append(tid)
     excluded_ids.sort()
 
-    # stations names
     station_id_to_name: Dict[int, str] = {}
     for row in read_gz_jsonl(sde_stations_path):
         sid = safe_int(row.get("stationID", 0), 0)
@@ -816,7 +748,6 @@ def main() -> int:
         if sid > 0 and isinstance(sname, str):
             station_id_to_name[sid] = sname
 
-    # solarsystems meta
     solar_system_id_to_meta: Dict[int, Tuple[str, str, str]] = {}
     for row in read_gz_jsonl(sde_solarsystems_path):
         ssid = safe_int(row.get("solarSystemID", 0), 0)
@@ -827,34 +758,28 @@ def main() -> int:
         reg = str(row.get("region", ""))
         solar_system_id_to_meta[ssid] = (solar, const, reg)
 
-    # structures names
     structure_id_to_name: Dict[int, str] = {sid: name for sid, name in structures_truth}
 
-    # tokens
     auth_tokens = load_tokens_from_secrets(primary_char_id)
     log(f"regions_count={len(regions_truth)}")
     log(f"structures_market_count={len(structures_truth)}")
     log(f"tokens_count={len(auth_tokens)} primary_char_id={primary_char_id}")
 
-    # Build pages lookup from cache, default 0 for unknown
     prev_pages_by_region: Dict[int, int] = {e.regionID: e.pages for e in cache.stations}
     prev_pages_by_struct: Dict[int, int] = {e.stationID: e.pages for e in cache.structures}
 
     total_region_pages = sum(prev_pages_by_region.get(rid, 0) for rid, _ in regions_truth)
     total_struct_pages = sum(prev_pages_by_struct.get(sid, 0) for sid, _ in structures_truth)
 
-    # Determine workers this run (dynamic within min..max_bound)
     regions_workers = compute_workers_needed(total_region_pages, regions_min, regions_max_bound, regions_target)
     structs_workers = compute_workers_needed(total_struct_pages, structs_min, structs_max_bound, structs_target)
 
-    # Respect global sum limit by trimming structures workers first (conservatively)
     if regions_workers + structs_workers > GLOBAL_WORKERS_SUM_LIMIT:
         excess = (regions_workers + structs_workers) - GLOBAL_WORKERS_SUM_LIMIT
         structs_workers = max(structs_min, structs_workers - excess)
 
     log(f"planner_run regions_workers={regions_workers} structs_workers={structs_workers} regions_max_bound={regions_max_bound} structs_max_bound={structs_max_bound}")
 
-    # Assign entities to workers (weights = previous pages, fallback 0)
     region_items = [(prev_pages_by_region.get(rid, 0), (rid, rname)) for rid, rname in regions_truth]
     struct_items = [(prev_pages_by_struct.get(sid, 0), (sid, sname)) for sid, sname in structures_truth]
 
@@ -863,8 +788,6 @@ def main() -> int:
 
     retry_budget = RetryBudget(retry_budget_initial)
 
-    # Run workers sequentially (no internal pipelining per entity; but multiple bins processed sequentially here)
-    # Nota: si más tarde quieres paralelizar bins con multiprocessing, se puede, pero no es requerido por tus reglas.
     session = requests.Session()
 
     all_rows_global: List[dict] = []
@@ -875,11 +798,10 @@ def main() -> int:
     max_expires_epoch = 0
     max_last_modified_epoch = 0
 
-    # Regions phase
     log("phase=regions start")
     for wi, entities in enumerate(regions_bins, start=1):
         log(f"worker_start kind=REGION worker={wi}/{len(regions_bins)} entities={len(entities)}")
-        rows, jb, js, pbr, pbs, me, ml = worker_run_entities(
+        rows, jb, js, pbr, _, me, ml = worker_run_entities(
             worker_kind="REGION",
             entities=entities,
             session=session,
@@ -896,18 +818,15 @@ def main() -> int:
         jita_buy_global.extend(jb)
         jita_sell_global.extend(js)
         pages_by_region_new.update(pbr)
-        if me > max_expires_epoch:
-            max_expires_epoch = me
-        if ml > max_last_modified_epoch:
-            max_last_modified_epoch = ml
+        max_expires_epoch = max(max_expires_epoch, me)
+        max_last_modified_epoch = max(max_last_modified_epoch, ml)
         log(f"worker_done kind=REGION worker={wi}")
     log("phase=regions end")
 
-    # Structures phase
     log("phase=structures start")
     for wi, entities in enumerate(structs_bins, start=1):
         log(f"worker_start kind=STRUCTURE worker={wi}/{len(structs_bins)} entities={len(entities)}")
-        rows, jb, js, pbr, pbs, me, ml = worker_run_entities(
+        rows, jb, js, _, pbs, me, ml = worker_run_entities(
             worker_kind="STRUCTURE",
             entities=entities,
             session=session,
@@ -923,20 +842,15 @@ def main() -> int:
         all_rows_global.extend(rows)
         jita_buy_global.extend(jb)
         jita_sell_global.extend(js)
-        pages_by_struct_new.update(pbs)  # ignored structures are excluded by worker
-        if me > max_expires_epoch:
-            max_expires_epoch = me
-        if ml > max_last_modified_epoch:
-            max_last_modified_epoch = ml
+        pages_by_struct_new.update(pbs)
+        max_expires_epoch = max(max_expires_epoch, me)
+        max_last_modified_epoch = max(max_last_modified_epoch, ml)
         log(f"worker_done kind=STRUCTURE worker={wi}")
     log("phase=structures end")
 
-    # Split buy/sell (corrected: sell uses is_buy_order=false)
     buy_rows = [r for r in all_rows_global if r.get("is_buy_order") is True]
     sell_rows = [r for r in all_rows_global if r.get("is_buy_order") is False]
 
-    # Write outputs (local files in OUT_DIR)
-    # (Mantengo NDJSON.GZ simple, sin BigQuery)
     def write_ndjson_gz(path: str, rows: List[dict]) -> None:
         with gzip.open(path, "wt", encoding="utf-8") as f:
             for r in rows:
@@ -949,20 +863,17 @@ def main() -> int:
 
     log(f"out buy_rows={len(buy_rows)} sell_rows={len(sell_rows)} jita_buy_rows={len(jita_buy_global)} jita_sell_rows={len(jita_sell_global)}")
 
-    # Build new cache entries:
     stations_cache_entries: List[StationCacheEntry] = []
     for rid, rname in regions_truth:
-        pages = pages_by_region_new.get(rid, 0)  # if missing due to errors, keep 0 (but region worker should fill)
+        pages = pages_by_region_new.get(rid, 0)
         stations_cache_entries.append(StationCacheEntry(regionID=rid, region=rname, pages=pages))
 
     structures_cache_entries: List[StructureCacheEntry] = []
     for sid, sname in structures_truth:
         if sid not in pages_by_struct_new:
-            # structure ignored -> do not include in cache
             continue
         structures_cache_entries.append(StructureCacheEntry(stationID=sid, station=sname, pages=pages_by_struct_new[sid]))
 
-    # Recompute recommended MAX for next run
     total_region_pages_new = sum(e.pages for e in stations_cache_entries)
     total_struct_pages_new = sum(e.pages for e in structures_cache_entries)
 
@@ -984,7 +895,6 @@ def main() -> int:
         global_sum_limit=GLOBAL_WORKERS_SUM_LIMIT,
     )
 
-    # enforce sum <= 13
     if new_regions_max + new_structs_max > GLOBAL_WORKERS_SUM_LIMIT:
         new_structs_max = max(structs_min * 2, GLOBAL_WORKERS_SUM_LIMIT - new_regions_max)
 
@@ -994,11 +904,9 @@ def main() -> int:
         structures=structures_cache_entries,
     )
 
-    # Only if successful: overwrite full cache pretty
     write_pages_cache_pretty_atomic(pages_cache_path, new_cache)
     log(f"cache_written path={pages_cache_path} regions_max={new_regions_max} structs_max={new_structs_max}")
 
-    # Export for workflow finalize
     log(f"max_expires_epoch={max_expires_epoch}")
     log(f"max_last_modified_epoch={max_last_modified_epoch}")
 
