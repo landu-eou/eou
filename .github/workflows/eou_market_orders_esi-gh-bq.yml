@@ -4,9 +4,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: read          # para el guard (listar runs)
-  contents: write        # commit de states/market_orders_pages.json
-  # id-token: write      # (ya no hace falta, sin GCP/BQ)
+  actions: read
+  contents: write
 
 concurrency:
   group: eou_market_orders_esi-gh-bq
@@ -24,7 +23,7 @@ jobs:
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "11"
-      LOCK_TIME: "180"               # segundos
+      LOCK_TIME: "180"
 
       # Tokens (igual que ESI Structures)
       PRIMARY_CHAR_ID: "2124070822"
@@ -55,8 +54,6 @@ jobs:
       REGIONS_WORKERS_MAX: "6"
       STRUCTS_WORKERS_MIN: "1"
       STRUCTS_WORKERS_MAX: "3"
-
-      # Heurística: pages (cache) / target → workers
       TARGET_PAGES_PER_WORKER_REGIONS: "250"
       TARGET_PAGES_PER_WORKER_STRUCTS: "120"
 
@@ -81,7 +78,7 @@ jobs:
           pip install -r requirements/esi/eou_market_orders_esi-gh-bq_requirements.txt
 
       # ----------------------------------------------------------------------
-      # Guard anti-colas (si ya hay otro run in_progress, este run sale)
+      # Guard anti-colas: si hay otro run in_progress del mismo workflow → salir
       # ----------------------------------------------------------------------
       - name: Guard (exit if another run is in progress)
         id: guard
@@ -89,40 +86,30 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
-          WORKFLOW: ${{ env.WORKFLOW_FILE }}
+          WORKFLOW_FILE: ${{ env.WORKFLOW_FILE }}
         run: |
           set -euo pipefail
 
-          api="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}/runs?status=in_progress&per_page=50"
-          json="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$api")"
+          api="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs?status=in_progress&per_page=50"
+          json="$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "$api")"
 
-          # Cuenta runs in_progress excluyendo este RUN_ID
-          other_count="$(python - <<'PY'
-            import json, os
-            data=json.loads(os.environ["JSON"])
-            run_id=int(os.environ["RUN_ID"])
-            runs=data.get("workflow_runs", [])
-            c=0
-            for r in runs:
-              try:
-                if int(r.get("id"))!=run_id:
-                  c+=1
-              except Exception:
-                pass
-            print(c)
-            PY
-          )"
+          # cuenta runs in_progress excluyendo este RUN_ID
+          other_count="$(echo "$json" | jq --arg rid "$RUN_ID" '
+            (.workflow_runs // [])
+            | map(select((.id|tostring) != $rid))
+            | length
+          ')"
 
-          if [ "${other_count}" != "0" ]; then
+          if [ "$other_count" -gt 0 ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Guard: another run in progress (${other_count}). Exiting without work."
+            echo "Guard: another run in progress ($other_count). Exiting without work."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "Guard: no other run in progress."
           fi
-        shell: bash
-        env:
-          JSON: ${{ steps.guard.outputs.json }}
 
       # ----------------------------------------------------------------------
       # Inicial: status=in progress y next_run=now + LOCK_TIME
@@ -147,9 +134,10 @@ jobs:
           EOU_ACCESS_TOKENS_2: ${{ secrets.EOU_ACCESS_TOKENS_2 }}
         run: |
           set -euo pipefail
+
           python scripts/esi/eou_market_orders_esi-gh-bq_run.py | tee /tmp/objective_out.txt
 
-          # Publicar outputs para finalize
+          # outputs para finalize
           grep -E '^(max_expires_epoch|max_last_modified_epoch|run_completed)=' /tmp/objective_out.txt >> "$GITHUB_OUTPUT" || true
 
       # Artifact final único (si completed)
@@ -170,6 +158,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add states/market_orders_pages.json || true
+
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
@@ -194,5 +183,4 @@ jobs:
 
       - name: Done (guarded run skipped)
         if: steps.guard.outputs.skip == 'true'
-        run: |
-          echo "Skipped due to concurrency guard."
+        run: echo "Skipped due to concurrency guard."
