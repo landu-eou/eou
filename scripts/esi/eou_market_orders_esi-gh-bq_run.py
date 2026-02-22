@@ -1,90 +1,51 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-
 import gzip
 import json
+import math
 import os
 import sys
 import time
-import random
-import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
+from requests import Response
 
-# =============================================================================
-# Config (env)
-# =============================================================================
+# =========================
+# Config / constants
+# =========================
 
-ESI_BASE_URL = os.environ.get("ESI_BASE_URL", "https://esi.evetech.net").rstrip("/")
-ESI_DATASOURCE = os.environ.get("ESI_DATASOURCE", "tranquility")
+GLOBAL_WORKERS_SUM_LIMIT = 13
 
-PRIMARY_CHAR_ID = int(os.environ.get("PRIMARY_CHAR_ID", "2124070822"))
-RETRY_BUDGET = int(os.environ.get("RETRY_BUDGET", "3"))
+# No optimizaciones agresivas: page-by-page secuencial dentro de cada entidad.
+REQUEST_TIMEOUT = 30  # seconds
+SLEEP_AUTH_RETRY_SECONDS = 30
+SLEEP_ERROR_RETRY_SECONDS = 30
+SLEEP_STRUCTURE_404_PAGE1_RETRY_MS = 5000
 
-REGIONS_WORKERS_MIN = int(os.environ.get("REGIONS_WORKERS_MIN", "2"))
-REGIONS_WORKERS_MAX = int(os.environ.get("REGIONS_WORKERS_MAX", "6"))
-REGIONS_TARGET = int(os.environ.get("REGIONS_TARGET_PAGES_PER_WORKER", "220"))
+UA = "EOU/market-orders (github-actions)"
 
-STRUCTS_WORKERS_MIN = int(os.environ.get("STRUCTS_WORKERS_MIN", "1"))
-STRUCTS_WORKERS_MAX = int(os.environ.get("STRUCTS_WORKERS_MAX", "3"))
-STRUCTS_TARGET = int(os.environ.get("STRUCTS_TARGET_PAGES_PER_WORKER", "60"))
-
-SDE_REGIONS_PATH = os.environ["SDE_REGIONS_PATH"]
-SDE_TYPES_PATH = os.environ["SDE_TYPES_PATH"]
-SDE_EXCLUDED_TYPES_PATH = os.environ["SDE_EXCLUDED_TYPES_PATH"]
-SDE_STATIONS_PATH = os.environ["SDE_STATIONS_PATH"]
-SDE_SOLARSYSTEMS_PATH = os.environ["SDE_SOLARSYSTEMS_PATH"]
-STRUCTURES_FILE = os.environ["STRUCTURES_FILE"]
-
-JITA44_LOCATION_ID = int(os.environ.get("JITA44_LOCATION_ID", "60003760"))
-
-PAGES_CACHE_PATH = os.environ.get("PAGES_CACHE_PATH", "states/market_orders_pages.json")
-
-OUT_DIR = os.environ.get("OUT_DIR", ".tmp_eou_market_orders")
-os.makedirs(OUT_DIR, exist_ok=True)
-
-USER_AGENT = "EOU Market Orders (GitHub Actions)"
-
-
-# =============================================================================
-# Utils
-# =============================================================================
-
-def log(msg: str) -> None:
-    print(msg, flush=True)
-
+# =========================
+# Helpers
+# =========================
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
+def epoch_seconds(dt: datetime) -> int:
+    return int(dt.timestamp())
 
-def parse_http_date(v: Optional[str]) -> Optional[datetime]:
-    if not v:
-        return None
+def parse_http_date_to_epoch(value: str) -> Optional[int]:
+    # ESI uses RFC1123 dates (e.g. Sun, 01 Feb 2026 22:44:34 GMT)
     try:
-        dt = parsedate_to_datetime(v)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
+        # Python can parse with strptime reliably
+        dt = datetime.strptime(value, "%a, %d %b %Y %H:%M:%S %Z")
+        # strptime returns naive; treat as UTC
+        dt = dt.replace(tzinfo=timezone.utc)
+        return epoch_seconds(dt)
     except Exception:
         return None
-
-
-def parse_iso_utc(v: str) -> datetime:
-    v = (v or "").strip()
-    if v.endswith("Z"):
-        v = v[:-1] + "+00:00"
-    return datetime.fromisoformat(v).astimezone(timezone.utc)
-
-
-def iso_utc(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
 
 def safe_int(x: Any, default: int = 0) -> int:
     try:
@@ -92,38 +53,7 @@ def safe_int(x: Any, default: int = 0) -> int:
     except Exception:
         return default
 
-
-def safe_float(x: Any, default: float = 0.0) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return default
-
-
-def hhmmss(td: timedelta) -> str:
-    total = int(td.total_seconds())
-    if total < 0:
-        total = 0
-    h = total // 3600
-    m = (total % 3600) // 60
-    s = total % 60
-    return f"{h}:{m:02d}:{s:02d}"
-
-
-def range_to_int(range_val: Any) -> int:
-    if range_val is None:
-        return 0
-    if isinstance(range_val, int):
-        return range_val
-    s = str(range_val)
-    if s in ("station", "solarsystem"):
-        return 0
-    if s == "region":
-        return 1000
-    return safe_int(s, default=0)
-
-
-def read_jsonl_gz(path: str) -> Iterable[Dict[str, Any]]:
+def read_gz_jsonl(path: str) -> Iterable[dict]:
     with gzip.open(path, "rt", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -131,792 +61,952 @@ def read_jsonl_gz(path: str) -> Iterable[Dict[str, Any]]:
                 continue
             yield json.loads(line)
 
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
 
-# =============================================================================
-# Load indices
-# =============================================================================
+def log(msg: str) -> None:
+    print(msg, flush=True)
 
-def load_regions(path: str) -> List[Tuple[int, str]]:
-    out: List[Tuple[int, str]] = []
-    for obj in read_jsonl_gz(path):
-        rid = obj.get("regionID")
-        name = obj.get("region")
-        if rid is None or name is None:
-            continue
-        out.append((int(rid), str(name)))
-    return out
+def must_env(name: str) -> str:
+    v = os.environ.get(name)
+    if not v:
+        raise RuntimeError(f"Missing env: {name}")
+    return v
 
+def opt_env(name: str, default: str) -> str:
+    v = os.environ.get(name)
+    return v if v is not None and v != "" else default
 
-def load_types_map(path: str) -> Dict[int, str]:
-    out: Dict[int, str] = {}
-    for obj in read_jsonl_gz(path):
-        tid = obj.get("typeID")
-        name = obj.get("type")
-        if tid is None or name is None:
-            continue
-        out[int(tid)] = str(name)
-    return out
+def bsearch_excluded(excluded_sorted: List[int], type_id: int) -> bool:
+    # excludedMarketTypes.jsonl.gz está ordenado ascendente por typeID
+    lo, hi = 0, len(excluded_sorted) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        v = excluded_sorted[mid]
+        if v == type_id:
+            return True
+        if v < type_id:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return False
 
-
-def load_excluded_types(path: str) -> set[int]:
-    out: set[int] = set()
-    for obj in read_jsonl_gz(path):
-        tid = obj.get("typeID")
-        if tid is None:
-            continue
-        out.add(int(tid))
-    return out
-
-
-def load_stations_map(path: str) -> Dict[int, str]:
-    out: Dict[int, str] = {}
-    for obj in read_jsonl_gz(path):
-        sid = obj.get("stationID")
-        name = obj.get("station")
-        if sid is None or name is None:
-            continue
-        out[int(sid)] = str(name)
-    return out
-
-
-def load_structures_market(path: str) -> Tuple[List[int], Dict[int, str]]:
-    ids: List[int] = []
-    names: Dict[int, str] = {}
-    for obj in read_jsonl_gz(path):
-        sid = obj.get("stationID")
-        if sid is None:
-            continue
-        if not bool(obj.get("market", False)):
-            continue
-        sid_i = int(sid)
-        ids.append(sid_i)
-        if obj.get("station"):
-            names[sid_i] = str(obj.get("station"))
-    # stable unique
-    seen = set()
-    uniq: List[int] = []
-    for x in ids:
-        if x in seen:
-            continue
-        seen.add(x)
-        uniq.append(x)
-    return uniq, names
-
-
-def load_solarsystems(path: str) -> Dict[int, Tuple[str, str, str]]:
-    out: Dict[int, Tuple[str, str, str]] = {}
-    for obj in read_jsonl_gz(path):
-        sid = obj.get("solarSystemID")
-        if sid is None:
-            continue
-        out[int(sid)] = (
-            str(obj.get("solarSystem") or ""),
-            str(obj.get("constellation") or ""),
-            str(obj.get("region") or ""),
-        )
-    return out
-
-
-def load_pages_cache(path: str) -> Tuple[Dict[int, int], Dict[int, int]]:
-    # Returns: (regionID->pages, stationID->pages)
-    if not os.path.exists(path):
-        return {}, {}
+def parse_range_to_int(r: Any) -> int:
+    # Regla del usuario:
+    # station=0, solarsystem=0, region=1000, otros strings numéricos → int
+    if r is None:
+        return 0
+    if isinstance(r, int):
+        return r
+    s = str(r).strip().lower()
+    if s in ("station", "solarsystem"):
+        return 0
+    if s == "region":
+        return 1000
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        reg = {int(x["regionID"]): int(x.get("pages", 0)) for x in d.get("stations", []) if "regionID" in x}
-        st = {int(x["stationID"]): int(x.get("pages", 0)) for x in d.get("structures", []) if "stationID" in x}
-        return reg, st
+        return int(s)
     except Exception:
-        return {}, {}
+        return 0
 
+def compute_until_and_timeleft(issued_iso: str, duration_days: int) -> Tuple[str, str]:
+    # until = issued + duration_days (días)
+    # timeLeft = until - now (hh:mm:ss, hh puede ser >24; si negativo -> 00:00:00)
+    issued = datetime.fromisoformat(issued_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
+    until = issued + timedelta(days=int(duration_days))
+    now = utc_now()
+    delta = until - now
+    total_seconds = int(delta.total_seconds())
+    if total_seconds < 0:
+        total_seconds = 0
+    hh = total_seconds // 3600
+    mm = (total_seconds % 3600) // 60
+    ss = total_seconds % 60
+    timeleft = f"{hh:02d}:{mm:02d}:{ss:02d}"
+    return until.isoformat().replace("+00:00", "Z"), timeleft
 
-# =============================================================================
+# =========================
 # Tokens (EXACT policy)
-# =============================================================================
+# =========================
 
-def normalize_token(tok: str) -> str:
-    tok = (tok or "").strip()
-    if tok.lower().startswith("bearer "):
-        parts = tok.split(None, 1)
-        tok = parts[1].strip() if len(parts) > 1 else ""
-    return tok
+def load_tokens_from_secrets(primary_char_id: int) -> List[Tuple[int, str]]:
+    s1 = os.environ.get("EOU_ACCESS_TOKENS_1", "") or "{}"
+    s2 = os.environ.get("EOU_ACCESS_TOKENS_2", "") or "{}"
+    try:
+        d1 = json.loads(s1)
+        d2 = json.loads(s2)
+    except Exception as e:
+        raise RuntimeError(f"Failed to parse EOU_ACCESS_TOKENS_1/2 as JSON: {e}")
 
+    merged: Dict[int, str] = {}
+    for k, v in {**d1, **d2}.items():
+        try:
+            cid = int(k)
+        except Exception:
+            continue
+        if isinstance(v, str) and v:
+            merged[cid] = v
 
-class TokenPool:
-    def __init__(self, primary_char_id: int, token_map: Dict[int, str]):
-        self.primary = int(primary_char_id)
-        self.token_map = {int(k): str(v) for k, v in token_map.items() if str(v).strip()}
-        ids = list(self.token_map.keys())
-        order: List[int] = []
-        if self.primary in self.token_map:
-            order.append(self.primary)
-        order.extend(sorted([i for i in ids if i != self.primary], reverse=True))
-        self.order = order
-        self.idx = 0
-        self.lock = threading.Lock()
+    # order:
+    # a) primary first if exists
+    # b) rest desc, excluding primary
+    ordered: List[Tuple[int, str]] = []
+    if primary_char_id in merged:
+        ordered.append((primary_char_id, merged[primary_char_id]))
+    rest = sorted([cid for cid in merged.keys() if cid != primary_char_id], reverse=True)
+    for cid in rest:
+        ordered.append((cid, merged[cid]])
 
-    def count(self) -> int:
-        return len(self.order)
+    return ordered
 
-    def current(self) -> Tuple[Optional[int], str]:
-        with self.lock:
-            if not self.order:
-                return None, ""
-            cid = self.order[self.idx]
-            return cid, normalize_token(self.token_map.get(cid, ""))
+# =========================
+# Global retry budget (shared)
+# =========================
 
-    def rotate(self) -> None:
-        with self.lock:
-            if not self.order:
-                return
-            self.idx = (self.idx + 1) % len(self.order)
+class RetryBudget:
+    def __init__(self, initial: int):
+        self.remaining = initial
 
+    def consume_or_fail(self, reason: str, entity_kind: str, entity_id: int, page: int, char_id: Optional[int]) -> None:
+        self.remaining -= 1
+        log(f"auth_budget_consume reason={reason} entity_kind={entity_kind} entity_id={entity_id} page={page} char_id={char_id} remaining_budget={self.remaining}")
+        if self.remaining < 0:
+            raise RuntimeError("RETRY_BUDGET exhausted for authenticated/error retries (401/420/429/5xx).")
 
-def load_tokens_from_env() -> Dict[int, str]:
-    t1 = os.environ.get("EOU_ACCESS_TOKENS_1", "").strip()
-    t2 = os.environ.get("EOU_ACCESS_TOKENS_2", "").strip()
-
-    def parse(s: str) -> Dict[int, str]:
-        if not s:
-            return {}
-        obj = json.loads(s)
-        if not isinstance(obj, dict):
-            return {}
-        out: Dict[int, str] = {}
-        for k, v in obj.items():
-            try:
-                out[int(k)] = str(v)
-            except Exception:
-                continue
-        return out
-
-    d: Dict[int, str] = {}
-    d.update(parse(t1))
-    d.update(parse(t2))
-    return d
-
-
-# =============================================================================
-# ESI client with gentle retries and error-limit awareness
-# =============================================================================
+# =========================
+# Cache structure
+# =========================
 
 @dataclass
-class EsiResp:
-    status: int
-    headers: Dict[str, str]
-    data: Any
+class CachePlanner:
+    REGIONS_WORKERS_MAX: int
+    STRUCTS_WORKERS_MAX: int
 
+@dataclass
+class StationCacheEntry:
+    regionID: int
+    region: str
+    pages: int
 
-class EsiClient:
-    def __init__(self):
-        self.s = requests.Session()
-        self.s.headers.update({"User-Agent": USER_AGENT})
+@dataclass
+class StructureCacheEntry:
+    stationID: int
+    station: str
+    pages: int
 
-    def _request(
-        self,
-        method: str,
-        url: str,
-        params: Dict[str, Any],
-        headers: Optional[Dict[str, str]] = None,
-        timeout: int = 90,
-    ) -> EsiResp:
-        h = dict(headers or {})
-        r = self.s.request(method, url, params=params, headers=h, timeout=timeout)
+@dataclass
+class PagesCache:
+    planner: CachePlanner
+    stations: List[StationCacheEntry]
+    structures: List[StructureCacheEntry]
+
+def default_cache() -> PagesCache:
+    return PagesCache(
+        planner=CachePlanner(REGIONS_WORKERS_MAX=8, STRUCTS_WORKERS_MAX=3),
+        stations=[],
+        structures=[],
+    )
+
+def load_pages_cache(path: str) -> PagesCache:
+    if not os.path.exists(path):
+        return default_cache()
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    planner_raw = raw.get("planner", {}) if isinstance(raw, dict) else {}
+    regions_max = safe_int(planner_raw.get("REGIONS_WORKERS_MAX", 8), 8)
+    structs_max = safe_int(planner_raw.get("STRUCTS_WORKERS_MAX", 3), 3)
+
+    stations_raw = raw.get("stations", []) if isinstance(raw, dict) else []
+    structures_raw = raw.get("structures", []) if isinstance(raw, dict) else []
+
+    stations: List[StationCacheEntry] = []
+    for it in stations_raw:
         try:
-            data = r.json()
+            stations.append(StationCacheEntry(
+                regionID=int(it["regionID"]),
+                region=str(it.get("region", "")),
+                pages=int(it.get("pages", 0)),
+            ))
         except Exception:
-            data = None
-        return EsiResp(status=r.status_code, headers=dict(r.headers), data=data)
+            continue
 
+    structures: List[StructureCacheEntry] = []
+    for it in structures_raw:
+        try:
+            structures.append(StructureCacheEntry(
+                stationID=int(it["stationID"]),
+                station=str(it.get("station", "")),
+                pages=int(it.get("pages", 0)),
+            ))
+        except Exception:
+            continue
 
-# =============================================================================
-# Scheduling helpers (dynamic workers + LPT bin packing)
-# =============================================================================
+    return PagesCache(
+        planner=CachePlanner(REGIONS_WORKERS_MAX=regions_max, STRUCTS_WORKERS_MAX=structs_max),
+        stations=stations,
+        structures=structures,
+    )
 
-def clamp(lo: int, x: int, hi: int) -> int:
-    return max(lo, min(hi, x))
+def write_pages_cache_pretty_atomic(path: str, cache: PagesCache) -> None:
+    # Pretty + overwrite completo sin restos
+    tmp = path + ".tmp"
+    obj = {
+        "planner": {
+            "REGIONS_WORKERS_MAX": cache.planner.REGIONS_WORKERS_MAX,
+            "STRUCTS_WORKERS_MAX": cache.planner.STRUCTS_WORKERS_MAX,
+        },
+        "stations": [
+            {"regionID": e.regionID, "region": e.region, "pages": e.pages}
+            for e in cache.stations
+        ],
+        "structures": [
+            {"stationID": e.stationID, "station": e.station, "pages": e.pages}
+            for e in cache.structures
+        ],
+    }
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2, sort_keys=False)
+        f.write("\n")
+    os.replace(tmp, path)
 
+# =========================
+# Worker planning
+# =========================
 
-def choose_workers(total_weight: int, target: int, wmin: int, wmax: int) -> int:
-    if target <= 0:
-        return wmin
-    need = (total_weight + target - 1) // target
-    return clamp(wmin, need, wmax)
+def compute_workers_needed(total_pages: int, min_workers: int, max_workers: int, target_pages_per_worker: int) -> int:
+    # Dinámico dentro de min..max en cada run
+    if target_pages_per_worker <= 0:
+        return max_workers
+    needed = max(1, math.ceil(total_pages / target_pages_per_worker))
+    return max(min_workers, min(max_workers, needed))
 
-
-def lpt_shards(items: List[Tuple[int, str, int]], workers: int) -> List[List[Tuple[int, str, int]]]:
-    # items: (id, name, weight)
-    if workers <= 1:
-        return [items]
-    bins: List[List[Tuple[int, str, int]]] = [[] for _ in range(workers)]
-    load: List[int] = [0 for _ in range(workers)]
-    for it in sorted(items, key=lambda x: x[2], reverse=True):
-        j = min(range(workers), key=lambda k: load[k])
-        bins[j].append(it)
-        load[j] += it[2]
+def greedy_balance(items: List[Tuple[int, Any]], k: int) -> List[List[Any]]:
+    """
+    items = [(weight, payload), ...]
+    greedy LPT: ordena por weight desc y asigna al worker con menor carga.
+    """
+    if k <= 0:
+        return []
+    bins: List[List[Any]] = [[] for _ in range(k)]
+    loads: List[int] = [0 for _ in range(k)]
+    items_sorted = sorted(items, key=lambda x: x[0], reverse=True)
+    for w, payload in items_sorted:
+        idx = loads.index(min(loads))
+        bins[idx].append(payload)
+        loads[idx] += w
     return bins
 
+# =========================
+# HTTP (ESI)
+# =========================
 
-# =============================================================================
-# Main
-# =============================================================================
+def esi_get(session: requests.Session, url: str, headers: Dict[str, str], params: Dict[str, Any]) -> Response:
+    return session.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
 
-def main() -> int:
-    # Load indices
-    log("loading indices...")
-    regions = load_regions(SDE_REGIONS_PATH)
-    types_map = load_types_map(SDE_TYPES_PATH)
-    excluded = load_excluded_types(SDE_EXCLUDED_TYPES_PATH)
-    stations_map = load_stations_map(SDE_STATIONS_PATH)
-    structures_ids, structures_map = load_structures_market(STRUCTURES_FILE)
-    systems_map = load_solarsystems(SDE_SOLARSYSTEMS_PATH)
+def parse_expires_epoch(resp: Response) -> Optional[int]:
+    exp = resp.headers.get("Expires") or resp.headers.get("expires")
+    if not exp:
+        return None
+    return parse_http_date_to_epoch(exp)
 
-    reg_cache, struct_cache = load_pages_cache(PAGES_CACHE_PATH)
+def parse_last_modified_epoch(resp: Response) -> Optional[int]:
+    lm = resp.headers.get("Last-Modified") or resp.headers.get("last-modified")
+    if not lm:
+        return None
+    return parse_http_date_to_epoch(lm)
 
-    log(f"regions_count={len(regions)}")
-    log(f"structures_market_count={len(structures_ids)}")
+def parse_xpages(resp: Response) -> Optional[int]:
+    xp = resp.headers.get("X-Pages") or resp.headers.get("x-pages")
+    if not xp:
+        return None
+    try:
+        return int(xp)
+    except Exception:
+        return None
 
-    # Tokens
-    token_map = load_tokens_from_env()
-    pool = TokenPool(PRIMARY_CHAR_ID, token_map)
-    log(f"tokens_count={pool.count()} primary_char_id={PRIMARY_CHAR_ID}")
-    for cid in pool.order[:10]:
-        raw = (pool.token_map.get(cid, "") or "").strip()
-        log(f"token_shape char_id={cid} has_bearer_prefix={raw.lower().startswith('bearer ')} len={len(raw)}")
-
-    # Planner weights (pages_est, but for scheduling weight>=1)
-    region_items: List[Tuple[int, str, int]] = []
-    for rid, rname in regions:
-        pages_est = int(reg_cache.get(rid, 0))
-        weight = max(1, pages_est)
-        region_items.append((rid, rname, weight))
-
-    struct_items: List[Tuple[int, str, int]] = []
-    for sid in structures_ids:
-        sname = structures_map.get(sid, "")
-        pages_est = int(struct_cache.get(sid, 0))
-        weight = max(1, pages_est)
-        struct_items.append((sid, sname, weight))
-
-    total_reg_weight = sum(w for _, _, w in region_items)
-    total_struct_weight = sum(w for _, _, w in struct_items)
-
-    reg_workers = choose_workers(total_reg_weight, REGIONS_TARGET, REGIONS_WORKERS_MIN, REGIONS_WORKERS_MAX)
-    struct_workers = choose_workers(total_struct_weight, STRUCTS_TARGET, STRUCTS_WORKERS_MIN, STRUCTS_WORKERS_MAX)
-
-    log(f"planner regions_workers={reg_workers} total_weight={total_reg_weight} target={REGIONS_TARGET}")
-    log(f"planner structs_workers={struct_workers} total_weight={total_struct_weight} target={STRUCTS_TARGET}")
-
-    region_shards = lpt_shards(region_items, reg_workers)
-    struct_shards = lpt_shards(struct_items, struct_workers)
-
-    # Output files per shard
-    def shard_paths(prefix: str, idx: int) -> Dict[str, str]:
-        base = os.path.join(OUT_DIR, f"{prefix}_w{idx:02d}")
-        return {
-            "buy": base + "_buy.jsonl",
-            "sell": base + "_sell.jsonl",
-            "jita_buy": base + "_jita_buy.jsonl",
-            "jita_sell": base + "_jita_sell.jsonl",
-        }
-
-    # Shared stats for Sheets finalize
-    max_expires_lock = threading.Lock()
-    max_expires: Optional[datetime] = None
-    max_last_modified: Optional[datetime] = None
-
-    def update_cache_headers(headers: Dict[str, str]) -> None:
-        nonlocal max_expires, max_last_modified
-        exp = parse_http_date(headers.get("Expires"))
-        if exp is None:
+def sleep_retry_after_or_default(resp: Response, default_seconds: int) -> None:
+    ra = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
+    if ra:
+        try:
+            sec = int(ra)
+            if sec < 0:
+                sec = default_seconds
+            time.sleep(sec)
             return
-        with max_expires_lock:
-            if max_expires is None or exp > max_expires:
-                max_expires = exp
-                max_last_modified = parse_http_date(headers.get("Last-Modified"))
+        except Exception:
+            pass
+    time.sleep(default_seconds)
 
-    # Station name resolution
-    def station_name(location_id: int) -> str:
-        if location_id < 1_000_000_000_000:
-            return stations_map.get(location_id, "")
-        return structures_map.get(location_id, "")
+# =========================
+# Entity loop state machine (A/B)
+# =========================
 
-    def system_info(system_id: Any) -> Tuple[str, str, str]:
-        if system_id is None:
-            return "", "", ""
-        return systems_map.get(int(system_id), ("", "", ""))
+@dataclass
+class EntityResult:
+    pages_ok: int
+    had_xpages: bool
+    xpages: int
+    ignored: bool  # for structures ignored
+    max_expires_epoch: int
+    max_last_modified_epoch: int
 
-    # Global budget for authenticated 401/420 (EXACT policy)
-    budget_lock = threading.Lock()
-    auth_budget = {"remaining": RETRY_BUDGET}
+def fetch_entity_pages(
+    session: requests.Session,
+    entity_kind: str,
+    entity_id: int,
+    entity_name: str,
+    url: str,
+    auth_tokens: Optional[List[Tuple[int, str]]],
+    retry_budget: RetryBudget,
+    is_authed: bool,
+    dedupe_seen: set,
+    out_rows: List[dict],
+    excluded_type_ids_sorted: List[int],
+    type_id_to_name: Dict[int, str],
+    station_id_to_name: Dict[int, str],
+    structure_id_to_name: Dict[int, str],
+    solar_system_id_to_meta: Dict[int, Tuple[str, str, str]],
+    jita44_location_id: int,
+    jita44_buy_rows: List[dict],
+    jita44_sell_rows: List[dict],
+) -> EntityResult:
+    page = 1
+    pages_ok = 0
+    had_xpages = False
+    xpages_val = 0
+    attempts_404_page1 = 0
 
-    def consume_budget_or_fail(reason: str, structure_id: int, page: int, char_id: Optional[int]) -> None:
-        with budget_lock:
-            if auth_budget["remaining"] <= 0:
-                log(f"RETRY_BUDGET_EXHAUSTED reason={reason} structure_id={structure_id} page={page} char_id={char_id}")
-                raise RuntimeError("RETRY_BUDGET exhausted for authenticated requests (401/420).")
-            auth_budget["remaining"] -= 1
-            remaining = auth_budget["remaining"]
-        log(f"auth_retry={reason} structure_id={structure_id} page={page} char_id={char_id} remaining_budget={remaining}")
+    token_idx = 0
+    current_char_id: Optional[int] = None
+    current_token: Optional[str] = None
+    if is_authed:
+        if not auth_tokens:
+            raise RuntimeError("Authenticated endpoint requested but no tokens available.")
+        current_char_id, current_token = auth_tokens[token_idx]
 
-    client = EsiClient()
-    now_ref = utc_now()
+    max_expires_epoch = 0
+    max_last_modified_epoch = 0
 
-    # Observed pages to write cache on success
-    observed_region_pages_lock = threading.Lock()
-    observed_region_pages: Dict[int, int] = {}
+    def build_headers() -> Dict[str, str]:
+        h = {
+            "User-Agent": UA,
+            "Accept": "application/json",
+        }
+        if is_authed and current_token:
+            # tokens come without "Bearer " per your logs; we add it here
+            h["Authorization"] = f"Bearer {current_token}"
+        return h
 
-    observed_struct_pages_lock = threading.Lock()
-    observed_struct_pages: Dict[int, int] = {}
+    while True:
+        params = {"datasource": os.environ.get("ESI_DATASOURCE", "tranquility"), "page": page}
 
-    ignored_structures_lock = threading.Lock()
-    ignored_structures: set[int] = set()
+        resp = esi_get(session, url, build_headers(), params)
+        status = resp.status_code
 
-    # Writers
-    def write_line(fp, obj: Dict[str, Any]) -> None:
-        fp.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        # track max Expires/Last-Modified (for next_run)
+        exp_epoch = parse_expires_epoch(resp) or 0
+        lm_epoch = parse_last_modified_epoch(resp) or 0
+        if exp_epoch > max_expires_epoch:
+            max_expires_epoch = exp_epoch
+        if lm_epoch > max_last_modified_epoch:
+            max_last_modified_epoch = lm_epoch
 
-    # Pagination policy: page=1.. until ESI says "page doesn't exist"
-    # - For regions: treat non-200 on page>1 as "end" (no retry) except transient 429/502/503/504/520/420.
-    # - For structures: use auth policy for 401/420; and special ignore for 403/404 after one 5s retry.
+        if status == 200:
+            pages_ok += 1
+            xp = parse_xpages(resp)
+            if xp is not None:
+                had_xpages = True
+                xpages_val = xp
 
-    transient_status = {420, 429, 502, 503, 504, 520}
-
-    def region_fetch_page(region_id: int, page: int) -> EsiResp:
-        url = f"{ESI_BASE_URL}/latest/markets/{region_id}/orders/"
-        params = {"datasource": ESI_DATASOURCE, "order_type": "all", "page": page}
-        return client._request("GET", url, params=params)
-
-    def structure_fetch_page(structure_id: int, page: int) -> EsiResp:
-        cid, tok = pool.current()
-        if not tok:
-            return EsiResp(status=0, headers={}, data=None)
-        url = f"{ESI_BASE_URL}/latest/markets/structures/{structure_id}/"
-        params = {"datasource": ESI_DATASOURCE, "page": page}
-        hdrs = {"Authorization": f"Bearer {tok}"}
-        return client._request("GET", url, params=params, headers=hdrs)
-
-    def process_orders_list(
-        orders: List[Dict[str, Any]],
-        buy_fp,
-        sell_fp,
-        jita_buy_fp,
-        jita_sell_fp,
-        seen_buy: set[int],
-        seen_sell: set[int],
-        seen_jita_buy: set[int],
-        seen_jita_sell: set[int],
-    ) -> Tuple[int, int, int, int]:
-        buy_n = sell_n = jb_n = js_n = 0
-        now_local = utc_now()
-
-        for o in orders:
+            # Parse and stream-dedupe per worker
             try:
-                type_id = int(o.get("type_id"))
-                if type_id in excluded:
+                items = resp.json()
+                if not isinstance(items, list):
+                    items = []
+            except Exception:
+                items = []
+
+            for o in items:
+                try:
+                    order_id = int(o.get("order_id"))
+                except Exception:
                     continue
 
-                order_id = safe_int(o.get("order_id"))
-                if order_id <= 0:
+                if order_id in dedupe_seen:
+                    continue
+                dedupe_seen.add(order_id)
+
+                # Excluded market types filter
+                try:
+                    type_id = int(o.get("type_id"))
+                except Exception:
+                    continue
+                if bsearch_excluded(excluded_type_ids_sorted, type_id):
                     continue
 
-                is_buy = bool(o.get("is_buy_order"))
+                # buy/sell filter split later; here keep both and derive tables
+                is_buy = bool(o.get("is_buy_order", False))
 
-                issued_dt = parse_iso_utc(str(o.get("issued")))
-                duration_days = int(o.get("duration"))
-                until_dt = issued_dt + timedelta(days=duration_days)
-                time_left = hhmmss(until_dt - now_local)
+                issued = str(o.get("issued"))
+                duration = safe_int(o.get("duration", 0), 0)
+                until_iso, time_left = compute_until_and_timeleft(issued, duration)
+
+                # station/structure lookup for location_id
+                loc_id = safe_int(o.get("location_id", 0), 0)
+                sys_id = safe_int(o.get("system_id", 0), 0)
+
+                # resolve type name
+                type_name = type_id_to_name.get(type_id, str(type_id))
+
+                # region/constellation/solarSystem
+                solarSystem, constellation, region = solar_system_id_to_meta.get(sys_id, ("", "", ""))
+
+                # station name
+                station_name = ""
+                if loc_id < 1000000000000:
+                    station_name = station_id_to_name.get(loc_id, str(loc_id))
+                else:
+                    station_name = structure_id_to_name.get(loc_id, str(loc_id))
 
                 row_common = {
-                    "type": types_map.get(type_id),
-                    "orderPrice": safe_float(o.get("price")),
-                    "volRemain": safe_int(o.get("volume_remain")),
-                    "volTotal": safe_int(o.get("volume_total")),
-                    "volMin": safe_int(o.get("min_volume")),
-                    "issued": iso_utc(issued_dt),
-                    "until": iso_utc(until_dt),
+                    "type": type_name,
+                    "orderPrice": float(o.get("price", 0.0)),
+                    "volRemain": safe_int(o.get("volume_remain", 0), 0),
+                    "volTotal": safe_int(o.get("volume_total", 0), 0),
+                    "volMin": safe_int(o.get("min_volume", 0), 0),
+                    "station": station_name,
+                    "solarSystem": solarSystem,
+                    "constellation": constellation,
+                    "region": region,
+                    "issued": issued,
+                    "until": until_iso,
                     "timeLeft": time_left,
                     "orderID": order_id,
                 }
 
-                loc_id = safe_int(o.get("location_id"))
-                sys_id = o.get("system_id")
-
-                if is_buy:
-                    if order_id in seen_buy:
-                        continue
-                    seen_buy.add(order_id)
-
-                    rint = range_to_int(o.get("range"))
-                    solar, const, reg = system_info(sys_id)
-
-                    out = dict(row_common)
-                    out.update({
-                        "station": station_name(loc_id),
-                        "solarSystem": solar,
-                        "constellation": const,
-                        "region": reg,
-                        "ordeRange": rint,
-                    })
-                    write_line(buy_fp, out)
-                    buy_n += 1
-
-                    if loc_id == JITA44_LOCATION_ID:
-                        if order_id not in seen_jita_buy:
-                            seen_jita_buy.add(order_id)
-                            j = {
-                                "type": row_common["type"],
-                                "orderPrice": row_common["orderPrice"],
-                                "volRemain": row_common["volRemain"],
-                                "volTotal": row_common["volTotal"],
-                                "volMin": row_common["volMin"],
-                                "issued": row_common["issued"],
-                                "until": row_common["until"],
-                                "timeLeft": row_common["timeLeft"],
-                                "orderID": row_common["orderID"],
-                                "ordeRange": rint,
-                            }
-                            write_line(jita_buy_fp, j)
-                            jb_n += 1
+                if "range" in o:
+                    row_common["ordeRange"] = parse_range_to_int(o.get("range"))
                 else:
-                    if order_id in seen_sell:
-                        continue
-                    seen_sell.add(order_id)
+                    row_common["ordeRange"] = 0
 
-                    solar, const, reg = system_info(sys_id)
+                # Write to global outputs
+                if is_buy:
+                    out_rows.append({**row_common, "is_buy_order": True})
+                else:
+                    out_rows.append({**row_common, "is_buy_order": False})
 
-                    out = dict(row_common)
-                    out.update({
-                        "station": station_name(loc_id),
-                        "solarSystem": solar,
-                        "constellation": const,
-                        "region": reg,
-                    })
-                    write_line(sell_fp, out)
-                    sell_n += 1
+                # Jita44 special tables (location_id filter)
+                if loc_id == jita44_location_id:
+                    jita_row = {
+                        "type": type_name,
+                        "orderPrice": float(o.get("price", 0.0)),
+                        "volRemain": safe_int(o.get("volume_remain", 0), 0),
+                        "volTotal": safe_int(o.get("volume_total", 0), 0),
+                        "volMin": safe_int(o.get("min_volume", 0), 0),
+                        "issued": issued,
+                        "until": until_iso,
+                        "timeLeft": time_left,
+                        "orderID": order_id,
+                    }
+                    if "range" in o:
+                        jita_row["ordeRange"] = parse_range_to_int(o.get("range"))
 
-                    if loc_id == JITA44_LOCATION_ID:
-                        if order_id not in seen_jita_sell:
-                            seen_jita_sell.add(order_id)
-                            j = {
-                                "type": row_common["type"],
-                                "orderPrice": row_common["orderPrice"],
-                                "volRemain": row_common["volRemain"],
-                                "volTotal": row_common["volTotal"],
-                                "volMin": row_common["volMin"],
-                                "issued": row_common["issued"],
-                                "until": row_common["until"],
-                                "timeLeft": row_common["timeLeft"],
-                                "orderID": row_common["orderID"],
-                            }
-                            write_line(jita_sell_fp, j)
-                            js_n += 1
-            except Exception:
-                continue
+                    if is_buy:
+                        jita44_buy_rows.append(jita_row)
+                    else:
+                        jita44_sell_rows.append(jita_row)
 
-        return buy_n, sell_n, jb_n, js_n
-
-    # Worker functions
-    def run_region_shard(shard_idx: int, shard: List[Tuple[int, str, int]]) -> Dict[str, Any]:
-        paths = shard_paths("regions", shard_idx)
-        seen_buy: set[int] = set()
-        seen_sell: set[int] = set()
-        seen_jita_buy: set[int] = set()
-        seen_jita_sell: set[int] = set()
-
-        buy_n = sell_n = jb_n = js_n = 0
-        region_pages_local: Dict[int, int] = {}
-
-        with open(paths["buy"], "w", encoding="utf-8") as f_buy, \
-             open(paths["sell"], "w", encoding="utf-8") as f_sell, \
-             open(paths["jita_buy"], "w", encoding="utf-8") as f_jb, \
-             open(paths["jita_sell"], "w", encoding="utf-8") as f_js:
-
-            for rid, rname, _w in shard:
-                log(f"region_start worker={shard_idx} region_id={rid} \"{rname}\"")
-                page = 1
-                pages_ok = 0
-
-                while True:
-                    resp = region_fetch_page(rid, page)
-                    st = resp.status
-
-                    # Update global cache headers on any 200
-                    if st == 200:
-                        update_cache_headers(resp.headers)
-
-                    # Transient retries
-                    if st in transient_status:
-                        # Gentle backoff
-                        time.sleep(5 + random.random() * 2)
-                        continue
-
-                    if st != 200:
-                        # page=1 failing -> log and stop region
-                        if page == 1:
-                            log(f"region_page status={st} region_id={rid} page=1 -> skip_region")
-                        else:
-                            log(f"region_end status={st} region_id={rid} page={page} pages_ok={pages_ok}")
-                        break
-
-                    if not isinstance(resp.data, list):
-                        log(f"region_end nonlist region_id={rid} page={page} pages_ok={pages_ok}")
-                        break
-
-                    pages_ok = page
-                    b, s, jb, js = process_orders_list(resp.data, f_buy, f_sell, f_jb, f_js,
-                                                      seen_buy, seen_sell, seen_jita_buy, seen_jita_sell)
-                    buy_n += b
-                    sell_n += s
-                    jb_n += jb
-                    js_n += js
-
+            # Rule of gold: if we have X-Pages, stop at page==X-Pages
+            if had_xpages:
+                log(f"entity_page status=200 kind={entity_kind} id={entity_id} page={page} xpages={xpages_val}")
+                if page < xpages_val:
                     page += 1
+                    continue
+                if page == xpages_val:
+                    return EntityResult(
+                        pages_ok=pages_ok,
+                        had_xpages=True,
+                        xpages=xpages_val,
+                        ignored=False,
+                        max_expires_epoch=max_expires_epoch,
+                        max_last_modified_epoch=max_last_modified_epoch,
+                    )
+                # defensive (shouldn't happen)
+                return EntityResult(pages_ok, True, xpages_val, False, max_expires_epoch, max_last_modified_epoch)
 
-                region_pages_local[rid] = pages_ok
-                log(f"region_done worker={shard_idx} region_id={rid} pages={pages_ok}")
+            # No X-Pages -> keep incrementing until 404
+            log(f"entity_page status=200 kind={entity_kind} id={entity_id} page={page} xpages=none")
+            page += 1
+            continue
 
-        with observed_region_pages_lock:
-            observed_region_pages.update(region_pages_local)
+        if status == 404:
+            log(f"entity_page status=404 kind={entity_kind} id={entity_id} page={page}")
+            if entity_kind == "REGION":
+                # end of pagination
+                return EntityResult(pages_ok, had_xpages, xpages_val, False, max_expires_epoch, max_last_modified_epoch)
 
-        return {"buy": buy_n, "sell": sell_n, "jita_buy": jb_n, "jita_sell": js_n}
+            # STRUCTURE
+            if page == 1:
+                if attempts_404_page1 == 0:
+                    attempts_404_page1 += 1
+                    time.sleep(SLEEP_STRUCTURE_404_PAGE1_RETRY_MS / 1000.0)
+                    continue
+                # ignore structure (do not cache it)
+                log(f"structure_ignored reason=404_page1 kind=STRUCTURE id={entity_id} name={entity_name}")
+                return EntityResult(pages_ok, had_xpages, xpages_val, True, max_expires_epoch, max_last_modified_epoch)
 
-    def run_struct_shard(shard_idx: int, shard: List[Tuple[int, str, int]]) -> Dict[str, Any]:
-        paths = shard_paths("structs", shard_idx)
-        seen_buy: set[int] = set()
-        seen_sell: set[int] = set()
-        seen_jita_buy: set[int] = set()
-        seen_jita_sell: set[int] = set()
+            # page > 1 => end pagination
+            return EntityResult(pages_ok, had_xpages, xpages_val, False, max_expires_epoch, max_last_modified_epoch)
 
-        buy_n = sell_n = jb_n = js_n = 0
-        struct_pages_local: Dict[int, int] = {}
-        ignored_local: set[int] = set()
+        if status == 401 and is_authed:
+            # rotate token, sleep, retry same page, consume budget
+            retry_budget.consume_or_fail("401", entity_kind, entity_id, page, current_char_id)
+            token_idx += 1
+            if not auth_tokens:
+                raise RuntimeError("No tokens available for 401 rotation.")
+            if token_idx >= len(auth_tokens):
+                token_idx = 0  # wrap (same as “rotate”)
+            current_char_id, current_token = auth_tokens[token_idx]
+            log(f"auth_retry=401 kind={entity_kind} id={entity_id} page={page} new_char_id={current_char_id}")
+            time.sleep(SLEEP_AUTH_RETRY_SECONDS)
+            continue
 
-        with open(paths["buy"], "w", encoding="utf-8") as f_buy, \
-             open(paths["sell"], "w", encoding="utf-8") as f_sell, \
-             open(paths["jita_buy"], "w", encoding="utf-8") as f_jb, \
-             open(paths["jita_sell"], "w", encoding="utf-8") as f_js:
+        if status in (420, 429) or (500 <= status <= 599):
+            retry_budget.consume_or_fail(str(status), entity_kind, entity_id, page, current_char_id)
+            log(f"retry status={status} kind={entity_kind} id={entity_id} page={page}")
+            sleep_retry_after_or_default(resp, SLEEP_ERROR_RETRY_SECONDS)
+            continue
 
-            for sid, sname, _w in shard:
-                label = f"{sid}" + (f' "{sname}"' if sname else "")
-                log(f"structure_start worker={shard_idx} structure_id={label}")
+        # Other 4xx: 400–499 except 401/404/420/429
+        if 400 <= status <= 499:
+            log(f"entity_page status={status} kind={entity_kind} id={entity_id} page={page}")
+            if entity_kind == "STRUCTURE":
+                log(f"structure_ignored reason=other_4xx status={status} id={entity_id} name={entity_name}")
+                return EntityResult(pages_ok, had_xpages, xpages_val, True, max_expires_epoch, max_last_modified_epoch)
+            # REGION: fail run
+            raise RuntimeError(f"Unexpected 4xx for REGION {entity_id} page={page}: status={status}")
 
-                page = 1
-                pages_ok = 0
+        # Any other unexpected status
+        raise RuntimeError(f"Unexpected status {status} for {entity_kind} {entity_id} page={page}")
 
-                # First-page permission/no-exist rule: retry after 5000ms then ignore
-                first_page_attempts = 0
+# =========================
+# Workers (no pipelining within entity)
+# =========================
 
-                while True:
-                    cid, _tok = pool.current()
-                    resp = structure_fetch_page(sid, page)
-                    st = resp.status
+def worker_run_entities(
+    worker_kind: str,
+    entities: List[Tuple[int, str]],
+    session: requests.Session,
+    retry_budget: RetryBudget,
+    auth_tokens: Optional[List[Tuple[int, str]]],
+    excluded_type_ids_sorted: List[int],
+    type_id_to_name: Dict[int, str],
+    station_id_to_name: Dict[int, str],
+    structure_id_to_name: Dict[int, str],
+    solar_system_id_to_meta: Dict[int, Tuple[str, str, str]],
+    jita44_location_id: int,
+) -> Tuple[List[dict], List[dict], List[dict], Dict[int, int], Dict[int, int], int, int]:
+    """
+    Returns:
+      - all_rows (buy+sell; each row has is_buy_order boolean)
+      - jita44_buy_rows
+      - jita44_sell_rows
+      - pages_by_region (region_id -> pages_ok OR xpages when had_xpages)
+      - pages_by_structure (structure_id -> pages_ok OR xpages when had_xpages) excluding ignored
+      - max_expires_epoch
+      - max_last_modified_epoch
+    """
+    seen_order_ids = set()
+    all_rows: List[dict] = []
+    jita44_buy_rows: List[dict] = []
+    jita44_sell_rows: List[dict] = []
 
-                    if st == 200:
-                        update_cache_headers(resp.headers)
+    pages_by_region: Dict[int, int] = {}
+    pages_by_structure: Dict[int, int] = {}
 
-                    if st == 401:
-                        consume_budget_or_fail("401", sid, page, cid)
-                        time.sleep(30)
-                        pool.rotate()
-                        continue
+    max_expires_epoch = 0
+    max_last_modified_epoch = 0
 
-                    if st == 420:
-                        consume_budget_or_fail("420", sid, page, cid)
-                        time.sleep(30)
-                        continue
+    for idx, (eid, name) in enumerate(entities, start=1):
+        if worker_kind == "REGION":
+            url = f"{os.environ.get('ESI_BASE_URL','https://esi.evetech.net')}/markets/{eid}/orders/"
+            log(f"entity_start kind=REGION idx={idx}/{len(entities)} region_id={eid} region={name}")
+            res = fetch_entity_pages(
+                session=session,
+                entity_kind="REGION",
+                entity_id=eid,
+                entity_name=name,
+                url=url,
+                auth_tokens=None,
+                retry_budget=retry_budget,
+                is_authed=False,
+                dedupe_seen=seen_order_ids,
+                out_rows=all_rows,
+                excluded_type_ids_sorted=excluded_type_ids_sorted,
+                type_id_to_name=type_id_to_name,
+                station_id_to_name=station_id_to_name,
+                structure_id_to_name=structure_id_to_name,
+                solar_system_id_to_meta=solar_system_id_to_meta,
+                jita44_location_id=jita44_location_id,
+                jita44_buy_rows=jita44_buy_rows,
+                jita44_sell_rows=jita44_sell_rows,
+            )
+            pages_effective = res.xpages if res.had_xpages else res.pages_ok
+            pages_by_region[eid] = pages_effective
+            log(f"entity_done kind=REGION region_id={eid} pages_ok={res.pages_ok} had_xpages={res.had_xpages} xpages={res.xpages}")
 
-                    if st in (403, 404):
-                        if page == 1:
-                            first_page_attempts += 1
-                            if first_page_attempts == 1:
-                                log(f"structure_perm_or_missing status={st} structure_id={sid} retry_ms=5000")
-                                time.sleep(5)
-                                continue
-                            log(f"structure_ignored status={st} structure_id={sid}")
-                            ignored_local.add(sid)
-                            break
-                        # if mid pages suddenly 403/404 -> stop structure
-                        log(f"structure_end status={st} structure_id={sid} page={page} pages_ok={pages_ok}")
-                        break
+        else:
+            url = f"{os.environ.get('ESI_BASE_URL','https://esi.evetech.net')}/markets/structures/{eid}/"
+            log(f"entity_start kind=STRUCTURE idx={idx}/{len(entities)} structure_id={eid} station={name}")
+            res = fetch_entity_pages(
+                session=session,
+                entity_kind="STRUCTURE",
+                entity_id=eid,
+                entity_name=name,
+                url=url,
+                auth_tokens=auth_tokens,
+                retry_budget=retry_budget,
+                is_authed=True,
+                dedupe_seen=seen_order_ids,
+                out_rows=all_rows,
+                excluded_type_ids_sorted=excluded_type_ids_sorted,
+                type_id_to_name=type_id_to_name,
+                station_id_to_name=station_id_to_name,
+                structure_id_to_name=structure_id_to_name,
+                solar_system_id_to_meta=solar_system_id_to_meta,
+                jita44_location_id=jita44_location_id,
+                jita44_buy_rows=jita44_buy_rows,
+                jita44_sell_rows=jita44_sell_rows,
+            )
+            if not res.ignored:
+                pages_effective = res.xpages if res.had_xpages else res.pages_ok
+                pages_by_structure[eid] = pages_effective
+                log(f"entity_done kind=STRUCTURE structure_id={eid} pages_ok={res.pages_ok} had_xpages={res.had_xpages} xpages={res.xpages}")
+            else:
+                log(f"entity_done kind=STRUCTURE structure_id={eid} ignored=true pages_ok={res.pages_ok}")
 
-                    if st in transient_status:
-                        time.sleep(5 + random.random() * 2)
-                        continue
+        if res.max_expires_epoch > max_expires_epoch:
+            max_expires_epoch = res.max_expires_epoch
+        if res.max_last_modified_epoch > max_last_modified_epoch:
+            max_last_modified_epoch = res.max_last_modified_epoch
 
-                    if st != 200:
-                        if page == 1:
-                            log(f"structure_page status={st} structure_id={sid} page=1 -> skip_structure")
-                        else:
-                            log(f"structure_end status={st} structure_id={sid} page={page} pages_ok={pages_ok}")
-                        break
+    return (
+        all_rows,
+        jita44_buy_rows,
+        jita44_sell_rows,
+        pages_by_region,
+        pages_by_structure,
+        max_expires_epoch,
+        max_last_modified_epoch,
+    )
 
-                    if not isinstance(resp.data, list):
-                        log(f"structure_end nonlist structure_id={sid} page={page} pages_ok={pages_ok}")
-                        break
+# =========================
+# Workers MAX slow adaptation (E)
+# =========================
 
-                    pages_ok = page
-                    b, s, jb, js = process_orders_list(resp.data, f_buy, f_sell, f_jb, f_js,
-                                                      seen_buy, seen_sell, seen_jita_buy, seen_jita_sell)
-                    buy_n += b
-                    sell_n += s
-                    jb_n += jb
-                    js_n += js
+def slow_update_max(
+    current: int,
+    recommended: int,
+    min_workers: int,
+    other_current: int,
+    global_sum_limit: int = GLOBAL_WORKERS_SUM_LIMIT,
+) -> int:
+    # Keep sane
+    current = max(current, min_workers * 2)
+    recommended = max(recommended, min_workers)
 
-                    page += 1
+    # Enforce global sum limit later
+    new_val = current
 
-                if sid not in ignored_local:
-                    struct_pages_local[sid] = pages_ok
-                    log(f"structure_done worker={shard_idx} structure_id={sid} pages={pages_ok}")
+    if recommended > current:
+        # increase by +1 max per run
+        new_val = current + 1
+    else:
+        # decrease only if recommended < current/4
+        if recommended < (current / 4.0):
+            cap = math.ceil(current / 2.0)
+            new_val = max(current - cap, min_workers * 2)
+        else:
+            new_val = current
 
-        with observed_struct_pages_lock:
-            observed_struct_pages.update(struct_pages_local)
+    # apply global sum constraint
+    if new_val + other_current > global_sum_limit:
+        # reduce to fit, but never below min_workers*2
+        new_val = max(min_workers * 2, global_sum_limit - other_current)
+    return new_val
 
-        with ignored_structures_lock:
-            ignored_structures.update(ignored_local)
+# =========================
+# Main
+# =========================
 
-        return {"buy": buy_n, "sell": sell_n, "jita_buy": jb_n, "jita_sell": js_n}
+def main() -> int:
+    # Env
+    out_dir = must_env("OUT_DIR")
+    pages_cache_path = must_env("PAGES_CACHE_PATH")
 
-    # Run regions then structures (to limit concurrency pressure on ESI)
+    sde_regions_path = must_env("SDE_REGIONS_PATH")
+    sde_types_path = must_env("SDE_TYPES_PATH")
+    sde_excluded_path = must_env("SDE_EXCLUDED_TYPES_PATH")
+    sde_stations_path = must_env("SDE_STATIONS_PATH")
+    sde_solarsystems_path = must_env("SDE_SOLARSYSTEMS_PATH")
+    structures_file = must_env("STRUCTURES_FILE")
+
+    regions_min = int(must_env("REGIONS_WORKERS_MIN"))
+    structs_min = int(must_env("STRUCTS_WORKERS_MIN"))
+    if regions_min <= 0 or structs_min <= 0:
+        raise RuntimeError("REGIONS_WORKERS_MIN and STRUCTS_WORKERS_MIN must be > 0")
+
+    regions_target = int(must_env("REGIONS_TARGET_PAGES_PER_WORKER"))
+    structs_target = int(must_env("STRUCTS_TARGET_PAGES_PER_WORKER"))
+
+    primary_char_id = int(must_env("PRIMARY_CHAR_ID"))
+    retry_budget_initial = int(must_env("RETRY_BUDGET"))
+    jita44_location_id = int(must_env("JITA44_LOCATION_ID"))
+
+    ensure_dir(out_dir)
+    ensure_dir(os.path.dirname(pages_cache_path) or ".")
+
+    # Load cache (planner + previous pages)
+    cache = load_pages_cache(pages_cache_path)
+    regions_max_bound = max(cache.planner.REGIONS_WORKERS_MAX, regions_min)  # max bound dynamic from cache
+    structs_max_bound = max(cache.planner.STRUCTS_WORKERS_MAX, structs_min)
+
+    # Load indices
+    log("loading indices...")
+
+    # regions truth
+    regions_truth: List[Tuple[int, str]] = []
+    for row in read_gz_jsonl(sde_regions_path):
+        rid = safe_int(row.get("regionID", 0), 0)
+        rname = str(row.get("region", ""))
+        if rid > 0:
+            regions_truth.append((rid, rname))
+
+    # structures truth (market==true)
+    structures_truth: List[Tuple[int, str]] = []
+    for row in read_gz_jsonl(structures_file):
+        if not bool(row.get("market", False)):
+            continue
+        sid = safe_int(row.get("stationID", 0), 0)
+        sname = str(row.get("station", ""))
+        if sid > 0:
+            structures_truth.append((sid, sname))
+
+    # types
+    type_id_to_name: Dict[int, str] = {}
+    for row in read_gz_jsonl(sde_types_path):
+        tid = safe_int(row.get("typeID", 0), 0)
+        tname = row.get("type")
+        if tid > 0 and isinstance(tname, str):
+            type_id_to_name[tid] = tname
+
+    # excluded types (sorted ascending)
+    excluded_ids: List[int] = []
+    for row in read_gz_jsonl(sde_excluded_path):
+        tid = safe_int(row.get("typeID", 0), 0)
+        if tid > 0:
+            excluded_ids.append(tid)
+    excluded_ids.sort()
+
+    # stations names
+    station_id_to_name: Dict[int, str] = {}
+    for row in read_gz_jsonl(sde_stations_path):
+        sid = safe_int(row.get("stationID", 0), 0)
+        sname = row.get("station")
+        if sid > 0 and isinstance(sname, str):
+            station_id_to_name[sid] = sname
+
+    # solarsystems meta
+    solar_system_id_to_meta: Dict[int, Tuple[str, str, str]] = {}
+    for row in read_gz_jsonl(sde_solarsystems_path):
+        ssid = safe_int(row.get("solarSystemID", 0), 0)
+        if ssid <= 0:
+            continue
+        solar = str(row.get("solarSystem", ""))
+        const = str(row.get("constellation", ""))
+        reg = str(row.get("region", ""))
+        solar_system_id_to_meta[ssid] = (solar, const, reg)
+
+    # structures names
+    structure_id_to_name: Dict[int, str] = {sid: name for sid, name in structures_truth}
+
+    # tokens
+    auth_tokens = load_tokens_from_secrets(primary_char_id)
+    log(f"regions_count={len(regions_truth)}")
+    log(f"structures_market_count={len(structures_truth)}")
+    log(f"tokens_count={len(auth_tokens)} primary_char_id={primary_char_id}")
+
+    # Build pages lookup from cache, default 0 for unknown
+    prev_pages_by_region: Dict[int, int] = {e.regionID: e.pages for e in cache.stations}
+    prev_pages_by_struct: Dict[int, int] = {e.stationID: e.pages for e in cache.structures}
+
+    total_region_pages = sum(prev_pages_by_region.get(rid, 0) for rid, _ in regions_truth)
+    total_struct_pages = sum(prev_pages_by_struct.get(sid, 0) for sid, _ in structures_truth)
+
+    # Determine workers this run (dynamic within min..max_bound)
+    regions_workers = compute_workers_needed(total_region_pages, regions_min, regions_max_bound, regions_target)
+    structs_workers = compute_workers_needed(total_struct_pages, structs_min, structs_max_bound, structs_target)
+
+    # Respect global sum limit by trimming structures workers first (conservatively)
+    if regions_workers + structs_workers > GLOBAL_WORKERS_SUM_LIMIT:
+        excess = (regions_workers + structs_workers) - GLOBAL_WORKERS_SUM_LIMIT
+        structs_workers = max(structs_min, structs_workers - excess)
+
+    log(f"planner_run regions_workers={regions_workers} structs_workers={structs_workers} regions_max_bound={regions_max_bound} structs_max_bound={structs_max_bound}")
+
+    # Assign entities to workers (weights = previous pages, fallback 0)
+    region_items = [(prev_pages_by_region.get(rid, 0), (rid, rname)) for rid, rname in regions_truth]
+    struct_items = [(prev_pages_by_struct.get(sid, 0), (sid, sname)) for sid, sname in structures_truth]
+
+    regions_bins = greedy_balance(region_items, regions_workers)
+    structs_bins = greedy_balance(struct_items, structs_workers)
+
+    retry_budget = RetryBudget(retry_budget_initial)
+
+    # Run workers sequentially (no internal pipelining per entity; but multiple bins processed sequentially here)
+    # Nota: si más tarde quieres paralelizar bins con multiprocessing, se puede, pero no es requerido por tus reglas.
+    session = requests.Session()
+
+    all_rows_global: List[dict] = []
+    jita_buy_global: List[dict] = []
+    jita_sell_global: List[dict] = []
+    pages_by_region_new: Dict[int, int] = {}
+    pages_by_struct_new: Dict[int, int] = {}
+    max_expires_epoch = 0
+    max_last_modified_epoch = 0
+
+    # Regions phase
     log("phase=regions start")
-    reg_totals = {"buy": 0, "sell": 0, "jita_buy": 0, "jita_sell": 0}
-    with ThreadPoolExecutor(max_workers=reg_workers) as ex:
-        futs = [ex.submit(run_region_shard, i + 1, shard) for i, shard in enumerate(region_shards)]
-        for fut in as_completed(futs):
-            res = fut.result()
-            for k in reg_totals:
-                reg_totals[k] += int(res.get(k, 0))
+    for wi, entities in enumerate(regions_bins, start=1):
+        log(f"worker_start kind=REGION worker={wi}/{len(regions_bins)} entities={len(entities)}")
+        rows, jb, js, pbr, pbs, me, ml = worker_run_entities(
+            worker_kind="REGION",
+            entities=entities,
+            session=session,
+            retry_budget=retry_budget,
+            auth_tokens=None,
+            excluded_type_ids_sorted=excluded_ids,
+            type_id_to_name=type_id_to_name,
+            station_id_to_name=station_id_to_name,
+            structure_id_to_name=structure_id_to_name,
+            solar_system_id_to_meta=solar_system_id_to_meta,
+            jita44_location_id=jita44_location_id,
+        )
+        all_rows_global.extend(rows)
+        jita_buy_global.extend(jb)
+        jita_sell_global.extend(js)
+        pages_by_region_new.update(pbr)
+        if me > max_expires_epoch:
+            max_expires_epoch = me
+        if ml > max_last_modified_epoch:
+            max_last_modified_epoch = ml
+        log(f"worker_done kind=REGION worker={wi}")
     log("phase=regions end")
 
+    # Structures phase
     log("phase=structures start")
-    struct_totals = {"buy": 0, "sell": 0, "jita_buy": 0, "jita_sell": 0}
-    if pool.count() == 0:
-        log("no_tokens -> structures skipped")
-    else:
-        with ThreadPoolExecutor(max_workers=struct_workers) as ex:
-            futs = [ex.submit(run_struct_shard, i + 1, shard) for i, shard in enumerate(struct_shards)]
-            for fut in as_completed(futs):
-                res = fut.result()
-                for k in struct_totals:
-                    struct_totals[k] += int(res.get(k, 0))
+    for wi, entities in enumerate(structs_bins, start=1):
+        log(f"worker_start kind=STRUCTURE worker={wi}/{len(structs_bins)} entities={len(entities)}")
+        rows, jb, js, pbr, pbs, me, ml = worker_run_entities(
+            worker_kind="STRUCTURE",
+            entities=entities,
+            session=session,
+            retry_budget=retry_budget,
+            auth_tokens=auth_tokens,
+            excluded_type_ids_sorted=excluded_ids,
+            type_id_to_name=type_id_to_name,
+            station_id_to_name=station_id_to_name,
+            structure_id_to_name=structure_id_to_name,
+            solar_system_id_to_meta=solar_system_id_to_meta,
+            jita44_location_id=jita44_location_id,
+        )
+        all_rows_global.extend(rows)
+        jita_buy_global.extend(jb)
+        jita_sell_global.extend(js)
+        pages_by_struct_new.update(pbs)  # ignored structures are excluded by worker
+        if me > max_expires_epoch:
+            max_expires_epoch = me
+        if ml > max_last_modified_epoch:
+            max_last_modified_epoch = ml
+        log(f"worker_done kind=STRUCTURE worker={wi}")
     log("phase=structures end")
 
-    # Merge shard outputs into final outputs (no global dedupe unless you add anomaly mode)
-    def merge_files(glob_prefix: str, out_name: str) -> int:
-        out_path = os.path.join(OUT_DIR, out_name)
-        count = 0
-        with open(out_path, "w", encoding="utf-8") as w:
-            for fn in sorted(os.listdir(OUT_DIR)):
-                if fn.startswith(glob_prefix) and fn.endswith(".jsonl"):
-                    with open(os.path.join(OUT_DIR, fn), "r", encoding="utf-8") as r:
-                        for line in r:
-                            w.write(line)
-                            count += 1
-        return count
+    # Split buy/sell (corrected: sell uses is_buy_order=false)
+    buy_rows = [r for r in all_rows_global if r.get("is_buy_order") is True]
+    sell_rows = [r for r in all_rows_global if r.get("is_buy_order") is False]
 
-    log("phase=merge start")
-    rows_buy = merge_files("regions_w", "_final_buy_orders.jsonl") + merge_files("structs_w", "_final_buy_orders_append.jsonl")
-    # Merge two stage outputs into one stable name
-    # (We keep it simple: concatenate the appended file into final file, then remove appended)
-    final_buy = os.path.join(OUT_DIR, "buy_orders.jsonl")
-    tmp_buy_a = os.path.join(OUT_DIR, "_final_buy_orders.jsonl")
-    tmp_buy_b = os.path.join(OUT_DIR, "_final_buy_orders_append.jsonl")
-    with open(final_buy, "w", encoding="utf-8") as w:
-        if os.path.exists(tmp_buy_a):
-            w.write(open(tmp_buy_a, "r", encoding="utf-8").read())
-        if os.path.exists(tmp_buy_b):
-            w.write(open(tmp_buy_b, "r", encoding="utf-8").read())
+    # Write outputs (local files in OUT_DIR)
+    # (Mantengo NDJSON.GZ simple, sin BigQuery)
+    def write_ndjson_gz(path: str, rows: List[dict]) -> None:
+        with gzip.open(path, "wt", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    tmp_sell_a = os.path.join(OUT_DIR, "_final_sell_orders.jsonl")
-    tmp_sell_b = os.path.join(OUT_DIR, "_final_sell_orders_append.jsonl")
-    merge_files("regions_w", "_final_sell_orders.jsonl")
-    merge_files("structs_w", "_final_sell_orders_append.jsonl")
-    final_sell = os.path.join(OUT_DIR, "sell_orders.jsonl")
-    with open(final_sell, "w", encoding="utf-8") as w:
-        if os.path.exists(tmp_sell_a):
-            w.write(open(tmp_sell_a, "r", encoding="utf-8").read())
-        if os.path.exists(tmp_sell_b):
-            w.write(open(tmp_sell_b, "r", encoding="utf-8").read())
+    write_ndjson_gz(os.path.join(out_dir, "buy_orders.jsonl.gz"), buy_rows)
+    write_ndjson_gz(os.path.join(out_dir, "sell_orders.jsonl.gz"), sell_rows)
+    write_ndjson_gz(os.path.join(out_dir, "jita44_buy_orders.jsonl.gz"), jita_buy_global)
+    write_ndjson_gz(os.path.join(out_dir, "jita44_sell_orders.jsonl.gz"), jita_sell_global)
 
-    tmp_jb_a = os.path.join(OUT_DIR, "_final_jita_buy.jsonl")
-    tmp_jb_b = os.path.join(OUT_DIR, "_final_jita_buy_append.jsonl")
-    merge_files("regions_w", "_final_jita_buy.jsonl")
-    merge_files("structs_w", "_final_jita_buy_append.jsonl")
-    final_jb = os.path.join(OUT_DIR, "jita44_buy_orders.jsonl")
-    with open(final_jb, "w", encoding="utf-8") as w:
-        if os.path.exists(tmp_jb_a):
-            w.write(open(tmp_jb_a, "r", encoding="utf-8").read())
-        if os.path.exists(tmp_jb_b):
-            w.write(open(tmp_jb_b, "r", encoding="utf-8").read())
+    log(f"out buy_rows={len(buy_rows)} sell_rows={len(sell_rows)} jita_buy_rows={len(jita_buy_global)} jita_sell_rows={len(jita_sell_global)}")
 
-    tmp_js_a = os.path.join(OUT_DIR, "_final_jita_sell.jsonl")
-    tmp_js_b = os.path.join(OUT_DIR, "_final_jita_sell_append.jsonl")
-    merge_files("regions_w", "_final_jita_sell.jsonl")
-    merge_files("structs_w", "_final_jita_sell_append.jsonl")
-    final_js = os.path.join(OUT_DIR, "jita44_sell_orders.jsonl")
-    with open(final_js, "w", encoding="utf-8") as w:
-        if os.path.exists(tmp_js_a):
-            w.write(open(tmp_js_a, "r", encoding="utf-8").read())
-        if os.path.exists(tmp_js_b):
-            w.write(open(tmp_js_b, "r", encoding="utf-8").read())
+    # Build new cache entries:
+    stations_cache_entries: List[StationCacheEntry] = []
+    for rid, rname in regions_truth:
+        pages = pages_by_region_new.get(rid, 0)  # if missing due to errors, keep 0 (but region worker should fill)
+        stations_cache_entries.append(StationCacheEntry(regionID=rid, region=rname, pages=pages))
 
-    log("phase=merge end")
-
-    # Build and write pages cache JSON (ONLY if overall successful)
-    # - Regions: all from SDE
-    # - Structures: only those not ignored
-    stations_out = []
-    with observed_region_pages_lock:
-        obs_reg = dict(observed_region_pages)
-    for rid, rname in regions:
-        stations_out.append({"regionID": rid, "region": rname, "pages": int(obs_reg.get(rid, 0))})
-
-    with observed_struct_pages_lock:
-        obs_struct = dict(observed_struct_pages)
-    with ignored_structures_lock:
-        ignored = set(ignored_structures)
-
-    structures_out = []
-    for sid in structures_ids:
-        if sid in ignored:
+    structures_cache_entries: List[StructureCacheEntry] = []
+    for sid, sname in structures_truth:
+        if sid not in pages_by_struct_new:
+            # structure ignored -> do not include in cache
             continue
-        # If it was present but got 0 pages, keep it (means fetched and ended quickly).
-        structures_out.append({"stationID": sid, "station": structures_map.get(sid, ""), "pages": int(obs_struct.get(sid, 0))})
+        structures_cache_entries.append(StructureCacheEntry(stationID=sid, station=sname, pages=pages_by_struct_new[sid]))
 
-    cache_obj = {"stations": stations_out, "structures": structures_out}
+    # Recompute recommended MAX for next run
+    total_region_pages_new = sum(e.pages for e in stations_cache_entries)
+    total_struct_pages_new = sum(e.pages for e in structures_cache_entries)
 
-    os.makedirs(os.path.dirname(PAGES_CACHE_PATH) or ".", exist_ok=True)
-    tmp_cache = PAGES_CACHE_PATH + ".tmp"
-    with open(tmp_cache, "w", encoding="utf-8") as f:
-        json.dump(cache_obj, f, ensure_ascii=False, separators=(",", ":"))
-    os.replace(tmp_cache, PAGES_CACHE_PATH)
+    recommended_regions_max = compute_workers_needed(total_region_pages_new, regions_min, 9999, regions_target)
+    recommended_structs_max = compute_workers_needed(total_struct_pages_new, structs_min, 9999, structs_target)
 
-    # Print summary
-    log(
-        "summary "
-        f"regions_buy={reg_totals['buy']} regions_sell={reg_totals['sell']} "
-        f"regions_jita_buy={reg_totals['jita_buy']} regions_jita_sell={reg_totals['jita_sell']} "
-        f"structs_buy={struct_totals['buy']} structs_sell={struct_totals['sell']} "
-        f"structs_jita_buy={struct_totals['jita_buy']} structs_jita_sell={struct_totals['jita_sell']} "
-        f"remaining_auth_budget={auth_budget['remaining']}"
+    new_regions_max = slow_update_max(
+        current=cache.planner.REGIONS_WORKERS_MAX,
+        recommended=recommended_regions_max,
+        min_workers=regions_min,
+        other_current=cache.planner.STRUCTS_WORKERS_MAX,
+        global_sum_limit=GLOBAL_WORKERS_SUM_LIMIT,
     )
-    log(f"outputs_dir={OUT_DIR}")
-    log(f"pages_cache_written={PAGES_CACHE_PATH} ignored_structures_count={len(ignored)}")
+    new_structs_max = slow_update_max(
+        current=cache.planner.STRUCTS_WORKERS_MAX,
+        recommended=recommended_structs_max,
+        min_workers=structs_min,
+        other_current=new_regions_max,
+        global_sum_limit=GLOBAL_WORKERS_SUM_LIMIT,
+    )
 
-    # Outputs for Sheets finalize
-    if max_expires is None:
-        max_expires = utc_now()
-        max_last_modified = None
+    # enforce sum <= 13
+    if new_regions_max + new_structs_max > GLOBAL_WORKERS_SUM_LIMIT:
+        new_structs_max = max(structs_min * 2, GLOBAL_WORKERS_SUM_LIMIT - new_regions_max)
 
-    max_expires_epoch = int(max_expires.timestamp())
-    max_last_modified_epoch = int(max_last_modified.timestamp()) if max_last_modified else 0
+    new_cache = PagesCache(
+        planner=CachePlanner(REGIONS_WORKERS_MAX=new_regions_max, STRUCTS_WORKERS_MAX=new_structs_max),
+        stations=stations_cache_entries,
+        structures=structures_cache_entries,
+    )
 
-    print(f"max_expires_epoch={max_expires_epoch}")
-    print(f"max_last_modified_epoch={max_last_modified_epoch}")
+    # Only if successful: overwrite full cache pretty
+    write_pages_cache_pretty_atomic(pages_cache_path, new_cache)
+    log(f"cache_written path={pages_cache_path} regions_max={new_regions_max} structs_max={new_structs_max}")
+
+    # Export for workflow finalize
+    log(f"max_expires_epoch={max_expires_epoch}")
+    log(f"max_last_modified_epoch={max_last_modified_epoch}")
 
     return 0
 
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        sys.exit(main())
+    except Exception as e:
+        log(f"FATAL {e}")
+        raise
