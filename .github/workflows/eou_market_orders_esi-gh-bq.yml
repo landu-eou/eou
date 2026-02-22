@@ -1,4 +1,4 @@
-name: ESI Market Orders (ESI → GH Artifact + Pages Cache)
+name: ESI Market Orders (ESI → GH)
 
 on:
   workflow_dispatch:
@@ -14,18 +14,18 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
 
     env:
       WORKFLOW_FILE: eou_market_orders_esi-gh-bq.yml
 
-      # Sheets
+      # Sheets orchestration
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "11"
       LOCK_TIME: "180"
 
-      # Tokens (igual que ESI Structures)
+      # Tokens policy (EXACT like ESI Structures)
       PRIMARY_CHAR_ID: "2124070822"
       RETRY_BUDGET: "3"
 
@@ -33,38 +33,40 @@ jobs:
       ESI_BASE_URL: https://esi.evetech.net
       ESI_DATASOURCE: tranquility
 
-      # Inputs
-      STRUCTURES_FILE: data/esi/structures.jsonl.gz
-      JITA44_LOCATION_ID: "60003760"
+      # Worker sizing (dynamic within min/max)
+      REGIONS_WORKERS_MIN: "2"
+      REGIONS_WORKERS_MAX: "6"
+      REGIONS_TARGET_PAGES_PER_WORKER: "220"
 
+      STRUCTS_WORKERS_MIN: "1"
+      STRUCTS_WORKERS_MAX: "3"
+      STRUCTS_TARGET_PAGES_PER_WORKER: "60"
+
+      # Inputs (source of truth)
+      SDE_REGIONS_PATH: data/sde/regions.jsonl.gz
       SDE_TYPES_PATH: data/sde/types.jsonl.gz
       SDE_EXCLUDED_TYPES_PATH: data/sde/excludedMarketTypes.jsonl.gz
       SDE_STATIONS_PATH: data/sde/stations.jsonl.gz
       SDE_SOLARSYSTEMS_PATH: data/sde/solarsystems.jsonl.gz
-      SDE_REGIONS_PATH: data/sde/regions.jsonl.gz
+      STRUCTURES_FILE: data/esi/structures.jsonl.gz
 
-      # Cache pages (repo)
+      # Jita44
+      JITA44_LOCATION_ID: "60003760"
+
+      # Cache pages
       PAGES_CACHE_PATH: states/market_orders_pages.json
 
-      # Out dir (runner local)
+      # Output
       OUT_DIR: .tmp_eou_market_orders
-
-      # Workers (dinámicos dentro de rango)
-      REGIONS_WORKERS_MIN: "2"
-      REGIONS_WORKERS_MAX: "6"
-      STRUCTS_WORKERS_MIN: "1"
-      STRUCTS_WORKERS_MAX: "3"
-      TARGET_PAGES_PER_WORKER_REGIONS: "250"
-      TARGET_PAGES_PER_WORKER_STRUCTS: "120"
-
-      # Artifact final (único)
-      ARTIFACT_RETENTION_DAYS: "1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+
+      - name: Anti-queue guard (exit if another run is in progress)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/esi/eou_market_orders_esi-gh-bq_guard.sh
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -77,56 +79,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements/esi/eou_market_orders_esi-gh-bq_requirements.txt
 
-      # ----------------------------------------------------------------------
-      # Guard anti-colas: si hay otro run in_progress del mismo workflow → salir
-      # ----------------------------------------------------------------------
-      - name: Guard (exit if another run is in progress)
-        id: guard
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          WORKFLOW_FILE: ${{ env.WORKFLOW_FILE }}
-        run: |
-          set -euo pipefail
-
-          api="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs?status=in_progress&per_page=50"
-          json="$(curl -fsSL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "$api")"
-
-          # cuenta runs in_progress excluyendo este RUN_ID
-          other_count="$(echo "$json" | jq --arg rid "$RUN_ID" '
-            (.workflow_runs // [])
-            | map(select((.id|tostring) != $rid))
-            | length
-          ')"
-
-          if [ "$other_count" -gt 0 ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Guard: another run in progress ($other_count). Exiting without work."
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "Guard: no other run in progress."
-          fi
-
-      # ----------------------------------------------------------------------
-      # Inicial: status=in progress y next_run=now + LOCK_TIME
-      # ----------------------------------------------------------------------
-      - name: Set Sheets status=in progress (initial)
-        if: steps.guard.outputs.skip == 'false'
+      - name: Sheets init (status=in progress, next_run=now+LOCK_TIME)
         env:
           GOOGLE_SHEETS_ACCESS_TOKEN: ${{ secrets.GOOGLE_SHEETS_ACCESS_TOKEN }}
         run: |
           set -euo pipefail
-          python scripts/esi/eou_market_orders_esi-gh-bq_run.py --sheets-initial
+          python scripts/esi/eou_market_orders_esi-gh-bq_sheets.py init
 
-      # ----------------------------------------------------------------------
-      # Run principal
-      # ----------------------------------------------------------------------
-      - name: Run ESI market orders (single-job workers)
-        if: steps.guard.outputs.skip == 'false'
+      - name: Run (ESI ingest → local outputs + pages cache temp)
         id: run
         env:
           GOOGLE_SHEETS_ACCESS_TOKEN: ${{ secrets.GOOGLE_SHEETS_ACCESS_TOKEN }}
@@ -134,53 +94,37 @@ jobs:
           EOU_ACCESS_TOKENS_2: ${{ secrets.EOU_ACCESS_TOKENS_2 }}
         run: |
           set -euo pipefail
-
           python scripts/esi/eou_market_orders_esi-gh-bq_run.py | tee /tmp/objective_out.txt
+          grep -E '^(max_expires_epoch|max_last_modified_epoch)=' /tmp/objective_out.txt >> "$GITHUB_OUTPUT" || true
 
-          # outputs para finalize
-          grep -E '^(max_expires_epoch|max_last_modified_epoch|run_completed)=' /tmp/objective_out.txt >> "$GITHUB_OUTPUT" || true
-
-      # Artifact final único (si completed)
-      - name: Upload artifact (final output)
-        if: steps.guard.outputs.skip == 'false' && steps.run.outputs.run_completed == '1'
-        uses: actions/upload-artifact@v4
-        with:
-          name: eou_market_orders_output
-          path: .tmp_eou_market_orders/final_outputs/**
-          retention-days: 1
-
-      # Commit del cache pages (si completed)
-      - name: Commit pages cache
-        if: steps.guard.outputs.skip == 'false' && steps.run.outputs.run_completed == '1'
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add states/market_orders_pages.json || true
-
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
-
-          git commit -m "Update market orders pages cache"
-          git push
-
-      # ----------------------------------------------------------------------
-      # Finalize: status completed/failed, next_run, last_modified
-      # ----------------------------------------------------------------------
-      - name: Finalize Sheets (completed/failed)
-        if: steps.guard.outputs.skip == 'false'
+      - name: Sheets finalize (status=completed, next_run=max(Expires)+5m, last_modified)
+        if: success()
         env:
           GOOGLE_SHEETS_ACCESS_TOKEN: ${{ secrets.GOOGLE_SHEETS_ACCESS_TOKEN }}
           MAX_EXPIRES_EPOCH: ${{ steps.run.outputs.max_expires_epoch }}
           MAX_LAST_MODIFIED_EPOCH: ${{ steps.run.outputs.max_last_modified_epoch }}
-          RUN_COMPLETED: ${{ steps.run.outputs.run_completed }}
         run: |
           set -euo pipefail
-          python scripts/esi/eou_market_orders_esi-gh-bq_run.py --sheets-finalize
+          python scripts/esi/eou_market_orders_esi-gh-bq_sheets.py finalize
 
-      - name: Done (guarded run skipped)
-        if: steps.guard.outputs.skip == 'true'
-        run: echo "Skipped due to concurrency guard."
+      - name: Commit pages cache (only on success)
+        if: success()
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${PAGES_CACHE_PATH}" || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "EOU: update market orders pages cache"
+          git push
+
+      - name: Sheets fail (status=failed, next_run=now+5m)
+        if: failure()
+        env:
+          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ secrets.GOOGLE_SHEETS_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          python scripts/esi/eou_market_orders_esi-gh-bq_sheets.py fail
