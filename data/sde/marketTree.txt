@@ -4749,47 +4749,20 @@ Market
 │   │   │       └── 📦 Agency 'Pyrolancea' DB9 Dose IV
 │   │   ├── 📁 Booster Slot 12
 │   │   ├── 📁 Booster Slot 14
-│   │   │   ├── 📦 Strong Veilguard Booster
-│   │   │   ├── 📦 Wightstorm Sunyata Booster I
-│   │   │   ├── 📦 Wightstorm Sunyata Booster II
-│   │   │   ├── 📦 Wightstorm Sunyata Booster III
-│   │   │   └── 📦 Wightstorm Sunyata Booster IV
+│   │   │   └── 📦 Strong Veilguard Booster
 │   │   ├── 📁 Booster Slot 15
-│   │   │   ├── 📦 Wightstorm Nirvana Booster I
-│   │   │   ├── 📦 Wightstorm Nirvana Booster II
-│   │   │   ├── 📦 Wightstorm Nirvana Booster III
-│   │   │   ├── 📦 Wightstorm Nirvana Booster IV
-│   │   │   ├── 📦 Wightstorm Rapture Booster I
-│   │   │   ├── 📦 Wightstorm Rapture Booster II
-│   │   │   ├── 📦 Wightstorm Rapture Booster III
-│   │   │   └── 📦 Wightstorm Rapture Booster IV
 │   │   ├── 📁 Booster Slot 16
-│   │   │   ├── 📦 Wightstorm Cetana Booster I
-│   │   │   ├── 📦 Wightstorm Cetana Booster II
-│   │   │   ├── 📦 Wightstorm Cetana Booster III
-│   │   │   └── 📦 Wightstorm Cetana Booster IV
 │   │   ├── 📁 Booster Slot 17
 │   │   │   ├── 📦 Expired Aegytica Volatile Booster
 │   │   │   ├── 📦 Expired Balneum Volatile Booster
 │   │   │   ├── 📦 Expired Mithridate Volatile Booster
 │   │   │   ├── 📦 Expired Theriac Volatile Booster
-│   │   │   ├── 📦 Expired Vis Vitalis Volatile Booster
-│   │   │   ├── 📦 Wightstorm Manasikara Booster I
-│   │   │   ├── 📦 Wightstorm Manasikara Booster II
-│   │   │   ├── 📦 Wightstorm Manasikara Booster III
-│   │   │   ├── 📦 Wightstorm Manasikara Booster IV
-│   │   │   ├── 📦 Wightstorm Vitarka Booster I
-│   │   │   ├── 📦 Wightstorm Vitarka Booster II
-│   │   │   ├── 📦 Wightstorm Vitarka Booster III
-│   │   │   └── 📦 Wightstorm Vitarka Booster IV
+│   │   │   └── 📦 Expired Vis Vitalis Volatile Booster
 │   │   └── 📁 Clone Mappers
 │   │       └── 📦 Nanoheuristic Clone Mapper
 │   ├── 📁 Cerebral Accelerators
-│   │   ├── 📦 Basic 'Brainfreeze' Cerebral Accelerator
 │   │   ├── 📦 Expert Cerebral Accelerator
-│   │   ├── 📦 Extended 'Brainfreeze' Cerebral Accelerator
-│   │   ├── 📦 Master-at-Arms Cerebral Accelerator
-│   │   └── 📦 Potent 'Brainfreeze' Cerebral Accelerator
+│   │   └── 📦 Master-at-Arms Cerebral Accelerator
 │   └── 📁 Implants
 │       ├── 📁 Attribute Enhancers
 │       │   ├── 📁 Implant Slot 01
@@ -19022,8 +18995,6 @@ Market
 │   │   │       ├── 📦 Rare Icebound Salvage
 │   │   │       ├── 📦 Tranquil Abyssal Filaments Crate
 │   │   │       ├── 📦 Unusual Icebound Salvage
-│   │   │       ├── 📦 Yoiul Festival Booster Crate
-│   │   │       ├── 📦 Yoiul Festival Brainfreeze Crate
 │   │   │       ├── 📦 Yoiul Festival Fireworks Package
 │   │   │       ├── 📦 Yoiul Festival YC120 Coin (Amarr)
 │   │   │       ├── 📦 Yoiul Festival YC120 Coin (Caldari)
