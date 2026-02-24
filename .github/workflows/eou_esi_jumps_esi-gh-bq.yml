@@ -1,16 +1,54 @@
+# FILE TREE — ESI System Jumps (ESI → GH → BQ)
+# Propósito:
+#   - Leer ETag local (states/system_jumps.json)
+#   - Consultar ESI (headers + body si aplica)
+#   - Mapear system_id -> solarSystem con SDE (data/sde/solarsystems.jsonl.gz)
+#   - Cargar en BigQuery (1 batch NDJSON)
+#   - Actualizar state (commit) y registrar status/next_run/last_modified en Google Sheets
 #
+# REPO (persistente, versionado)
 # .
 # ├── .github/
 # │   └── workflows/
-# │      └── eou_esi_jumps_esi-gh-bq.yml
+# │       └── eou_esi_jumps_esi-gh-bq.yml
 # │
 # ├── data/
 # │   └── sde/
-# │      └── solarsystems.jsonl.gz
+# │       └── solarsystems.jsonl.gz
+# │           └─ (JSONL gz; cada línea contiene como mínimo:)
+# │              {"solarSystemID":30000001,"solarSystem":"Tanoo",...}
 # │
 # ├── states/
 # │   └── system_jumps.json
+# │       └─ Estructura:
+# │          { "etag": "<string|null>" }
+# │
+# └── (sin scripts extra; todo se ejecuta inline en el workflow)
 #
+# RUNTIME (runner; efímero; NO se commitea; NO artifacts)
+# (se crean en el workspace durante el job y se destruyen al finalizar)
+#
+# .
+# ├── esi_headers.tmp              # mktemp: cabeceras HTTP devueltas por ESI (ETag/Last-Modified/Expires)
+# ├── esi_body.json                # body completo de ESI /universe/system_jumps (solo si mode != noop)
+# ├── sde_map.json                 # mapa derivado de solarsystems.jsonl.gz:
+# │                                 #   { "30000001": "Tanoo", ... }
+# ├── existing_map.json            # solo mode=reconcile:
+# │                                 #   { "Jita": true, "Amarr": true, ... } para snapshot_ts concreto
+# ├── load.ndjson                  # NDJSON final a cargar en BQ (0..N líneas)
+# │                                 #   {"snapshot_ts":"...Z","solarSystem":"...","ship_jumps":123}
+# ├── schema.json                  # schema JSON temporal para bq load
+# └── jq_error.log                 # stderr de jq si falla la construcción de NDJSON (diagnóstico)
+#
+# EXTERNOS (servicios; no son archivos, pero forman parte del “árbol operativo”)
+# - ESI: https://esi.evetech.net/universe/system_jumps
+# - Google Sheets: spreadsheets.values.batchUpdate (tab: workflows; row: SHEETS_WORKFLOW_ROW)
+# - BigQuery: ${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE} (tabla particionada + cluster)
+#
+# SECRETOS (GitHub Actions Secrets; no se escriben a disco)
+# - GCP_PROJECT_ID
+# - WIF_PROVIDER
+# - WIF_SERVICE_ACCOUNT
 
 name: ESI System Jumps (ESI → GH → BQ)
 
