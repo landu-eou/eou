@@ -652,3 +652,4 @@
 {"killID":133619155,"zkb":{"hash":"68d18cd42af4e8c34873ca6a2a43549780ffe589","locationID":50002590,"labels":["tz:ru","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133619156,"zkb":{"hash":"b05e0659e12e31b09d62f2576bda1ad10a4f75a3","locationID":50001041,"labels":["tz:ru","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133619158,"zkb":{"hash":"a5682f6be95e2c7928bee865544a692bfcf9dead","locationID":50013498,"labels":["tz:ru","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133619161,"zkb":{"hash":"884ecb3a57451207b39edda5d12fa484cfa62268","locationID":50012091,"labels":["tz:ru","cat:6","solo","pvp","loc:lowsec","fw:minmatar","fw:amamin"]},"rearm":0}
