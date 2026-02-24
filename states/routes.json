@@ -1,8 +1,8 @@
 {
   "etag": {
     "data/sde/ganksystems.txt": "82f9de258bf917699244a31222e1f51eb064f16a01b1b440a5a4d119edabc0ae",
-    "data/sde/solarsystems.jsonl.gz": "da5ef60f13f4b7b6575a8ef11ba8f503cd46bb9c79717a74e35b06f247181cef",
-    "data/sde/stargates.jsonl.gz": "35c6972b124061726aa0b6d8bfdc3bc7b2fe1b9e8a3bd0c14d8382a387b3e8a4",
-    "data/sde/stations.jsonl.gz": "995fe14879b29c2358cf8fabc15b516d180936db2244e6d5b79af863f43cefe6"
+    "data/sde/solarsystems.jsonl.gz": "c16a48bc4fdc37ee686ea7e2d274dfef9b951626a012572ee132cc16473a241f",
+    "data/sde/stargates.jsonl.gz": "fb72870cfcf5e176b011867ab697aa74d9c6a8ee120a99e5d87da3eac8b9ec7c",
+    "data/sde/stations.jsonl.gz": "3bfa0be17891e0ac9d52921c10806867f494cd8d7e65a78d55e5ac6f620dc611"
   }
 }
