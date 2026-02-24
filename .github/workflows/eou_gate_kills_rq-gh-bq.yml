@@ -4,14 +4,6 @@
 # │   └── workflows/
 # │       └── eou_gate_kills_rq-gh-bq.yml
 # │
-# ├── data/
-# │   ├── rq/
-# │   │   └── raw_kills.jsonl                # Cola duradera (NDJSON, append + rewrite por enrich)
-# │   │
-# │   └── sde/
-# │       ├── stargates.jsonl.gz             # Mapa stargateID → (stargate, group, solarSystem)
-# │       └── types.jsonl.gz                 # typeID → (group, category, is_gategank)
-# │
 # ├── scripts/
 # │   └── rq/
 # │       ├── eou_gate_kills_poll.py         # RedisQ poller → filtra + flush a raw_kills.jsonl
@@ -20,14 +12,14 @@
 # │       ├── eou_gate_kills_sheets_write.py # Sheets status/next_run/last_modified
 # │       └── eou_gate_kills_ship_class.py   # Mapeo category/group → ship_class
 # │
-# └── (temporal en runtime)
-#     ├── /tmp/gate_kills_batch.ndjson
-#     ├── /tmp/gate_kills_enrich_pending.ndjson
-#     ├── /tmp/gate_kills_enrich_post_poll.ndjson
-#     ├── /tmp/gate_kills_to_load.ndjson
-#     └── /tmp/gate_kills_schema.json
+# ├── data/
+#     ├── rq/
+#     │   └── raw_kills.jsonl                # Cola duradera (NDJSON, append + rewrite por enrich)
+#     │
+#     └── sde/
+#         ├── stargates.jsonl.gz             # Mapa stargateID → (stargate, group, solarSystem)
+#         └── types.jsonl.gz                 # typeID → (group, category, is_gategank)
 #
-
 
 name: RQ Gate Kills (RQ → GH → BQ)
 
