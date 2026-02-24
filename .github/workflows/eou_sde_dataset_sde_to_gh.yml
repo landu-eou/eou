@@ -1,3 +1,41 @@
+# FILE TREE — SDE Dataset (SDE → GH)
+# (Workflow YAMLs deben vivir en .github/workflows según GitHub) :contentReference[oaicite:0]{index=0}
+#
+# .
+# ├── .github/
+# │   └── workflows/
+# │       └── eou_sde_dataset_sde_to_gh.yml            # SDE Dataset (SDE → GH) · workflow_dispatch + guard + sheets + commit
+# │
+# ├── scripts/
+# │   └── sde/
+# │       ├── eou_sde_dataset_sde_to_gh_outputs.py     # Builder principal: lee ZIP SDE → genera datasets (JSONL.GZ)
+# │       ├── eou_sde_dataset_sde_to_gh_io.py          # Helpers I/O: leer JSONL en ZIP, read/write .jsonl.gz, sha256, env parsing
+# │       ├── eou_sde_dataset_sde_to_gh_names.py       # Helpers de nombres: planet/moon orbit naming (Roman numerals, etc.)
+# │       └── eou_sde_dataset_sde_to_gh_cynodock.py    # Reglas user-editable: cynoDockSecurity/cynoJumpSecurity (hardcoded map)
+# │
+# ├── data/
+# │   ├── sde/
+# │   │   ├── regions.jsonl.gz                         # Output: {"regionID":...,"region":...}
+# │   │   ├── constellations.jsonl.gz                  # Output: {"constellationID":...,"constellation":...,"region":...}
+# │   │   ├── solarsystems.jsonl.gz                    # Output: {"solarSystemID":...,"solarSystem":...,"constellation":...,"region":...,...}
+# │   │   ├── stations.jsonl.gz                        # Output: {"stationID":...,"station":...,"solarSystem":...,...}
+# │   │   ├── stargates.jsonl.gz                       # Output: {"stargateID":...,"stargate":...,"stargateGroup":...,"solarSystem":...,...}
+# │   │   ├── types.jsonl.gz                           # Output: {"typeID":...,"type":...,"is_contraband":...,"is_gategank":...,...}
+# │   │   ├── corporations.jsonl.gz                    # (Actual) Dataset derivado: NPC corporations
+# │   │   ├── marketTree.jsonl.gz                      # (Actual) Dataset derivado: marketTree → lista de types
+# │   │   ├── excludedMarketTypes.jsonl.gz             # (Actual) Dataset derivado: types excluidos por config
+# │   │   └── marketTree.txt                           # (Actual) Árbol textual del market tree (con iconos)
+# │   │
+# │   └── esi/
+# │       └── packaged.jsonl.gz                        # (Actual) Excepciones de packaged volume (si aplica)
+# │
+# ├── states/
+# │   ├── sde.json                                     # Estado: {"etag":"..."} del ZIP SDE (header ETag)
+# │   └── excludeMarketTypes.json                      # (Actual) Estado: etag/sha de config de exclusiones (si aplica)
+# │
+# └── config/
+#     └── excludeMarketTypes.txt                       # (Actual) Reglas de exclusión para excludedMarketTypes (si aplica)
+
 name: SDE Dataset (SDE → GH)
 
 on:
