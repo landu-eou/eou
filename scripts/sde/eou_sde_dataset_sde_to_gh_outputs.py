@@ -36,6 +36,11 @@ marketTree.txt icons:
 
 excludedMarketTypes.jsonl.gz (UPDATED):
   - {"typeID":..., "type":..., "marketTree":...}
+
+stargates.jsonl.gz (UPDATED):
+  - adds "stargateDistance": null | list[{"stargate": "...", "distanceAU": double}]
+    * computed against other stargates in same solar system (excluding itself)
+    * if only one stargate in the system => null
 """
 
 from __future__ import annotations
@@ -43,6 +48,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 import json
+import math
 import re
 import sys
 import time
@@ -67,6 +73,8 @@ from eou_sde_dataset_sde_to_gh_io import (  # noqa: E402
 )
 from eou_sde_dataset_sde_to_gh_names import moon_name, planet_name, safe_en_name  # noqa: E402
 from eou_sde_dataset_sde_to_gh_cynodock import station_cyno, system_cyno  # noqa: E402
+
+AU_METERS = 149_597_870_700.0
 
 
 # -----------------------------
@@ -479,21 +487,91 @@ def build_corporations_out(corps: Dict[int, str]) -> List[Dict]:
     return rows
 
 
+def _dist_au(p1: Tuple[float, float, float], p2: Tuple[float, float, float]) -> float:
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    dz = p2[2] - p1[2]
+    meters = math.sqrt(dx * dx + dy * dy + dz * dz)
+    return meters / AU_METERS
+
+
 def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Dict]) -> List[Dict]:
-    rows: List[Dict] = []
+    """
+    stargates.jsonl.gz:
+      - stargateID
+      - stargate           "<srcSystemName> → <dstSystemName>"
+      - stargateGroup      "<minSystemIDName> ↔ <maxSystemIDName>" by systemID
+      - solarSystem        source solar system name
+      - stargateDistance   null if only 1 gate in system else list of other gates in same system:
+                           [{"stargate": "<src → otherDst>", "distanceAU": <double>}...]
+                           where distanceAU is computed from positions of the gates within the system.
+    """
+    # First pass: parse all gates, keep position and grouping by source system.
+    gates: List[Dict] = []
+    by_system: Dict[int, List[Dict]] = defaultdict(list)
+
+    parsed = 0
     for obj in iter_jsonl_from_zip(zf, "mapStargates.jsonl"):
+        parsed += 1
+        if parsed % 20000 == 0:
+            log(f"[STARGATES] parsed {parsed}")
+
         gid = int(obj["_key"])
         src_id = int(obj["solarSystemID"])
-        dst = obj.get("destination") or {}
-        dst_id = int(dst["solarSystemID"])
-        src = systems.get(src_id, {"name": str(src_id)})["name"]
-        dstn = systems.get(dst_id, {"name": str(dst_id)})["name"]
+        dest = obj.get("destination") or {}
+        dst_id = int(dest["solarSystemID"])
+
+        src_name = systems.get(src_id, {"name": str(src_id)})["name"]
+        dst_name = systems.get(dst_id, {"name": str(dst_id)})["name"]
+
         lo_id, hi_id = (src_id, dst_id) if src_id <= dst_id else (dst_id, src_id)
-        lo = systems.get(lo_id, {"name": str(lo_id)})["name"]
-        hi = systems.get(hi_id, {"name": str(hi_id)})["name"]
-        rows.append({"stargateID": gid, "stargate": f"{src} → {dstn}", "stargateGroup": f"{lo} ↔ {hi}", "solarSystem": src})
-    rows.sort(key=lambda r: r["stargateID"])
-    return rows
+        lo_name = systems.get(lo_id, {"name": str(lo_id)})["name"]
+        hi_name = systems.get(hi_id, {"name": str(hi_id)})["name"]
+
+        pos = obj.get("position") or {}
+        p = (float(pos.get("x", 0.0)), float(pos.get("y", 0.0)), float(pos.get("z", 0.0)))
+
+        stargate_str = f"{src_name} → {dst_name}"
+        group_str = f"{lo_name} ↔ {hi_name}"
+
+        rec = {
+            "stargateID": gid,
+            "stargate": stargate_str,
+            "stargateGroup": group_str,
+            "solarSystem": src_name,
+            "_srcSystemID": src_id,
+            "_pos": p,
+        }
+        gates.append(rec)
+        by_system[src_id].append(rec)
+
+    # Second pass: compute distances within each system
+    for sid, lst in by_system.items():
+        if len(lst) <= 1:
+            lst[0]["stargateDistance"] = None
+            continue
+
+        for g in lst:
+            p0 = g["_pos"]
+            distances: List[Dict] = []
+            for h in lst:
+                if h is g:
+                    continue  # exclude itself (distance 0)
+                au = _dist_au(p0, h["_pos"])
+                # keep numeric double; rounding is not required by spec
+                distances.append({"stargate": h["stargate"], "distanceAU": au})
+
+            # Deterministic order: by distance asc, then stargateID asc
+            distances.sort(key=lambda r: (float(r["distanceAU"]), str(r["stargate"])))
+            g["stargateDistance"] = distances
+
+    # Cleanup internal fields + final sort
+    for r in gates:
+        r.pop("_srcSystemID", None)
+        r.pop("_pos", None)
+
+    gates.sort(key=lambda r: r["stargateID"])
+    return gates
 
 
 def market_tree_string(mgid: Optional[int], mg_map: Dict[int, Tuple[str, Optional[int]]]) -> Optional[str]:
@@ -632,15 +710,6 @@ def build_excluded_market_types(
     types_rows: List[Dict],
     market_tree_rows: List[Dict],
 ) -> List[Dict]:
-    """
-    Builds excludedMarketTypes.jsonl.gz (UPDATED SCHEMA):
-      {"typeID":..., "type":..., "marketTree":...}
-
-    Rule:
-      - "Market → A → B"           => exact match only
-      - "Market → A → B → ..."     => exact + descendants prefixed by "Market → A → B → "
-      - Non "Market → ..." line: exact type match against types_rows[].type
-    """
     # typeName -> (typeID, marketTree)
     type_index: Dict[str, Tuple[int, Optional[str]]] = {}
     for r in types_rows:
@@ -684,12 +753,10 @@ def build_excluded_market_types(
                         out.append({"typeID": tid, "type": tname, "marketTree": mtree})
 
         else:
-            # exact type match
             if line in type_index:
                 tid, mtree = type_index[line]
                 out.append({"typeID": tid, "type": line, "marketTree": mtree})
 
-    # De-dup by typeID (stable) + deterministic sort
     uniq: Dict[int, Dict] = {}
     for r in out:
         uniq[int(r["typeID"])] = r
