@@ -34,13 +34,20 @@ marketTree.txt icons:
   - types: ☠️ if contraband else 📦
   - no other icons
 
-excludedMarketTypes.jsonl.gz (UPDATED):
+excludedMarketTypes.jsonl.gz:
   - {"typeID":..., "type":..., "marketTree":...}
 
-stargates.jsonl.gz (UPDATED):
+stargates.jsonl.gz:
   - adds "stargateDistance": null | list[{"stargate": "...", "distanceAU": double}]
     * computed against other stargates in same solar system (excluding itself)
     * if only one stargate in the system => null
+    * stargateDistance must be ordered asc by distanceAU
+
+stations.jsonl.gz:
+  - adds "stargateDistance": null | list[{"stargate": "...", "distanceAU": double}]
+    * computed from station position to every stargate in same solar system
+    * if no stargates in the system => null
+    * must be ordered asc by distanceAU
 """
 
 from __future__ import annotations
@@ -95,16 +102,6 @@ def _get_int(obj: Dict, *keys: str) -> Optional[int]:
     return None
 
 
-def _get_float(obj: Dict, *keys: str) -> Optional[float]:
-    for k in keys:
-        if k in obj and obj[k] is not None:
-            try:
-                return float(obj[k])
-            except Exception:
-                return None
-    return None
-
-
 def _get_bool(obj: Dict, *keys: str, default: bool = False) -> bool:
     for k in keys:
         if k in obj:
@@ -114,6 +111,14 @@ def _get_bool(obj: Dict, *keys: str, default: bool = False) -> bool:
 
 def _sleep_ms(ms: int) -> None:
     time.sleep(max(0, ms) / 1000.0)
+
+
+def _dist_au(p1: Tuple[float, float, float], p2: Tuple[float, float, float]) -> float:
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    dz = p2[2] - p1[2]
+    meters = math.sqrt(dx * dx + dy * dy + dz * dz)
+    return meters / AU_METERS
 
 
 # -----------------------------
@@ -464,51 +469,21 @@ def read_published_types_base(zf: zipfile.ZipFile) -> Dict[int, Dict]:
 
 
 # -----------------------------
-# builders
+# Stargates: parse once, reuse for stargates.jsonl.gz and stations.jsonl.gz
 # -----------------------------
 
-def build_regions_out(regions: Dict[int, str]) -> List[Dict]:
-    rows = [{"regionID": rid, "region": nm} for rid, nm in regions.items()]
-    rows.sort(key=lambda r: r["regionID"])
-    return rows
-
-
-def build_constellations_out(consts: Dict[int, Tuple[str, int]], regions: Dict[int, str]) -> List[Dict]:
-    rows: List[Dict] = []
-    for cid, (cname, rid) in consts.items():
-        rows.append({"constellationID": cid, "constellation": cname, "region": regions.get(rid, str(rid))})
-    rows.sort(key=lambda r: r["constellationID"])
-    return rows
-
-
-def build_corporations_out(corps: Dict[int, str]) -> List[Dict]:
-    rows = [{"corporationID": cid, "corporation": nm} for cid, nm in corps.items()]
-    rows.sort(key=lambda r: r["corporationID"])
-    return rows
-
-
-def _dist_au(p1: Tuple[float, float, float], p2: Tuple[float, float, float]) -> float:
-    dx = p2[0] - p1[0]
-    dy = p2[1] - p1[1]
-    dz = p2[2] - p1[2]
-    meters = math.sqrt(dx * dx + dy * dy + dz * dz)
-    return meters / AU_METERS
-
-
-def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Dict]) -> List[Dict]:
+def parse_stargates_index(
+    zf: zipfile.ZipFile,
+    systems: Dict[int, Dict],
+) -> Tuple[List[Dict], Dict[int, List[Dict]]]:
     """
-    stargates.jsonl.gz:
-      - stargateID
-      - stargate           "<srcSystemName> → <dstSystemName>"
-      - stargateGroup      "<minSystemIDName> ↔ <maxSystemIDName>" by systemID
-      - solarSystem        source solar system name
-      - stargateDistance   null if only 1 gate in system else list of other gates in same system:
-                           [{"stargate": "<src → otherDst>", "distanceAU": <double>}...]
-                           where distanceAU is computed from positions of the gates within the system.
+    Returns:
+      - gates_all: list of gate dicts with:
+          stargateID, stargate, stargateGroup, solarSystem, _srcSystemID, _pos
+      - gates_by_system: srcSystemID -> list of those gate dicts
     """
-    # First pass: parse all gates, keep position and grouping by source system.
-    gates: List[Dict] = []
-    by_system: Dict[int, List[Dict]] = defaultdict(list)
+    gates_all: List[Dict] = []
+    gates_by_system: Dict[int, List[Dict]] = defaultdict(list)
 
     parsed = 0
     for obj in iter_jsonl_from_zip(zf, "mapStargates.jsonl"):
@@ -542,11 +517,22 @@ def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Dict]) -> List[D
             "_srcSystemID": src_id,
             "_pos": p,
         }
-        gates.append(rec)
-        by_system[src_id].append(rec)
+        gates_all.append(rec)
+        gates_by_system[src_id].append(rec)
 
-    # Second pass: compute distances within each system
-    for sid, lst in by_system.items():
+    return gates_all, dict(gates_by_system)
+
+
+def build_stargates_out_from_index(
+    gates_all: List[Dict],
+    gates_by_system: Dict[int, List[Dict]],
+) -> List[Dict]:
+    """
+    Adds stargateDistance ordered by distanceAU asc for each gate:
+      - null if only 1 gate in system
+      - list of other gates in same system excluding itself
+    """
+    for sid, lst in gates_by_system.items():
         if len(lst) <= 1:
             lst[0]["stargateDistance"] = None
             continue
@@ -556,22 +542,47 @@ def build_stargates_out(zf: zipfile.ZipFile, systems: Dict[int, Dict]) -> List[D
             distances: List[Dict] = []
             for h in lst:
                 if h is g:
-                    continue  # exclude itself (distance 0)
+                    continue
                 au = _dist_au(p0, h["_pos"])
-                # keep numeric double; rounding is not required by spec
                 distances.append({"stargate": h["stargate"], "distanceAU": au})
 
-            # Deterministic order: by distance asc, then stargateID asc
+            # REQUIRED: order asc by distanceAU. Deterministic tie-breaker by stargate string.
             distances.sort(key=lambda r: (float(r["distanceAU"]), str(r["stargate"])))
             g["stargateDistance"] = distances
 
-    # Cleanup internal fields + final sort
-    for r in gates:
-        r.pop("_srcSystemID", None)
-        r.pop("_pos", None)
+    out: List[Dict] = []
+    for r in gates_all:
+        row = dict(r)
+        row.pop("_srcSystemID", None)
+        row.pop("_pos", None)
+        out.append(row)
 
-    gates.sort(key=lambda r: r["stargateID"])
-    return gates
+    out.sort(key=lambda r: r["stargateID"])
+    return out
+
+
+# -----------------------------
+# builders
+# -----------------------------
+
+def build_regions_out(regions: Dict[int, str]) -> List[Dict]:
+    rows = [{"regionID": rid, "region": nm} for rid, nm in regions.items()]
+    rows.sort(key=lambda r: r["regionID"])
+    return rows
+
+
+def build_constellations_out(consts: Dict[int, Tuple[str, int]], regions: Dict[int, str]) -> List[Dict]:
+    rows: List[Dict] = []
+    for cid, (cname, rid) in consts.items():
+        rows.append({"constellationID": cid, "constellation": cname, "region": regions.get(rid, str(rid))})
+    rows.sort(key=lambda r: r["constellationID"])
+    return rows
+
+
+def build_corporations_out(corps: Dict[int, str]) -> List[Dict]:
+    rows = [{"corporationID": cid, "corporation": nm} for cid, nm in corps.items()]
+    rows.sort(key=lambda r: r["corporationID"])
+    return rows
 
 
 def market_tree_string(mgid: Optional[int], mg_map: Dict[int, Tuple[str, Optional[int]]]) -> Optional[str]:
@@ -710,7 +721,6 @@ def build_excluded_market_types(
     types_rows: List[Dict],
     market_tree_rows: List[Dict],
 ) -> List[Dict]:
-    # typeName -> (typeID, marketTree)
     type_index: Dict[str, Tuple[int, Optional[str]]] = {}
     for r in types_rows:
         tname = str(r.get("type", ""))
@@ -719,7 +729,6 @@ def build_excluded_market_types(
             continue
         type_index[tname] = (tid, r.get("marketTree"))
 
-    # marketTree -> [typeName...]
     tree_to_types: Dict[str, List[str]] = {}
     for r in market_tree_rows:
         mt = str(r.get("marketTree", ""))
@@ -738,7 +747,7 @@ def build_excluded_market_types(
 
         if line.startswith("Market → "):
             wants_prefix = line.endswith(" → ...")
-            base = line[:-6] if wants_prefix else line  # remove trailing " → ..."
+            base = line[:-6] if wants_prefix else line
 
             if wants_prefix:
                 prefix = base + " → "
@@ -773,7 +782,13 @@ def build_stations_out(
     planet_orbits: Dict[int, str],
     moon_orbits: Dict[int, str],
     type_names: Dict[int, str],
+    gates_by_system: Dict[int, List[Dict]],
 ) -> Tuple[List[Dict], Dict[int, Set[Optional[str]]], Dict[int, int]]:
+    """
+    stations.jsonl.gz includes:
+      - stargateDistance: null if system has no stargates else list ordered by distanceAU asc
+        distances are computed from station position to each stargate position in same system.
+    """
     rows: List[Dict] = []
     system_labels: Dict[int, Set[Optional[str]]] = defaultdict(set)
     stations_count: Dict[int, int] = defaultdict(int)
@@ -829,6 +844,27 @@ def build_stations_out(
         _lvl, dock_label = station_cyno(station_type if station_type else None, docking)
         system_labels[sid].add(dock_label)
 
+        # --- NEW: stargateDistance from station position to all stargates in this system ---
+        st_pos_obj = obj.get("position") or {}
+        station_pos = (
+            float(st_pos_obj.get("x", 0.0)),
+            float(st_pos_obj.get("y", 0.0)),
+            float(st_pos_obj.get("z", 0.0)),
+        )
+
+        gates = gates_by_system.get(sid, [])
+        if not gates:
+            stargate_distance = None
+        else:
+            dist_list: List[Dict] = []
+            for g in gates:
+                au = _dist_au(station_pos, g["_pos"])
+                dist_list.append({"stargate": g["stargate"], "distanceAU": au})
+
+            # REQUIRED: order asc by distanceAU. Deterministic tie-breaker by stargate string.
+            dist_list.sort(key=lambda r: (float(r["distanceAU"]), str(r["stargate"])))
+            stargate_distance = dist_list
+
         rows.append(
             {
                 "_solarSystemID": sid,  # internal
@@ -845,6 +881,7 @@ def build_stations_out(
                 "fitting": fitting,
                 "cloning": cloning,
                 "jump-clone": jump_clone,
+                "stargateDistance": stargate_distance,
             }
         )
 
@@ -934,6 +971,9 @@ def main() -> int:
 
         log(f"[SDE] regions={len(regions)} constellations={len(consts)} systems={len(systems)} corps={len(corp_names)}")
 
+        # --- Parse stargates ONCE and reuse for both outputs (stargates + stations) ---
+        gates_all, gates_by_system = parse_stargates_index(zf, systems)
+
         types_base = read_published_types_base(zf)
         types2_ids = set(types_base.keys())
         log(f"[DELTA] new SDE types2 size: {len(types2_ids)}")
@@ -991,6 +1031,7 @@ def main() -> int:
             planet_orbits=planet_orbits,
             moon_orbits=moon_orbits,
             type_names=type_names,
+            gates_by_system=gates_by_system,  # NEW
         )
 
         system_cyno_jump: Dict[int, str] = {}
@@ -1020,15 +1061,22 @@ def main() -> int:
         excluded_rows = build_excluded_market_types(exclude_config, types_rows, market_tree_rows)
 
         cfg_etag = sha256_file(exclude_config)
-        write_text(out_sde / "excludeMarketTypes.state.json", json.dumps({"etag": cfg_etag}, ensure_ascii=False, indent=2) + "\n")
+        write_text(
+            out_sde / "excludeMarketTypes.state.json",
+            json.dumps({"etag": cfg_etag}, ensure_ascii=False, indent=2) + "\n",
+        )
 
+        # --- Build stargates output from parsed index (ensures correct sorting) ---
+        stargates_rows = build_stargates_out_from_index(gates_all, gates_by_system)
+
+        # Write outputs
         write_jsonl_gz(out_sde / "regions.jsonl.gz", build_regions_out(regions))
         write_jsonl_gz(out_sde / "constellations.jsonl.gz", build_constellations_out(consts, regions))
         write_jsonl_gz(out_sde / "solarsystems.jsonl.gz", sol_rows)
         write_jsonl_gz(out_sde / "stations.jsonl.gz", stations_rows)
-        write_jsonl_gz(out_sde / "stargates.jsonl.gz", build_stargates_out(zf, systems))
+        write_jsonl_gz(out_sde / "stargates.jsonl.gz", stargates_rows)
         write_jsonl_gz(out_sde / "types.jsonl.gz", types_rows)
-        write_jsonl_gz(out_sde / "corporations.jsonl.gz", build_corporations_out(corp_names))
+        write_jsonl_gz(out_sde / "corporations.jsonl.gz", [{"corporationID": k, "corporation": v} for k, v in sorted(corp_names.items())])
         write_jsonl_gz(out_sde / "marketTree.jsonl.gz", market_tree_rows)
         write_jsonl_gz(out_sde / "excludedMarketTypes.jsonl.gz", excluded_rows)
         write_text(out_sde / "marketTree.txt", market_tree_txt)
