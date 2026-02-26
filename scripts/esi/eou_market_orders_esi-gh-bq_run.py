@@ -1,170 +1,278 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+EOU · Market Orders (ESI → GH Actions) — Runner
+
+Cambio de esta versión:
+- LOG “muy visual” y en TIEMPO REAL para ver claramente:
+  - paralelismo por worker
+  - entidad actual (REGION/STRUCTURE + nombre)
+  - página actual
+  - status HTTP + X-Pages + filas emitidas (dedupe streaming)
+  - budget global de retries restante
+  - eventos de retry/ignore/end
+Sin cambiar la lógica de ingestión (A–F) ni añadir pipelining dentro del worker.
+
+Notas de buenas prácticas (ESI):
+- Respetar cache/Expires y Retry-After ayuda a evitar penalizaciones/baneos.
+  :contentReference[oaicite:0]{index=0}
+"""
+
 import gzip
 import json
 import math
 import os
 import sys
 import time
+import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-from requests import Response
 
-# =========================
-# Config / constants
-# =========================
+# ----------------------------
+# Config / env
+# ----------------------------
 
-GLOBAL_WORKERS_SUM_LIMIT = 13
+ESI_BASE_URL = os.environ.get("ESI_BASE_URL", "https://esi.evetech.net").rstrip("/")
+ESI_DATASOURCE = os.environ.get("ESI_DATASOURCE", "tranquility")
 
-# No optimizaciones agresivas: page-by-page secuencial dentro de cada entidad.
-REQUEST_TIMEOUT = 30  # seconds
-SLEEP_AUTH_RETRY_SECONDS = 30
-SLEEP_ERROR_RETRY_SECONDS = 30
-SLEEP_STRUCTURE_404_PAGE1_RETRY_MS = 5000
+PRIMARY_CHAR_ID = os.environ.get("PRIMARY_CHAR_ID", "2124070822").strip()
+RETRY_BUDGET = int(os.environ.get("RETRY_BUDGET", "3"))
 
-UA = "EOU/market-orders (github-actions)"
+REGIONS_WORKERS_MIN = int(os.environ.get("REGIONS_WORKERS_MIN", "2"))
+STRUCTS_WORKERS_MIN = int(os.environ.get("STRUCTS_WORKERS_MIN", "1"))
 
-# =========================
-# Helpers
-# =========================
+REGIONS_TARGET_PAGES_PER_WORKER = int(os.environ.get("REGIONS_TARGET_PAGES_PER_WORKER", "220"))
+STRUCTS_TARGET_PAGES_PER_WORKER = int(os.environ.get("STRUCTS_TARGET_PAGES_PER_WORKER", "60"))
 
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+SDE_REGIONS_PATH = os.environ.get("SDE_REGIONS_PATH", "data/sde/regions.jsonl.gz")
+STRUCTURES_FILE = os.environ.get("STRUCTURES_FILE", "data/esi/structures.jsonl.gz")
+PAGES_CACHE_PATH = os.environ.get("PAGES_CACHE_PATH", "states/market_orders_pages.json")
 
-def epoch_seconds(dt: datetime) -> int:
-    return int(dt.timestamp())
+OUT_DIR = os.environ.get("OUT_DIR", ".tmp_eou_market_orders")
 
-def parse_http_date_to_epoch(value: str) -> Optional[int]:
-    # ESI uses RFC1123 dates (e.g. Sun, 01 Feb 2026 22:44:34 GMT)
+EOU_ACCESS_TOKENS_1 = os.environ.get("EOU_ACCESS_TOKENS_1", "")
+EOU_ACCESS_TOKENS_2 = os.environ.get("EOU_ACCESS_TOKENS_2", "")
+
+# Defaults if no cache exists (E)
+DEFAULT_REGIONS_WORKERS_MAX = 8
+DEFAULT_STRUCTS_WORKERS_MAX = 3
+
+# Restriction global (E)
+MAX_WORKERS_SUM_LIMIT = 13
+
+# User agent (ESI best practices)
+USER_AGENT = os.environ.get("ESI_USER_AGENT", "EOU/market-orders (+https://github.com/landu-eou/eou)")
+
+# ----------------------------
+# Visual logging helpers
+# ----------------------------
+
+_START_EPOCH = time.time()
+_PRINT_LOCK = threading.Lock()
+
+def _rel_ts() -> str:
+    # relative seconds since start, fixed width
+    return f"{time.time() - _START_EPOCH:7.2f}s"
+
+def _tid() -> str:
+    # short thread id
+    return f"t{threading.get_ident() % 10000:04d}"
+
+def _icon(event: str, status: Optional[int] = None) -> str:
+    # A small visual language:
+    # - entity/workers
+    # - http statuses
+    if event == "phase":
+        return "🧭"
+    if event == "worker_start":
+        return "🚀"
+    if event == "worker_done":
+        return "🏁"
+    if event == "entity_start":
+        return "📦"
+    if event == "entity_done":
+        return "✅"
+    if event == "entity_ignored":
+        return "⏭️"
+    if event == "retry":
+        return "🔁"
+    if event == "budget":
+        return "🎛️"
+    if event == "http":
+        if status is None:
+            return "🌐"
+        if status == 200:
+            return "🟢"
+        if status in (401, 420, 429):
+            return "🟠"
+        if status == 404:
+            return "🟣"
+        if 500 <= status <= 599:
+            return "🔴"
+        if 400 <= status <= 499:
+            return "🟡"
+        return "⚪"
+    return "•"
+
+def vlog(
+    *,
+    event: str,
+    worker: str = "-",
+    kind: str = "-",
+    entity_id: Optional[int] = None,
+    entity_name: str = "",
+    page: Optional[int] = None,
+    status: Optional[int] = None,
+    msg: str = "",
+) -> None:
+    # Single-line structured logs, real-time, readable even interleaved.
+    # Example:
+    #  12.34s t1234 🟢 http worker=regions_w1/4 kind=REGION id=10000002 page=7 status=200 xpages=23 rows=...
+    parts = [
+        _rel_ts(),
+        _tid(),
+        _icon(event, status),
+        f"{event:12s}",
+        f"worker={worker}",
+        f"kind={kind}",
+    ]
+    if entity_id is not None:
+        parts.append(f"id={entity_id}")
+    if page is not None:
+        parts.append(f"page={page}")
+    if status is not None:
+        parts.append(f"status={status}")
+    if entity_name:
+        # keep name short-ish to avoid huge lines
+        safe = entity_name.replace("\n", " ").strip()
+        if len(safe) > 60:
+            safe = safe[:57] + "..."
+        parts.append(f"name=\"{safe}\"")
+    if msg:
+        parts.append(msg)
+
+    line = " ".join(parts)
+    with _PRINT_LOCK:
+        print(line, flush=True)
+
+def now_utc_epoch() -> int:
+    return int(time.time())
+
+def parse_http_date_to_epoch(s: str) -> Optional[int]:
     try:
-        dt = datetime.strptime(value, "%a, %d %b %Y %H:%M:%S %Z")
-        dt = dt.replace(tzinfo=timezone.utc)
-        return epoch_seconds(dt)
+        dt = datetime.strptime(s, "%a, %d %b %Y %H:%M:%S %Z")
+        return int(dt.replace(tzinfo=timezone.utc).timestamp())
     except Exception:
         return None
 
-def safe_int(x: Any, default: int = 0) -> int:
-    try:
-        return int(x)
-    except Exception:
-        return default
+# ----------------------------
+# Global auth retry budget (shared between workers)
+# ----------------------------
 
-def read_gz_jsonl(path: str) -> Iterable[dict]:
+class GlobalBudget:
+    def __init__(self, initial: int):
+        self._lock = threading.Lock()
+        self._remaining = initial
+
+    def consume_or_fail(self, reason: str, kind: str, entity_id: int, page: int, char_id: Optional[str], worker: str) -> None:
+        with self._lock:
+            self._remaining -= 1
+            remaining = self._remaining
+
+        vlog(
+            event="budget",
+            worker=worker,
+            kind=kind,
+            entity_id=entity_id,
+            page=page,
+            msg=f"consume=1 reason={reason} char_id={char_id} remaining={remaining}",
+        )
+
+        if remaining < 0:
+            raise RuntimeError("RETRY_BUDGET internal underflow")
+
+        # requisito: “Si se agota el presupuesto global -> FAIL RUN”
+        if remaining == 0:
+            raise RuntimeError("RETRY_BUDGET exhausted for authenticated/retry requests (401/420/429/5xx).")
+
+    def remaining(self) -> int:
+        with self._lock:
+            return self._remaining
+
+# ----------------------------
+# Token rotation (exact policy)
+# ----------------------------
+
+class TokenRotator:
+    """
+    Order:
+      1) PRIMARY_CHAR_ID first if exists
+      2) rest char_ids sorted DESC (numeric) excluding primary
+    """
+    def __init__(self, tokens: Dict[str, str], primary_char_id: str):
+        self._tokens = tokens
+        self._primary = primary_char_id
+
+        ordered: List[str] = []
+        if primary_char_id in tokens:
+            ordered.append(primary_char_id)
+
+        rest = [cid for cid in tokens.keys() if cid != primary_char_id]
+
+        def keyf(x: str) -> int:
+            try:
+                return int(x)
+            except Exception:
+                return -1
+
+        rest.sort(key=keyf, reverse=True)
+        ordered.extend(rest)
+
+        self._order = ordered
+        self._idx = 0
+        self._lock = threading.Lock()
+
+    def current(self) -> Tuple[Optional[str], Optional[str]]:
+        with self._lock:
+            if not self._order:
+                return None, None
+            cid = self._order[self._idx % len(self._order)]
+            return cid, self._tokens.get(cid)
+
+    def rotate_next(self) -> Tuple[Optional[str], Optional[str]]:
+        with self._lock:
+            if not self._order:
+                return None, None
+            self._idx = (self._idx + 1) % len(self._order)
+            cid = self._order[self._idx]
+            return cid, self._tokens.get(cid)
+
+# ----------------------------
+# IO: read jsonl.gz
+# ----------------------------
+
+def read_jsonl_gz(path: str) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
     with gzip.open(path, "rt", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            yield json.loads(line)
+            out.append(json.loads(line))
+    return out
 
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
-def log(msg: str) -> None:
-    print(msg, flush=True)
-
-def must_env(name: str) -> str:
-    v = os.environ.get(name)
-    if not v:
-        raise RuntimeError(f"Missing env: {name}")
-    return v
-
-def opt_env(name: str, default: str) -> str:
-    v = os.environ.get(name)
-    return v if v is not None and v != "" else default
-
-def bsearch_excluded(excluded_sorted: List[int], type_id: int) -> bool:
-    lo, hi = 0, len(excluded_sorted) - 1
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        v = excluded_sorted[mid]
-        if v == type_id:
-            return True
-        if v < type_id:
-            lo = mid + 1
-        else:
-            hi = mid - 1
-    return False
-
-def parse_range_to_int(r: Any) -> int:
-    if r is None:
-        return 0
-    if isinstance(r, int):
-        return r
-    s = str(r).strip().lower()
-    if s in ("station", "solarsystem"):
-        return 0
-    if s == "region":
-        return 1000
-    try:
-        return int(s)
-    except Exception:
-        return 0
-
-def compute_until_and_timeleft(issued_iso: str, duration_days: int) -> Tuple[str, str]:
-    issued = datetime.fromisoformat(issued_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
-    until = issued + timedelta(days=int(duration_days))
-    now = utc_now()
-    delta = until - now
-    total_seconds = int(delta.total_seconds())
-    if total_seconds < 0:
-        total_seconds = 0
-    hh = total_seconds // 3600
-    mm = (total_seconds % 3600) // 60
-    ss = total_seconds % 60
-    timeleft = f"{hh:02d}:{mm:02d}:{ss:02d}"
-    return until.isoformat().replace("+00:00", "Z"), timeleft
-
-# =========================
-# Tokens (EXACT policy)
-# =========================
-
-def load_tokens_from_secrets(primary_char_id: int) -> List[Tuple[int, str]]:
-    s1 = os.environ.get("EOU_ACCESS_TOKENS_1", "") or "{}"
-    s2 = os.environ.get("EOU_ACCESS_TOKENS_2", "") or "{}"
-    try:
-        d1 = json.loads(s1)
-        d2 = json.loads(s2)
-    except Exception as e:
-        raise RuntimeError(f"Failed to parse EOU_ACCESS_TOKENS_1/2 as JSON: {e}")
-
-    merged: Dict[int, str] = {}
-    for k, v in {**d1, **d2}.items():
-        try:
-            cid = int(k)
-        except Exception:
-            continue
-        if isinstance(v, str) and v:
-            merged[cid] = v
-
-    ordered: List[Tuple[int, str]] = []
-    if primary_char_id in merged:
-        ordered.append((primary_char_id, merged[primary_char_id]))
-    rest = sorted([cid for cid in merged.keys() if cid != primary_char_id], reverse=True)
-    for cid in rest:
-        ordered.append((cid, merged[cid]))  # <-- FIX
-
-    return ordered
-
-# =========================
-# Global retry budget (shared)
-# =========================
-
-class RetryBudget:
-    def __init__(self, initial: int):
-        self.remaining = initial
-
-    def consume_or_fail(self, reason: str, entity_kind: str, entity_id: int, page: int, char_id: Optional[int]) -> None:
-        self.remaining -= 1
-        log(f"auth_budget_consume reason={reason} entity_kind={entity_kind} entity_id={entity_id} page={page} char_id={char_id} remaining_budget={self.remaining}")
-        if self.remaining < 0:
-            raise RuntimeError("RETRY_BUDGET exhausted for authenticated/error retries (401/420/429/5xx).")
-
-# =========================
-# Cache structure
-# =========================
+# ----------------------------
+# Cache model (D/E)
+# ----------------------------
 
 @dataclass
 class CachePlanner:
@@ -172,13 +280,13 @@ class CachePlanner:
     STRUCTS_WORKERS_MAX: int
 
 @dataclass
-class StationCacheEntry:
+class CacheStation:
     regionID: int
     region: str
     pages: int
 
 @dataclass
-class StructureCacheEntry:
+class CacheStructure:
     stationID: int
     station: str
     pages: int
@@ -186,735 +294,660 @@ class StructureCacheEntry:
 @dataclass
 class PagesCache:
     planner: CachePlanner
-    stations: List[StationCacheEntry]
-    structures: List[StructureCacheEntry]
+    stations: List[CacheStation]
+    structures: List[CacheStructure]
 
-def default_cache() -> PagesCache:
-    return PagesCache(
-        planner=CachePlanner(REGIONS_WORKERS_MAX=8, STRUCTS_WORKERS_MAX=3),
-        stations=[],
-        structures=[],
-    )
-
-def load_pages_cache(path: str) -> PagesCache:
+def load_pages_cache(path: str) -> Optional[PagesCache]:
     if not os.path.exists(path):
-        return default_cache()
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        planner_raw = raw.get("planner") or {}
+        planner = CachePlanner(
+            REGIONS_WORKERS_MAX=int(planner_raw.get("REGIONS_WORKERS_MAX", DEFAULT_REGIONS_WORKERS_MAX)),
+            STRUCTS_WORKERS_MAX=int(planner_raw.get("STRUCTS_WORKERS_MAX", DEFAULT_STRUCTS_WORKERS_MAX)),
+        )
+        stations = []
+        for x in (raw.get("stations") or []):
+            stations.append(CacheStation(int(x["regionID"]), str(x["region"]), int(x.get("pages", 0))))
+        structures = []
+        for x in (raw.get("structures") or []):
+            structures.append(CacheStructure(int(x["stationID"]), str(x["station"]), int(x.get("pages", 0))))
+        return PagesCache(planner=planner, stations=stations, structures=structures)
+    except Exception as e:
+        vlog(event="phase", msg=f"cache_load_failed path={path} err={e}")
+        return None
 
-    planner_raw = raw.get("planner", {}) if isinstance(raw, dict) else {}
-    regions_max = safe_int(planner_raw.get("REGIONS_WORKERS_MAX", 8), 8)
-    structs_max = safe_int(planner_raw.get("STRUCTS_WORKERS_MAX", 3), 3)
-
-    stations_raw = raw.get("stations", []) if isinstance(raw, dict) else []
-    structures_raw = raw.get("structures", []) if isinstance(raw, dict) else []
-
-    stations: List[StationCacheEntry] = []
-    for it in stations_raw:
+def write_pages_cache_atomic(path: str, cache: PagesCache) -> None:
+    tmp_dir = os.path.dirname(path) or "."
+    ensure_dir(tmp_dir)
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp_pages_cache_", suffix=".json", dir=tmp_dir)
+    os.close(fd)
+    try:
+        payload = {
+            "planner": {
+                "REGIONS_WORKERS_MAX": cache.planner.REGIONS_WORKERS_MAX,
+                "STRUCTS_WORKERS_MAX": cache.planner.STRUCTS_WORKERS_MAX,
+            },
+            "stations": [{"regionID": s.regionID, "region": s.region, "pages": s.pages} for s in cache.stations],
+            "structures": [{"stationID": s.stationID, "station": s.station, "pages": s.pages} for s in cache.structures],
+        }
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=False)
+            f.write("\n")
+        os.replace(tmp_path, path)
+    finally:
         try:
-            stations.append(StationCacheEntry(
-                regionID=int(it["regionID"]),
-                region=str(it.get("region", "")),
-                pages=int(it.get("pages", 0)),
-            ))
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
         except Exception:
-            continue
+            pass
 
-    structures: List[StructureCacheEntry] = []
-    for it in structures_raw:
-        try:
-            structures.append(StructureCacheEntry(
-                stationID=int(it["stationID"]),
-                station=str(it.get("station", "")),
-                pages=int(it.get("pages", 0)),
-            ))
-        except Exception:
-            continue
+# ----------------------------
+# Planning: workers count + assignment
+# ----------------------------
 
-    return PagesCache(
-        planner=CachePlanner(REGIONS_WORKERS_MAX=regions_max, STRUCTS_WORKERS_MAX=structs_max),
-        stations=stations,
-        structures=structures,
-    )
+def clamp(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, v))
 
-def write_pages_cache_pretty_atomic(path: str, cache: PagesCache) -> None:
-    tmp = path + ".tmp"
-    obj = {
-        "planner": {
-            "REGIONS_WORKERS_MAX": cache.planner.REGIONS_WORKERS_MAX,
-            "STRUCTS_WORKERS_MAX": cache.planner.STRUCTS_WORKERS_MAX,
-        },
-        "stations": [
-            {"regionID": e.regionID, "region": e.region, "pages": e.pages}
-            for e in cache.stations
-        ],
-        "structures": [
-            {"stationID": e.stationID, "station": e.station, "pages": e.pages}
-            for e in cache.structures
-        ],
-    }
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2, sort_keys=False)
-        f.write("\n")
-    os.replace(tmp, path)
+def calc_recommended_workers(total_pages: int, target_pages_per_worker: int, min_workers: int, max_workers: int) -> int:
+    if total_pages <= 0:
+        return min_workers
+    rec = int(math.ceil(total_pages / float(target_pages_per_worker)))
+    return clamp(rec, min_workers, max_workers)
 
-# =========================
-# Worker planning
-# =========================
-
-def compute_workers_needed(total_pages: int, min_workers: int, max_workers: int, target_pages_per_worker: int) -> int:
-    if target_pages_per_worker <= 0:
-        return max_workers
-    needed = max(1, math.ceil(total_pages / target_pages_per_worker))
-    return max(min_workers, min(max_workers, needed))
-
-def greedy_balance(items: List[Tuple[int, Any]], k: int) -> List[List[Any]]:
-    if k <= 0:
-        return []
-    bins: List[List[Any]] = [[] for _ in range(k)]
-    loads: List[int] = [0 for _ in range(k)]
+def greedy_balance(items: List[Tuple[int, Any]], workers: int) -> List[List[Any]]:
+    bins = [{"w": 0, "items": []} for _ in range(max(1, workers))]
     items_sorted = sorted(items, key=lambda x: x[0], reverse=True)
     for w, payload in items_sorted:
-        idx = loads.index(min(loads))
-        bins[idx].append(payload)
-        loads[idx] += w
-    return bins
+        b = min(bins, key=lambda x: x["w"])
+        b["items"].append(payload)
+        b["w"] += w
+    return [b["items"] for b in bins]
 
-# =========================
-# HTTP (ESI)
-# =========================
+# ----------------------------
+# HTTP helpers (A/B)
+# ----------------------------
 
-def esi_get(session: requests.Session, url: str, headers: Dict[str, str], params: Dict[str, Any]) -> Response:
-    return session.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+def http_get(url: str, headers: Dict[str, str], params: Dict[str, Any], timeout_s: int = 60) -> requests.Response:
+    return requests.get(url, headers=headers, params=params, timeout=timeout_s)
 
-def parse_expires_epoch(resp: Response) -> Optional[int]:
-    exp = resp.headers.get("Expires") or resp.headers.get("expires")
+def parse_retry_after_seconds(resp: requests.Response) -> Optional[int]:
+    ra = resp.headers.get("Retry-After")
+    if not ra:
+        return None
+    try:
+        return int(ra.strip())
+    except Exception:
+        return None
+
+def take_expires_epoch(resp: requests.Response) -> Optional[int]:
+    exp = resp.headers.get("Expires")
     if not exp:
         return None
     return parse_http_date_to_epoch(exp)
 
-def parse_last_modified_epoch(resp: Response) -> Optional[int]:
-    lm = resp.headers.get("Last-Modified") or resp.headers.get("last-modified")
+def take_last_modified_epoch(resp: requests.Response) -> Optional[int]:
+    lm = resp.headers.get("Last-Modified")
     if not lm:
         return None
     return parse_http_date_to_epoch(lm)
 
-def parse_xpages(resp: Response) -> Optional[int]:
-    xp = resp.headers.get("X-Pages") or resp.headers.get("x-pages")
-    if not xp:
+def header_int(resp: requests.Response, name: str) -> Optional[int]:
+    v = resp.headers.get(name)
+    if not v:
         return None
     try:
-        return int(xp)
+        return int(v)
     except Exception:
         return None
 
-def sleep_retry_after_or_default(resp: Response, default_seconds: int) -> None:
-    ra = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
-    if ra:
-        try:
-            sec = int(ra)
-            if sec < 0:
-                sec = default_seconds
-            time.sleep(sec)
-            return
-        except Exception:
-            pass
-    time.sleep(default_seconds)
-
-# =========================
-# Entity loop state machine (A/B)
-# =========================
+# ----------------------------
+# Entity fetching with exact state machine (A/B) + visual logs
+# ----------------------------
 
 @dataclass
 class EntityResult:
+    entity_kind: str
+    entity_id: int
     pages_ok: int
     had_xpages: bool
-    xpages: int
+    xpages: Optional[int]
     ignored: bool
     max_expires_epoch: int
     max_last_modified_epoch: int
+    rows_emitted: int
 
 def fetch_entity_pages(
-    session: requests.Session,
+    *,
     entity_kind: str,
     entity_id: int,
     entity_name: str,
-    url: str,
-    auth_tokens: Optional[List[Tuple[int, str]]],
-    retry_budget: RetryBudget,
-    is_authed: bool,
-    dedupe_seen: set,
-    out_rows: List[dict],
-    excluded_type_ids_sorted: List[int],
-    type_id_to_name: Dict[int, str],
-    station_id_to_name: Dict[int, str],
-    structure_id_to_name: Dict[int, str],
-    solar_system_id_to_meta: Dict[int, Tuple[str, str, str]],
-    jita44_location_id: int,
-    jita44_buy_rows: List[dict],
-    jita44_sell_rows: List[dict],
+    rotator: Optional[TokenRotator],
+    budget: GlobalBudget,
+    worker_label: str,
 ) -> EntityResult:
     page = 1
     pages_ok = 0
     had_xpages = False
-    xpages_val = 0
+    xpages: Optional[int] = None
     attempts_404_page1 = 0
-
-    token_idx = 0
-    current_char_id: Optional[int] = None
-    current_token: Optional[str] = None
-    if is_authed:
-        if not auth_tokens:
-            raise RuntimeError("Authenticated endpoint requested but no tokens available.")
-        current_char_id, current_token = auth_tokens[token_idx]
 
     max_expires_epoch = 0
     max_last_modified_epoch = 0
 
-    def build_headers() -> Dict[str, str]:
-        h = {
-            "User-Agent": UA,
-            "Accept": "application/json",
-        }
-        if is_authed and current_token:
-            h["Authorization"] = f"Bearer {current_token}"
-        return h
+    # Dedupe streaming local por worker (C).
+    # Para que sea “ligero” visualmente y seguro en memoria, lo mantenemos por entidad.
+    seen_order_ids: set[int] = set()
+    rows_emitted = 0
+
+    vlog(event="entity_start", worker=worker_label, kind=entity_kind, entity_id=entity_id, entity_name=entity_name, msg="start")
 
     while True:
-        params = {"datasource": os.environ.get("ESI_DATASOURCE", "tranquility"), "page": page}
+        # Build URL
+        if entity_kind == "REGION":
+            url = f"{ESI_BASE_URL}/latest/markets/{entity_id}/orders/"
+            headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
+            active_char: Optional[str] = None
+        else:
+            url = f"{ESI_BASE_URL}/latest/markets/structures/{entity_id}/"
+            cid, tok = (rotator.current() if rotator else (None, None))
+            active_char = cid
+            if not tok:
+                raise RuntimeError("No access tokens available for authenticated structure requests.")
+            headers = {"Accept": "application/json", "User-Agent": USER_AGENT, "Authorization": f"Bearer {tok}"}
 
-        resp = esi_get(session, url, build_headers(), params)
+        params = {"datasource": ESI_DATASOURCE, "page": page}
+
+        try:
+            resp = http_get(url, headers=headers, params=params, timeout_s=60)
+        except requests.RequestException as e:
+            # tratamos como retryable (equivalente a 5xx) bajo regla (4)
+            budget.consume_or_fail("net_err", entity_kind, entity_id, page, active_char, worker_label)
+            sleep_s = 30
+            vlog(
+                event="retry",
+                worker=worker_label,
+                kind=entity_kind,
+                entity_id=entity_id,
+                entity_name=entity_name,
+                page=page,
+                msg=f"reason=net_err sleep_s={sleep_s} err={type(e).__name__}",
+            )
+            time.sleep(sleep_s)
+            continue
+
         status = resp.status_code
 
-        exp_epoch = parse_expires_epoch(resp) or 0
-        lm_epoch = parse_last_modified_epoch(resp) or 0
-        if exp_epoch > max_expires_epoch:
-            max_expires_epoch = exp_epoch
-        if lm_epoch > max_last_modified_epoch:
-            max_last_modified_epoch = lm_epoch
+        # Track maxima of Expires/Last-Modified
+        exp_e = take_expires_epoch(resp) or 0
+        lm_e = take_last_modified_epoch(resp) or 0
+        if exp_e > max_expires_epoch:
+            max_expires_epoch = exp_e
+        if lm_e > max_last_modified_epoch:
+            max_last_modified_epoch = lm_e
+
+        # Helpful headers for visibility (rate/error limiting)
+        xpages_h = header_int(resp, "X-Pages")
+        err_rem = resp.headers.get("X-ESI-Error-Limit-Remain")
+        err_rst = resp.headers.get("X-ESI-Error-Limit-Reset")
+        rat_rem = resp.headers.get("X-Ratelimit-Remaining")
+        rat_lim = resp.headers.get("X-Ratelimit-Limit")
+        retry_after = resp.headers.get("Retry-After")
+
+        # Print a per-request “HTTP line” for real-time visibility
+        extra = []
+        if xpages_h is not None:
+            extra.append(f"xpages={xpages_h}")
+        if err_rem is not None and err_rst is not None:
+            extra.append(f"esi_err={err_rem}/{err_rst}s")
+        if rat_rem is not None and rat_lim is not None:
+            extra.append(f"rl={rat_rem}/{rat_lim}")
+        if retry_after is not None:
+            extra.append(f"retry_after={retry_after}")
+        extra.append(f"budget={budget.remaining()}")
+        if active_char:
+            extra.append(f"char={active_char}")
+
+        vlog(
+            event="http",
+            worker=worker_label,
+            kind=entity_kind,
+            entity_id=entity_id,
+            entity_name=entity_name,
+            page=page,
+            status=status,
+            msg=" ".join(extra),
+        )
+
+        # ----------------------------
+        # B) rules by status
+        # ----------------------------
 
         if status == 200:
             pages_ok += 1
-            xp = parse_xpages(resp)
-            if xp is not None:
-                had_xpages = True
-                xpages_val = xp
 
+            # Parse + dedupe streaming (C)
             try:
-                items = resp.json()
-                if not isinstance(items, list):
-                    items = []
+                body = resp.json()
+                if not isinstance(body, list):
+                    body = []
             except Exception:
-                items = []
+                body = []
 
-            for o in items:
+            new_rows_this_page = 0
+            dupes_this_page = 0
+
+            for o in body:
                 try:
-                    order_id = int(o.get("order_id"))
+                    oid = int(o.get("order_id"))
                 except Exception:
                     continue
-
-                if order_id in dedupe_seen:
+                if oid in seen_order_ids:
+                    dupes_this_page += 1
                     continue
-                dedupe_seen.add(order_id)
+                seen_order_ids.add(oid)
+                rows_emitted += 1
+                new_rows_this_page += 1
 
-                try:
-                    type_id = int(o.get("type_id"))
-                except Exception:
-                    continue
-                if bsearch_excluded(excluded_type_ids_sorted, type_id):
-                    continue
+            # Per-page ingestion summary (still real-time)
+            vlog(
+                event="http",
+                worker=worker_label,
+                kind=entity_kind,
+                entity_id=entity_id,
+                entity_name=entity_name,
+                page=page,
+                status=200,
+                msg=f"ingest new={new_rows_this_page} dupes={dupes_this_page} total_emitted={rows_emitted}",
+            )
 
-                is_buy = bool(o.get("is_buy_order", False))
-
-                issued = str(o.get("issued"))
-                duration = safe_int(o.get("duration", 0), 0)
-                until_iso, time_left = compute_until_and_timeleft(issued, duration)
-
-                loc_id = safe_int(o.get("location_id", 0), 0)
-                sys_id = safe_int(o.get("system_id", 0), 0)
-
-                type_name = type_id_to_name.get(type_id, str(type_id))
-                solarSystem, constellation, region = solar_system_id_to_meta.get(sys_id, ("", "", ""))
-
-                if loc_id < 1000000000000:
-                    station_name = station_id_to_name.get(loc_id, str(loc_id))
-                else:
-                    station_name = structure_id_to_name.get(loc_id, str(loc_id))
-
-                row_common = {
-                    "type": type_name,
-                    "orderPrice": float(o.get("price", 0.0)),
-                    "volRemain": safe_int(o.get("volume_remain", 0), 0),
-                    "volTotal": safe_int(o.get("volume_total", 0), 0),
-                    "volMin": safe_int(o.get("min_volume", 0), 0),
-                    "station": station_name,
-                    "solarSystem": solarSystem,
-                    "constellation": constellation,
-                    "region": region,
-                    "issued": issued,
-                    "until": until_iso,
-                    "timeLeft": time_left,
-                    "orderID": order_id,
-                    "ordeRange": parse_range_to_int(o.get("range")) if "range" in o else 0,
-                }
-
-                if is_buy:
-                    out_rows.append({**row_common, "is_buy_order": True})
-                else:
-                    out_rows.append({**row_common, "is_buy_order": False})
-
-                if loc_id == jita44_location_id:
-                    jita_row = {
-                        "type": type_name,
-                        "orderPrice": float(o.get("price", 0.0)),
-                        "volRemain": safe_int(o.get("volume_remain", 0), 0),
-                        "volTotal": safe_int(o.get("volume_total", 0), 0),
-                        "volMin": safe_int(o.get("min_volume", 0), 0),
-                        "issued": issued,
-                        "until": until_iso,
-                        "timeLeft": time_left,
-                        "orderID": order_id,
-                    }
-                    if "range" in o:
-                        jita_row["ordeRange"] = parse_range_to_int(o.get("range"))
-
-                    if is_buy:
-                        jita44_buy_rows.append(jita_row)
-                    else:
-                        jita44_sell_rows.append(jita_row)
-
-            if had_xpages:
-                log(f"entity_page status=200 kind={entity_kind} id={entity_id} page={page} xpages={xpages_val}")
-                if page < xpages_val:
+            # X-Pages logic (A/B(1))
+            if xpages_h is not None:
+                had_xpages = True
+                xpages = xpages_h
+                if page < xpages:
                     page += 1
                     continue
-                if page == xpages_val:
-                    return EntityResult(
-                        pages_ok=pages_ok,
-                        had_xpages=True,
-                        xpages=xpages_val,
-                        ignored=False,
-                        max_expires_epoch=max_expires_epoch,
-                        max_last_modified_epoch=max_last_modified_epoch,
-                    )
-                return EntityResult(pages_ok, True, xpages_val, False, max_expires_epoch, max_last_modified_epoch)
+                if page == xpages:
+                    break  # FIN without asking page+1
 
-            log(f"entity_page status=200 kind={entity_kind} id={entity_id} page={page} xpages=none")
+                # Defensive: if somehow page > xpages, also finish
+                break
+
+            # No X-Pages => keep incrementing until collision
             page += 1
             continue
 
         if status == 404:
-            log(f"entity_page status=404 kind={entity_kind} id={entity_id} page={page}")
             if entity_kind == "REGION":
-                return EntityResult(pages_ok, had_xpages, xpages_val, False, max_expires_epoch, max_last_modified_epoch)
+                break
 
+            # STRUCTURE
             if page == 1:
-                if attempts_404_page1 == 0:
+                if attempts_404_page1 < 1:
                     attempts_404_page1 += 1
-                    time.sleep(SLEEP_STRUCTURE_404_PAGE1_RETRY_MS / 1000.0)
+                    sleep_s = 5
+                    vlog(
+                        event="retry",
+                        worker=worker_label,
+                        kind=entity_kind,
+                        entity_id=entity_id,
+                        entity_name=entity_name,
+                        page=page,
+                        msg=f"reason=404_page1_retry sleep_s={sleep_s}",
+                    )
+                    time.sleep(sleep_s)
                     continue
-                log(f"structure_ignored reason=404_page1 kind=STRUCTURE id={entity_id} name={entity_name}")
-                return EntityResult(pages_ok, had_xpages, xpages_val, True, max_expires_epoch, max_last_modified_epoch)
 
-            return EntityResult(pages_ok, had_xpages, xpages_val, False, max_expires_epoch, max_last_modified_epoch)
+                # ignore structure and do not include in cache
+                vlog(
+                    event="entity_ignored",
+                    worker=worker_label,
+                    kind=entity_kind,
+                    entity_id=entity_id,
+                    entity_name=entity_name,
+                    msg="reason=404_page1_after_retry",
+                )
+                return EntityResult(
+                    entity_kind=entity_kind,
+                    entity_id=entity_id,
+                    pages_ok=0,
+                    had_xpages=False,
+                    xpages=None,
+                    ignored=True,
+                    max_expires_epoch=max_expires_epoch,
+                    max_last_modified_epoch=max_last_modified_epoch,
+                    rows_emitted=0,
+                )
 
-        if status == 401 and is_authed:
-            retry_budget.consume_or_fail("401", entity_kind, entity_id, page, current_char_id)
-            token_idx += 1
-            if not auth_tokens:
-                raise RuntimeError("No tokens available for 401 rotation.")
-            if token_idx >= len(auth_tokens):
-                token_idx = 0
-            current_char_id, current_token = auth_tokens[token_idx]
-            log(f"auth_retry=401 kind={entity_kind} id={entity_id} page={page} new_char_id={current_char_id}")
-            time.sleep(SLEEP_AUTH_RETRY_SECONDS)
+            # page > 1 => end pagination
+            break
+
+        if status == 401:
+            if entity_kind != "STRUCTURE":
+                raise RuntimeError(f"Unexpected 401 for REGION entity_id={entity_id} page={page}")
+
+            # rotate token + sleep 5s + retry same page; consume global budget
+            cid_before, _ = rotator.current() if rotator else (None, None)
+            budget.consume_or_fail("401", entity_kind, entity_id, page, cid_before, worker_label)
+            cid_new, _ = rotator.rotate_next() if rotator else (None, None)
+            sleep_s = 5
+            vlog(
+                event="retry",
+                worker=worker_label,
+                kind=entity_kind,
+                entity_id=entity_id,
+                entity_name=entity_name,
+                page=page,
+                msg=f"reason=401 rotate {cid_before}->{cid_new} sleep_s={sleep_s}",
+            )
+            time.sleep(sleep_s)
             continue
 
         if status in (420, 429) or (500 <= status <= 599):
-            retry_budget.consume_or_fail(str(status), entity_kind, entity_id, page, current_char_id)
-            log(f"retry status={status} kind={entity_kind} id={entity_id} page={page}")
-            sleep_retry_after_or_default(resp, SLEEP_ERROR_RETRY_SECONDS)
+            # retry/backoff; Retry-After preferred else 30s
+            ra = parse_retry_after_seconds(resp)
+            sleep_s = ra if (ra is not None and ra > 0) else 30
+            budget.consume_or_fail(str(status), entity_kind, entity_id, page, active_char, worker_label)
+            vlog(
+                event="retry",
+                worker=worker_label,
+                kind=entity_kind,
+                entity_id=entity_id,
+                entity_name=entity_name,
+                page=page,
+                msg=f"reason={status} sleep_s={sleep_s}",
+            )
+            time.sleep(sleep_s)
             continue
 
         if 400 <= status <= 499:
-            log(f"entity_page status={status} kind={entity_kind} id={entity_id} page={page}")
+            # other 4xx
             if entity_kind == "STRUCTURE":
-                log(f"structure_ignored reason=other_4xx status={status} id={entity_id} name={entity_name}")
-                return EntityResult(pages_ok, had_xpages, xpages_val, True, max_expires_epoch, max_last_modified_epoch)
-            raise RuntimeError(f"Unexpected 4xx for REGION {entity_id} page={page}: status={status}")
+                vlog(
+                    event="entity_ignored",
+                    worker=worker_label,
+                    kind=entity_kind,
+                    entity_id=entity_id,
+                    entity_name=entity_name,
+                    msg=f"reason=other4xx status={status}",
+                )
+                return EntityResult(
+                    entity_kind=entity_kind,
+                    entity_id=entity_id,
+                    pages_ok=0,
+                    had_xpages=had_xpages,
+                    xpages=xpages,
+                    ignored=True,
+                    max_expires_epoch=max_expires_epoch,
+                    max_last_modified_epoch=max_last_modified_epoch,
+                    rows_emitted=0,
+                )
+            raise RuntimeError(f"Unexpected {status} for REGION entity_id={entity_id} page={page}")
 
-        raise RuntimeError(f"Unexpected status {status} for {entity_kind} {entity_id} page={page}")
+        raise RuntimeError(f"Unexpected status={status} kind={entity_kind} entity_id={entity_id} page={page}")
 
-# =========================
-# Workers (no pipelining within entity)
-# =========================
-
-def worker_run_entities(
-    worker_kind: str,
-    entities: List[Tuple[int, str]],
-    session: requests.Session,
-    retry_budget: RetryBudget,
-    auth_tokens: Optional[List[Tuple[int, str]]],
-    excluded_type_ids_sorted: List[int],
-    type_id_to_name: Dict[int, str],
-    station_id_to_name: Dict[int, str],
-    structure_id_to_name: Dict[int, str],
-    solar_system_id_to_meta: Dict[int, Tuple[str, str, str]],
-    jita44_location_id: int,
-) -> Tuple[List[dict], List[dict], List[dict], Dict[int, int], Dict[int, int], int, int]:
-    seen_order_ids = set()
-    all_rows: List[dict] = []
-    jita44_buy_rows: List[dict] = []
-    jita44_sell_rows: List[dict] = []
-
-    pages_by_region: Dict[int, int] = {}
-    pages_by_structure: Dict[int, int] = {}
-
-    max_expires_epoch = 0
-    max_last_modified_epoch = 0
-
-    for idx, (eid, name) in enumerate(entities, start=1):
-        if worker_kind == "REGION":
-            url = f"{os.environ.get('ESI_BASE_URL','https://esi.evetech.net')}/markets/{eid}/orders/"
-            log(f"entity_start kind=REGION idx={idx}/{len(entities)} region_id={eid} region={name}")
-            res = fetch_entity_pages(
-                session=session,
-                entity_kind="REGION",
-                entity_id=eid,
-                entity_name=name,
-                url=url,
-                auth_tokens=None,
-                retry_budget=retry_budget,
-                is_authed=False,
-                dedupe_seen=seen_order_ids,
-                out_rows=all_rows,
-                excluded_type_ids_sorted=excluded_type_ids_sorted,
-                type_id_to_name=type_id_to_name,
-                station_id_to_name=station_id_to_name,
-                structure_id_to_name=structure_id_to_name,
-                solar_system_id_to_meta=solar_system_id_to_meta,
-                jita44_location_id=jita44_location_id,
-                jita44_buy_rows=jita44_buy_rows,
-                jita44_sell_rows=jita44_sell_rows,
-            )
-            pages_effective = res.xpages if res.had_xpages else res.pages_ok
-            pages_by_region[eid] = pages_effective
-            log(f"entity_done kind=REGION region_id={eid} pages_ok={res.pages_ok} had_xpages={res.had_xpages} xpages={res.xpages}")
-
-        else:
-            url = f"{os.environ.get('ESI_BASE_URL','https://esi.evetech.net')}/markets/structures/{eid}/"
-            log(f"entity_start kind=STRUCTURE idx={idx}/{len(entities)} structure_id={eid} station={name}")
-            res = fetch_entity_pages(
-                session=session,
-                entity_kind="STRUCTURE",
-                entity_id=eid,
-                entity_name=name,
-                url=url,
-                auth_tokens=auth_tokens,
-                retry_budget=retry_budget,
-                is_authed=True,
-                dedupe_seen=seen_order_ids,
-                out_rows=all_rows,
-                excluded_type_ids_sorted=excluded_type_ids_sorted,
-                type_id_to_name=type_id_to_name,
-                station_id_to_name=station_id_to_name,
-                structure_id_to_name=structure_id_to_name,
-                solar_system_id_to_meta=solar_system_id_to_meta,
-                jita44_location_id=jita44_location_id,
-                jita44_buy_rows=jita44_buy_rows,
-                jita44_sell_rows=jita44_sell_rows,
-            )
-            if not res.ignored:
-                pages_effective = res.xpages if res.had_xpages else res.pages_ok
-                pages_by_structure[eid] = pages_effective
-                log(f"entity_done kind=STRUCTURE structure_id={eid} pages_ok={res.pages_ok} had_xpages={res.had_xpages} xpages={res.xpages}")
-            else:
-                log(f"entity_done kind=STRUCTURE structure_id={eid} ignored=true pages_ok={res.pages_ok}")
-
-        if res.max_expires_epoch > max_expires_epoch:
-            max_expires_epoch = res.max_expires_epoch
-        if res.max_last_modified_epoch > max_last_modified_epoch:
-            max_last_modified_epoch = res.max_last_modified_epoch
-
-    return (
-        all_rows,
-        jita44_buy_rows,
-        jita44_sell_rows,
-        pages_by_region,
-        pages_by_structure,
-        max_expires_epoch,
-        max_last_modified_epoch,
+    vlog(
+        event="entity_done",
+        worker=worker_label,
+        kind=entity_kind,
+        entity_id=entity_id,
+        entity_name=entity_name,
+        msg=f"pages_ok={pages_ok} had_xpages={had_xpages} xpages={xpages} rows_emitted={rows_emitted}",
     )
 
-# =========================
-# Workers MAX slow adaptation (E)
-# =========================
+    return EntityResult(
+        entity_kind=entity_kind,
+        entity_id=entity_id,
+        pages_ok=pages_ok,
+        had_xpages=had_xpages,
+        xpages=xpages,
+        ignored=False,
+        max_expires_epoch=max_expires_epoch,
+        max_last_modified_epoch=max_last_modified_epoch,
+        rows_emitted=rows_emitted,
+    )
 
-def slow_update_max(
-    current: int,
-    recommended: int,
-    min_workers: int,
-    other_current: int,
-    global_sum_limit: int = GLOBAL_WORKERS_SUM_LIMIT,
-) -> int:
-    current = max(current, min_workers * 2)
-    recommended = max(recommended, min_workers)
+# ----------------------------
+# MAX adaptation (E) with anti-oscillation
+# ----------------------------
 
-    new_val = current
+def ceil_div(a: int, b: int) -> int:
+    return int(math.ceil(a / float(b))) if b else a
 
-    if recommended > current:
-        new_val = current + 1
-    else:
-        if recommended < (current / 4.0):
-            cap = math.ceil(current / 2.0)
-            new_val = max(current - cap, min_workers * 2)
+def update_max_slow(*, current_max: int, recommended_max: int, min_workers: int) -> int:
+    # Increase: +1 max per run
+    if recommended_max > current_max:
+        return current_max + 1
+
+    # Decrease: only if recommended < current/4
+    if recommended_max < (current_max / 4.0):
+        lower_bound = min_workers * 2
+        new_max = max(lower_bound, current_max - ceil_div(current_max, 2))
+        return max(new_max, lower_bound)
+
+    return current_max
+
+def enforce_sum_limit(reg_max: int, str_max: int) -> Tuple[int, int]:
+    if reg_max + str_max <= MAX_WORKERS_SUM_LIMIT:
+        return reg_max, str_max
+    while reg_max + str_max > MAX_WORKERS_SUM_LIMIT:
+        if reg_max >= str_max and reg_max > 1:
+            reg_max -= 1
+        elif str_max > 1:
+            str_max -= 1
         else:
-            new_val = current
+            break
+    return reg_max, str_max
 
-    if new_val + other_current > global_sum_limit:
-        new_val = max(min_workers * 2, global_sum_limit - other_current)
-    return new_val
+# ----------------------------
+# Tokens
+# ----------------------------
 
-# =========================
+def merge_tokens(json1: str, json2: str) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for raw in (json1, json2):
+        raw = (raw or "").strip()
+        if not raw:
+            continue
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if v:
+                    out[str(k)] = str(v)
+    return out
+
+def build_cache_maps(cache: Optional[PagesCache]) -> Tuple[Dict[int, int], Dict[int, int], int, int]:
+    station_pages: Dict[int, int] = {}
+    struct_pages: Dict[int, int] = {}
+    reg_max = DEFAULT_REGIONS_WORKERS_MAX
+    str_max = DEFAULT_STRUCTS_WORKERS_MAX
+    if cache:
+        reg_max = int(cache.planner.REGIONS_WORKERS_MAX)
+        str_max = int(cache.planner.STRUCTS_WORKERS_MAX)
+        for s in cache.stations:
+            station_pages[s.regionID] = s.pages
+        for s in cache.structures:
+            struct_pages[s.stationID] = s.pages
+    return station_pages, struct_pages, reg_max, str_max
+
+# ----------------------------
 # Main
-# =========================
+# ----------------------------
 
 def main() -> int:
-    out_dir = must_env("OUT_DIR")
-    pages_cache_path = must_env("PAGES_CACHE_PATH")
+    ensure_dir(OUT_DIR)
 
-    sde_regions_path = must_env("SDE_REGIONS_PATH")
-    sde_types_path = must_env("SDE_TYPES_PATH")
-    sde_excluded_path = must_env("SDE_EXCLUDED_TYPES_PATH")
-    sde_stations_path = must_env("SDE_STATIONS_PATH")
-    sde_solarsystems_path = must_env("SDE_SOLARSYSTEMS_PATH")
-    structures_file = must_env("STRUCTURES_FILE")
+    vlog(event="phase", msg="loading indices...")
 
-    regions_min = int(must_env("REGIONS_WORKERS_MIN"))
-    structs_min = int(must_env("STRUCTS_WORKERS_MIN"))
-    if regions_min <= 0 or structs_min <= 0:
-        raise RuntimeError("REGIONS_WORKERS_MIN and STRUCTS_WORKERS_MIN must be > 0")
+    # Load truth lists
+    regions = read_jsonl_gz(SDE_REGIONS_PATH)
+    region_ids = [int(r["regionID"]) for r in regions if "regionID" in r]
+    region_name_by_id = {int(r["regionID"]): str(r.get("region", "")) for r in regions if "regionID" in r}
 
-    regions_target = int(must_env("REGIONS_TARGET_PAGES_PER_WORKER"))
-    structs_target = int(must_env("STRUCTS_TARGET_PAGES_PER_WORKER"))
+    structures = read_jsonl_gz(STRUCTURES_FILE)
+    structure_ids = [int(s["stationID"]) for s in structures if "stationID" in s]
+    structure_name_by_id = {int(s["stationID"]): str(s.get("station", "")) for s in structures if "stationID" in s}
 
-    primary_char_id = int(must_env("PRIMARY_CHAR_ID"))
-    retry_budget_initial = int(must_env("RETRY_BUDGET"))
-    jita44_location_id = int(must_env("JITA44_LOCATION_ID"))
+    vlog(event="phase", msg=f"regions_count={len(region_ids)} structures_market_count={len(structure_ids)}")
 
-    ensure_dir(out_dir)
-    ensure_dir(os.path.dirname(pages_cache_path) or ".")
+    # Tokens
+    tokens = merge_tokens(EOU_ACCESS_TOKENS_1, EOU_ACCESS_TOKENS_2)
+    rotator = TokenRotator(tokens, PRIMARY_CHAR_ID) if tokens else None
+    vlog(event="phase", msg=f"tokens_count={len(tokens)} primary_char_id={PRIMARY_CHAR_ID}")
 
-    cache = load_pages_cache(pages_cache_path)
-    regions_max_bound = max(cache.planner.REGIONS_WORKERS_MAX, regions_min)
-    structs_max_bound = max(cache.planner.STRUCTS_WORKERS_MAX, structs_min)
+    # Load cache
+    cache0 = load_pages_cache(PAGES_CACHE_PATH)
+    station_pages_cache, struct_pages_cache, reg_max_current, str_max_current = build_cache_maps(cache0)
+    reg_max_current, str_max_current = enforce_sum_limit(reg_max_current, str_max_current)
 
-    log("loading indices...")
+    # Planner weights (new => pages=0)
+    region_items: List[Tuple[int, int]] = [(int(station_pages_cache.get(rid, 0)), rid) for rid in region_ids]
+    struct_items: List[Tuple[int, int]] = [(int(struct_pages_cache.get(sid, 0)), sid) for sid in structure_ids]
 
-    regions_truth: List[Tuple[int, str]] = []
-    for row in read_gz_jsonl(sde_regions_path):
-        rid = safe_int(row.get("regionID", 0), 0)
-        rname = str(row.get("region", ""))
-        if rid > 0:
-            regions_truth.append((rid, rname))
+    total_region_pages = sum(w for w, _ in region_items)
+    total_struct_pages = sum(w for w, _ in struct_items)
 
-    structures_truth: List[Tuple[int, str]] = []
-    for row in read_gz_jsonl(structures_file):
-        if not bool(row.get("market", False)):
-            continue
-        sid = safe_int(row.get("stationID", 0), 0)
-        sname = str(row.get("station", ""))
-        if sid > 0:
-            structures_truth.append((sid, sname))
+    # Choose worker counts for this run
+    reg_workers = calc_recommended_workers(total_region_pages, REGIONS_TARGET_PAGES_PER_WORKER, REGIONS_WORKERS_MIN, reg_max_current)
+    str_workers = calc_recommended_workers(total_struct_pages, STRUCTS_TARGET_PAGES_PER_WORKER, STRUCTS_WORKERS_MIN, str_max_current)
+    reg_workers, str_workers = enforce_sum_limit(reg_workers, str_workers)
 
-    type_id_to_name: Dict[int, str] = {}
-    for row in read_gz_jsonl(sde_types_path):
-        tid = safe_int(row.get("typeID", 0), 0)
-        tname = row.get("type")
-        if tid > 0 and isinstance(tname, str):
-            type_id_to_name[tid] = tname
+    vlog(event="phase", msg=f"planner regions_total_pages_cached={total_region_pages} workers={reg_workers} max={reg_max_current} min={REGIONS_WORKERS_MIN}")
+    vlog(event="phase", msg=f"planner structs_total_pages_cached={total_struct_pages} workers={str_workers} max={str_max_current} min={STRUCTS_WORKERS_MIN}")
 
-    excluded_ids: List[int] = []
-    for row in read_gz_jsonl(sde_excluded_path):
-        tid = safe_int(row.get("typeID", 0), 0)
-        if tid > 0:
-            excluded_ids.append(tid)
-    excluded_ids.sort()
+    # Assign entities to workers (greedy)
+    reg_assign = greedy_balance(region_items, reg_workers)
+    str_assign = greedy_balance(struct_items, str_workers)
 
-    station_id_to_name: Dict[int, str] = {}
-    for row in read_gz_jsonl(sde_stations_path):
-        sid = safe_int(row.get("stationID", 0), 0)
-        sname = row.get("station")
-        if sid > 0 and isinstance(sname, str):
-            station_id_to_name[sid] = sname
+    # Global budget shared across workers
+    budget = GlobalBudget(RETRY_BUDGET)
 
-    solar_system_id_to_meta: Dict[int, Tuple[str, str, str]] = {}
-    for row in read_gz_jsonl(sde_solarsystems_path):
-        ssid = safe_int(row.get("solarSystemID", 0), 0)
-        if ssid <= 0:
-            continue
-        solar = str(row.get("solarSystem", ""))
-        const = str(row.get("constellation", ""))
-        reg = str(row.get("region", ""))
-        solar_system_id_to_meta[ssid] = (solar, const, reg)
-
-    structure_id_to_name: Dict[int, str] = {sid: name for sid, name in structures_truth}
-
-    auth_tokens = load_tokens_from_secrets(primary_char_id)
-    log(f"regions_count={len(regions_truth)}")
-    log(f"structures_market_count={len(structures_truth)}")
-    log(f"tokens_count={len(auth_tokens)} primary_char_id={primary_char_id}")
-
-    prev_pages_by_region: Dict[int, int] = {e.regionID: e.pages for e in cache.stations}
-    prev_pages_by_struct: Dict[int, int] = {e.stationID: e.pages for e in cache.structures}
-
-    total_region_pages = sum(prev_pages_by_region.get(rid, 0) for rid, _ in regions_truth)
-    total_struct_pages = sum(prev_pages_by_struct.get(sid, 0) for sid, _ in structures_truth)
-
-    regions_workers = compute_workers_needed(total_region_pages, regions_min, regions_max_bound, regions_target)
-    structs_workers = compute_workers_needed(total_struct_pages, structs_min, structs_max_bound, structs_target)
-
-    if regions_workers + structs_workers > GLOBAL_WORKERS_SUM_LIMIT:
-        excess = (regions_workers + structs_workers) - GLOBAL_WORKERS_SUM_LIMIT
-        structs_workers = max(structs_min, structs_workers - excess)
-
-    log(f"planner_run regions_workers={regions_workers} structs_workers={structs_workers} regions_max_bound={regions_max_bound} structs_max_bound={structs_max_bound}")
-
-    region_items = [(prev_pages_by_region.get(rid, 0), (rid, rname)) for rid, rname in regions_truth]
-    struct_items = [(prev_pages_by_struct.get(sid, 0), (sid, sname)) for sid, sname in structures_truth]
-
-    regions_bins = greedy_balance(region_items, regions_workers)
-    structs_bins = greedy_balance(struct_items, structs_workers)
-
-    retry_budget = RetryBudget(retry_budget_initial)
-
-    session = requests.Session()
-
-    all_rows_global: List[dict] = []
-    jita_buy_global: List[dict] = []
-    jita_sell_global: List[dict] = []
-    pages_by_region_new: Dict[int, int] = {}
-    pages_by_struct_new: Dict[int, int] = {}
+    # Aggregates
     max_expires_epoch = 0
     max_last_modified_epoch = 0
 
-    log("phase=regions start")
-    for wi, entities in enumerate(regions_bins, start=1):
-        log(f"worker_start kind=REGION worker={wi}/{len(regions_bins)} entities={len(entities)}")
-        rows, jb, js, pbr, _, me, ml = worker_run_entities(
-            worker_kind="REGION",
-            entities=entities,
-            session=session,
-            retry_budget=retry_budget,
-            auth_tokens=None,
-            excluded_type_ids_sorted=excluded_ids,
-            type_id_to_name=type_id_to_name,
-            station_id_to_name=station_id_to_name,
-            structure_id_to_name=structure_id_to_name,
-            solar_system_id_to_meta=solar_system_id_to_meta,
-            jita44_location_id=jita44_location_id,
-        )
-        all_rows_global.extend(rows)
-        jita_buy_global.extend(jb)
-        jita_sell_global.extend(js)
-        pages_by_region_new.update(pbr)
-        max_expires_epoch = max(max_expires_epoch, me)
-        max_last_modified_epoch = max(max_last_modified_epoch, ml)
-        log(f"worker_done kind=REGION worker={wi}")
-    log("phase=regions end")
+    region_pages_observed: Dict[int, int] = {}
+    struct_pages_observed: Dict[int, int] = {}
+    ignored_structures: set[int] = set()
 
-    log("phase=structures start")
-    for wi, entities in enumerate(structs_bins, start=1):
-        log(f"worker_start kind=STRUCTURE worker={wi}/{len(structs_bins)} entities={len(entities)}")
-        rows, jb, js, _, pbs, me, ml = worker_run_entities(
-            worker_kind="STRUCTURE",
-            entities=entities,
-            session=session,
-            retry_budget=retry_budget,
-            auth_tokens=auth_tokens,
-            excluded_type_ids_sorted=excluded_ids,
-            type_id_to_name=type_id_to_name,
-            station_id_to_name=station_id_to_name,
-            structure_id_to_name=structure_id_to_name,
-            solar_system_id_to_meta=solar_system_id_to_meta,
-            jita44_location_id=jita44_location_id,
-        )
-        all_rows_global.extend(rows)
-        jita_buy_global.extend(jb)
-        jita_sell_global.extend(js)
-        pages_by_struct_new.update(pbs)
-        max_expires_epoch = max(max_expires_epoch, me)
-        max_last_modified_epoch = max(max_last_modified_epoch, ml)
-        log(f"worker_done kind=STRUCTURE worker={wi}")
-    log("phase=structures end")
+    def run_region_worker(worker_idx: int, ids: List[int]) -> List[EntityResult]:
+        label = f"regions_w{worker_idx+1}/{reg_workers}"
+        vlog(event="worker_start", worker=label, kind="REGION", msg=f"entities={len(ids)}")
+        out: List[EntityResult] = []
+        for rid in ids:
+            res = fetch_entity_pages(
+                entity_kind="REGION",
+                entity_id=rid,
+                entity_name=region_name_by_id.get(rid, ""),
+                rotator=None,
+                budget=budget,
+                worker_label=label,
+            )
+            out.append(res)
+        vlog(event="worker_done", worker=label, kind="REGION", msg="done")
+        return out
 
-    buy_rows = [r for r in all_rows_global if r.get("is_buy_order") is True]
-    sell_rows = [r for r in all_rows_global if r.get("is_buy_order") is False]
+    def run_struct_worker(worker_idx: int, ids: List[int]) -> List[EntityResult]:
+        label = f"structs_w{worker_idx+1}/{str_workers}"
+        vlog(event="worker_start", worker=label, kind="STRUCTURE", msg=f"entities={len(ids)}")
+        out: List[EntityResult] = []
+        for sid in ids:
+            res = fetch_entity_pages(
+                entity_kind="STRUCTURE",
+                entity_id=sid,
+                entity_name=structure_name_by_id.get(sid, ""),
+                rotator=rotator,
+                budget=budget,
+                worker_label=label,
+            )
+            out.append(res)
+        vlog(event="worker_done", worker=label, kind="STRUCTURE", msg="done")
+        return out
 
-    def write_ndjson_gz(path: str, rows: List[dict]) -> None:
-        with gzip.open(path, "wt", encoding="utf-8") as f:
-            for r in rows:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    # Execute in parallel (workers), but no pipelining inside workers/entities.
+    vlog(event="phase", msg="phase=workers start")
+    t0 = time.time()
 
-    write_ndjson_gz(os.path.join(out_dir, "buy_orders.jsonl.gz"), buy_rows)
-    write_ndjson_gz(os.path.join(out_dir, "sell_orders.jsonl.gz"), sell_rows)
-    write_ndjson_gz(os.path.join(out_dir, "jita44_buy_orders.jsonl.gz"), jita_buy_global)
-    write_ndjson_gz(os.path.join(out_dir, "jita44_sell_orders.jsonl.gz"), jita_sell_global)
+    futures = []
+    results: List[EntityResult] = []
+    with ThreadPoolExecutor(max_workers=(reg_workers + str_workers)) as ex:
+        for i, ids in enumerate(reg_assign):
+            futures.append(ex.submit(run_region_worker, i, ids))
+        for i, ids in enumerate(str_assign):
+            futures.append(ex.submit(run_struct_worker, i, ids))
 
-    log(f"out buy_rows={len(buy_rows)} sell_rows={len(sell_rows)} jita_buy_rows={len(jita_buy_global)} jita_sell_rows={len(jita_sell_global)}")
+        for fut in as_completed(futures):
+            part = fut.result()
+            results.extend(part)
 
-    stations_cache_entries: List[StationCacheEntry] = []
-    for rid, rname in regions_truth:
-        pages = pages_by_region_new.get(rid, 0)
-        stations_cache_entries.append(StationCacheEntry(regionID=rid, region=rname, pages=pages))
+    vlog(event="phase", msg=f"phase=workers end elapsed_s={time.time()-t0:.2f}")
 
-    structures_cache_entries: List[StructureCacheEntry] = []
-    for sid, sname in structures_truth:
-        if sid not in pages_by_struct_new:
+    # Aggregate maxima + observed pages
+    for r in results:
+        max_expires_epoch = max(max_expires_epoch, r.max_expires_epoch)
+        max_last_modified_epoch = max(max_last_modified_epoch, r.max_last_modified_epoch)
+
+        if r.entity_kind == "REGION":
+            pages_val = int(r.xpages) if (r.had_xpages and r.xpages is not None) else int(r.pages_ok)
+            region_pages_observed[r.entity_id] = pages_val
+        else:
+            if r.ignored:
+                ignored_structures.add(r.entity_id)
+            else:
+                pages_val = int(r.xpages) if (r.had_xpages and r.xpages is not None) else int(r.pages_ok)
+                struct_pages_observed[r.entity_id] = pages_val
+
+    # Build new cache (D)
+    new_stations = [
+        CacheStation(regionID=rid, region=region_name_by_id.get(rid, ""), pages=int(region_pages_observed.get(rid, 0)))
+        for rid in sorted(region_ids)
+    ]
+    new_structs = []
+    for sid in sorted(structure_ids):
+        if sid in ignored_structures:
             continue
-        structures_cache_entries.append(StructureCacheEntry(stationID=sid, station=sname, pages=pages_by_struct_new[sid]))
+        new_structs.append(
+            CacheStructure(stationID=sid, station=structure_name_by_id.get(sid, ""), pages=int(struct_pages_observed.get(sid, 0)))
+        )
 
-    total_region_pages_new = sum(e.pages for e in stations_cache_entries)
-    total_struct_pages_new = sum(e.pages for e in structures_cache_entries)
+    # Recompute recommended MAX (E) from observed totals
+    observed_region_pages_total = sum(s.pages for s in new_stations)
+    observed_struct_pages_total = sum(s.pages for s in new_structs)
 
-    recommended_regions_max = compute_workers_needed(total_region_pages_new, regions_min, 9999, regions_target)
-    recommended_structs_max = compute_workers_needed(total_struct_pages_new, structs_min, 9999, structs_target)
+    rec_reg_max = int(math.ceil(observed_region_pages_total / float(REGIONS_TARGET_PAGES_PER_WORKER))) if observed_region_pages_total > 0 else REGIONS_WORKERS_MIN
+    rec_str_max = int(math.ceil(observed_struct_pages_total / float(STRUCTS_TARGET_PAGES_PER_WORKER))) if observed_struct_pages_total > 0 else STRUCTS_WORKERS_MIN
 
-    new_regions_max = slow_update_max(
-        current=cache.planner.REGIONS_WORKERS_MAX,
-        recommended=recommended_regions_max,
-        min_workers=regions_min,
-        other_current=cache.planner.STRUCTS_WORKERS_MAX,
-        global_sum_limit=GLOBAL_WORKERS_SUM_LIMIT,
-    )
-    new_structs_max = slow_update_max(
-        current=cache.planner.STRUCTS_WORKERS_MAX,
-        recommended=recommended_structs_max,
-        min_workers=structs_min,
-        other_current=new_regions_max,
-        global_sum_limit=GLOBAL_WORKERS_SUM_LIMIT,
-    )
+    updated_reg_max = update_max_slow(current_max=reg_max_current, recommended_max=rec_reg_max, min_workers=REGIONS_WORKERS_MIN)
+    updated_str_max = update_max_slow(current_max=str_max_current, recommended_max=rec_str_max, min_workers=STRUCTS_WORKERS_MIN)
 
-    if new_regions_max + new_structs_max > GLOBAL_WORKERS_SUM_LIMIT:
-        new_structs_max = max(structs_min * 2, GLOBAL_WORKERS_SUM_LIMIT - new_regions_max)
+    updated_reg_max = max(updated_reg_max, REGIONS_WORKERS_MIN * 2)
+    updated_str_max = max(updated_str_max, STRUCTS_WORKERS_MIN * 2)
+    updated_reg_max, updated_str_max = enforce_sum_limit(updated_reg_max, updated_str_max)
+
+    vlog(event="phase", msg=f"planner_update reg_max_current={reg_max_current} reg_max_recommended={rec_reg_max} reg_max_next={updated_reg_max}")
+    vlog(event="phase", msg=f"planner_update str_max_current={str_max_current} str_max_recommended={rec_str_max} str_max_next={updated_str_max}")
 
     new_cache = PagesCache(
-        planner=CachePlanner(REGIONS_WORKERS_MAX=new_regions_max, STRUCTS_WORKERS_MAX=new_structs_max),
-        stations=stations_cache_entries,
-        structures=structures_cache_entries,
+        planner=CachePlanner(REGIONS_WORKERS_MAX=updated_reg_max, STRUCTS_WORKERS_MAX=updated_str_max),
+        stations=new_stations,
+        structures=new_structs,
     )
 
-    write_pages_cache_pretty_atomic(pages_cache_path, new_cache)
-    log(f"cache_written path={pages_cache_path} regions_max={new_regions_max} structs_max={new_structs_max}")
+    # Write cache only on success
+    write_pages_cache_atomic(PAGES_CACHE_PATH, new_cache)
+    vlog(event="phase", msg=f"cache_written path={PAGES_CACHE_PATH} stations={len(new_stations)} structures={len(new_structs)}")
 
-    log(f"max_expires_epoch={max_expires_epoch}")
-    log(f"max_last_modified_epoch={max_last_modified_epoch}")
-
+    # Outputs for finalize step
+    print(f"max_expires_epoch={max_expires_epoch}", flush=True)
+    print(f"max_last_modified_epoch={max_last_modified_epoch}", flush=True)
     return 0
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as e:
-        log(f"FATAL {e}")
+        vlog(event="phase", msg=f"FATAL {e}")
         raise
