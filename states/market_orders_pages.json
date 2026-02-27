@@ -572,28 +572,23 @@
   ],
   "structures": [
     {
+      "stationID": 1044752365771,
+      "station": "Perimeter - 0.0% Neutral States Market HQ",
+      "pages": 26
+    },
+    {
+      "stationID": 1046802738801,
+      "station": "Turnur - Summit's Beacon",
+      "pages": 3
+    },
+    {
       "stationID": 1021681819954,
       "station": "Keberz - FREEPORT MARKET AND CLONES",
       "pages": 1
     },
     {
-      "stationID": 1022167642188,
-      "station": "Amamake - 5 times nearly AT winners",
-      "pages": 6
-    },
-    {
       "stationID": 1027375934642,
       "station": "Torrinos - FREEPORT MARKET AND CLONES",
-      "pages": 1
-    },
-    {
-      "stationID": 1031240619395,
-      "station": "Eystur - Vherokior Market & Development",
-      "pages": 3
-    },
-    {
-      "stationID": 1033626295285,
-      "station": "Lustrevik - Port Royal Regional Trading Hub",
       "pages": 1
     },
     {
@@ -602,18 +597,8 @@
       "pages": 1
     },
     {
-      "stationID": 1042223782798,
-      "station": "Teonusude - Nexus Galactic Heathens Market",
-      "pages": 1
-    },
-    {
       "stationID": 1042833494769,
       "station": "Vay - MlNER NEEDs - we buy ORE",
-      "pages": 1
-    },
-    {
-      "stationID": 1044164309897,
-      "station": "Mora - MlNER NEEDs - The Rings of Mora",
       "pages": 1
     },
     {
@@ -622,38 +607,8 @@
       "pages": 1
     },
     {
-      "stationID": 1044752365771,
-      "station": "Perimeter - 0.0% Neutral States Market HQ",
-      "pages": 26
-    },
-    {
-      "stationID": 1044857068649,
-      "station": "Ashab - 0.4% Market Cheaper than AMARR",
-      "pages": 7
-    },
-    {
-      "stationID": 1044880797208,
-      "station": "Ameinaka - MlNER NEEDs - between Rok & Moon",
-      "pages": 1
-    },
-    {
-      "stationID": 1044960858258,
-      "station": "Hek - Cheapest Market BE SMART",
-      "pages": 4
-    },
-    {
-      "stationID": 1044961079041,
-      "station": "Botane - Cheapest Market BE SMART 0.3%",
-      "pages": 6
-    },
-    {
       "stationID": 1044970203585,
       "station": "Sarum Prime - Winnie's Workshop",
-      "pages": 1
-    },
-    {
-      "stationID": 1045193582746,
-      "station": "Ekura - MlNER NEEDs - Darkside of a Moon",
       "pages": 1
     },
     {
@@ -662,23 +617,8 @@
       "pages": 1
     },
     {
-      "stationID": 1046043963414,
-      "station": "Chesiette - CREDE - Ultima Porta Inferorum",
-      "pages": 1
-    },
-    {
       "stationID": 1046404465214,
       "station": "Avada - Freeport",
-      "pages": 1
-    },
-    {
-      "stationID": 1046802738801,
-      "station": "Turnur - Summit's Beacon",
-      "pages": 3
-    },
-    {
-      "stationID": 1047028869086,
-      "station": "Bille - MlNER NEEDs - +Moon-ORE-Buy-Back",
       "pages": 1
     },
     {
@@ -687,23 +627,8 @@
       "pages": 1
     },
     {
-      "stationID": 1048427761902,
-      "station": "Avesber - TS10 Mashed Taters",
-      "pages": 1
-    },
-    {
-      "stationID": 1048444699516,
-      "station": "Frarn - FUEGO Market - Lowest Tax - 0.2%",
-      "pages": 2
-    },
-    {
       "stationID": 1048446040103,
       "station": "Sarum Prime - Domain Market Freeport",
-      "pages": 1
-    },
-    {
-      "stationID": 1048595097213,
-      "station": "Tabbetzur - Point",
       "pages": 1
     },
     {
@@ -712,18 +637,8 @@
       "pages": 1
     },
     {
-      "stationID": 1049035426094,
-      "station": "Aphend - Baustube GMF-C",
-      "pages": 1
-    },
-    {
       "stationID": 1049313588911,
       "station": "Brybier - SSN Familiar. The Center Of All.",
-      "pages": 1
-    },
-    {
-      "stationID": 1049358554947,
-      "station": "Bomana - The Oldest House - ALL SERVICES",
       "pages": 1
     },
     {
@@ -732,18 +647,8 @@
       "pages": 1
     },
     {
-      "stationID": 1049535002140,
-      "station": "Barmalie - Less Tax-Treasure Production&Mar",
-      "pages": 1
-    },
-    {
       "stationID": 1050182657126,
       "station": "Villore - Quafe Small'",
-      "pages": 1
-    },
-    {
-      "stationID": 1050351018262,
-      "station": "Misaba - 0.0% Neutral States Regional HQ",
       "pages": 1
     },
     {
@@ -752,33 +657,13 @@
       "pages": 1
     },
     {
-      "stationID": 1050444740652,
-      "station": "Ethernity - Uber Refiner",
-      "pages": 1
-    },
-    {
       "stationID": 1050657322964,
       "station": "Ealur - Baustube GMF-C",
       "pages": 1
     },
     {
-      "stationID": 1050719964747,
-      "station": "Esescama - Hub",
-      "pages": 1
-    },
-    {
-      "stationID": 1050827709022,
-      "station": "Auner - Guru Forge",
-      "pages": 2
-    },
-    {
       "stationID": 1050958629515,
       "station": "Shemah - Pax Industrialis",
-      "pages": 1
-    },
-    {
-      "stationID": 1051060046930,
-      "station": "Parses - Guthrie's Warehouse",
       "pages": 1
     },
     {
@@ -787,18 +672,8 @@
       "pages": 1
     },
     {
-      "stationID": 1051111127839,
-      "station": "Ordion - Big Red Refinery, Miner & More",
-      "pages": 1
-    },
-    {
       "stationID": 1051191837960,
       "station": "Osoggur - DCS Nexus",
-      "pages": 1
-    },
-    {
-      "stationID": 1051453179153,
-      "station": "Niballe - Urvymm's Bulwark",
       "pages": 1
     },
     {
@@ -807,18 +682,8 @@
       "pages": 1
     },
     {
-      "stationID": 1052014475197,
-      "station": "Weraroix - Farpoint Freeport & Market",
-      "pages": 1
-    },
-    {
       "stationID": 1052121022995,
       "station": "Anjedin - Obsidian Spire II",
-      "pages": 1
-    },
-    {
-      "stationID": 1052129737736,
-      "station": "Aghesi - Lumpy's Famous Adult Toy Store",
       "pages": 1
     },
     {
@@ -827,13 +692,148 @@
       "pages": 1
     },
     {
-      "stationID": 1052450748835,
-      "station": "Cleyd - The Crucible of Axiom",
+      "stationID": 1052685221691,
+      "station": "Nadohman - Taranta Market and Reserach",
       "pages": 1
     },
     {
-      "stationID": 1052685221691,
-      "station": "Nadohman - Taranta Market and Reserach",
+      "stationID": 1044857068649,
+      "station": "Ashab - 0.4% Market Cheaper than AMARR",
+      "pages": 7
+    },
+    {
+      "stationID": 1022167642188,
+      "station": "Amamake - 5 times nearly AT winners",
+      "pages": 6
+    },
+    {
+      "stationID": 1044961079041,
+      "station": "Botane - Cheapest Market BE SMART 0.3%",
+      "pages": 6
+    },
+    {
+      "stationID": 1044960858258,
+      "station": "Hek - Cheapest Market BE SMART",
+      "pages": 4
+    },
+    {
+      "stationID": 1031240619395,
+      "station": "Eystur - Vherokior Market & Development",
+      "pages": 3
+    },
+    {
+      "stationID": 1048444699516,
+      "station": "Frarn - FUEGO Market - Lowest Tax - 0.2%",
+      "pages": 2
+    },
+    {
+      "stationID": 1050827709022,
+      "station": "Auner - Guru Forge",
+      "pages": 2
+    },
+    {
+      "stationID": 1033626295285,
+      "station": "Lustrevik - Port Royal Regional Trading Hub",
+      "pages": 1
+    },
+    {
+      "stationID": 1042223782798,
+      "station": "Teonusude - Nexus Galactic Heathens Market",
+      "pages": 1
+    },
+    {
+      "stationID": 1044164309897,
+      "station": "Mora - MlNER NEEDs - The Rings of Mora",
+      "pages": 1
+    },
+    {
+      "stationID": 1044880797208,
+      "station": "Ameinaka - MlNER NEEDs - between Rok & Moon",
+      "pages": 1
+    },
+    {
+      "stationID": 1045193582746,
+      "station": "Ekura - MlNER NEEDs - Darkside of a Moon",
+      "pages": 1
+    },
+    {
+      "stationID": 1046043963414,
+      "station": "Chesiette - CREDE - Ultima Porta Inferorum",
+      "pages": 1
+    },
+    {
+      "stationID": 1047028869086,
+      "station": "Bille - MlNER NEEDs - +Moon-ORE-Buy-Back",
+      "pages": 1
+    },
+    {
+      "stationID": 1048427761902,
+      "station": "Avesber - TS10 Mashed Taters",
+      "pages": 1
+    },
+    {
+      "stationID": 1048595097213,
+      "station": "Tabbetzur - Point",
+      "pages": 1
+    },
+    {
+      "stationID": 1049035426094,
+      "station": "Aphend - Baustube GMF-C",
+      "pages": 1
+    },
+    {
+      "stationID": 1049358554947,
+      "station": "Bomana - The Oldest House - ALL SERVICES",
+      "pages": 1
+    },
+    {
+      "stationID": 1049535002140,
+      "station": "Barmalie - Less Tax-Treasure Production&Mar",
+      "pages": 1
+    },
+    {
+      "stationID": 1050351018262,
+      "station": "Misaba - 0.0% Neutral States Regional HQ",
+      "pages": 1
+    },
+    {
+      "stationID": 1050444740652,
+      "station": "Ethernity - Uber Refiner",
+      "pages": 1
+    },
+    {
+      "stationID": 1050719964747,
+      "station": "Esescama - Hub",
+      "pages": 1
+    },
+    {
+      "stationID": 1051060046930,
+      "station": "Parses - Guthrie's Warehouse",
+      "pages": 1
+    },
+    {
+      "stationID": 1051111127839,
+      "station": "Ordion - Big Red Refinery, Miner & More",
+      "pages": 1
+    },
+    {
+      "stationID": 1051453179153,
+      "station": "Niballe - Urvymm's Bulwark",
+      "pages": 1
+    },
+    {
+      "stationID": 1052014475197,
+      "station": "Weraroix - Farpoint Freeport & Market",
+      "pages": 1
+    },
+    {
+      "stationID": 1052129737736,
+      "station": "Aghesi - Lumpy's Famous Adult Toy Store",
+      "pages": 1
+    },
+    {
+      "stationID": 1052450748835,
+      "station": "Cleyd - The Crucible of Axiom",
       "pages": 1
     },
     {
