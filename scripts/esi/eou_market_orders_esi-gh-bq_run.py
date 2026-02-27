@@ -4,19 +4,21 @@
 """
 EOU · Market Orders (ESI → GH Actions) — Runner
 
-Cambio de esta versión:
-- LOG “muy visual” y en TIEMPO REAL para ver claramente:
-  - paralelismo por worker
-  - entidad actual (REGION/STRUCTURE + nombre)
-  - página actual
-  - status HTTP + X-Pages + filas emitidas (dedupe streaming)
-  - budget global de retries restante
-  - eventos de retry/ignore/end
-Sin cambiar la lógica de ingestión (A–F) ni añadir pipelining dentro del worker.
+LOGGING (según tu petición):
+- Solo muestra:
+  - worker_start / worker_done
+  - entity_start / entity_done
+  - entity_ignored (cuando se ignora una STRUCTURE)
+  - retry (solo cuando ocurre un retry relevante)
+  - budget consume (solo cuando se consume presupuesto global)
+- NO muestra el recorrido page-by-page.
 
-Notas de buenas prácticas (ESI):
-- Respetar cache/Expires y Retry-After ayuda a evitar penalizaciones/baneos.
-  :contentReference[oaicite:0]{index=0}
+La lógica de ingesta (A–F) se mantiene EXACTAMENTE:
+- Loop por entidad, page-by-page, usando X-Pages cuando existe.
+- Manejo de 404/401/420/429/5xx/otros4xx según tus reglas.
+- Dedupe streaming local por worker (set seen_order_ids).
+- Cache pages pretty, overwrite solo si run exitoso, y no incluir estructuras ignoradas.
+- Adaptación lenta de WORKERS_MAX persistida en cache.
 """
 
 import gzip
@@ -66,28 +68,22 @@ DEFAULT_STRUCTS_WORKERS_MAX = 3
 # Restriction global (E)
 MAX_WORKERS_SUM_LIMIT = 13
 
-# User agent (ESI best practices)
 USER_AGENT = os.environ.get("ESI_USER_AGENT", "EOU/market-orders (+https://github.com/landu-eou/eou)")
 
 # ----------------------------
-# Visual logging helpers
+# Minimal visual logs (worker/entity only)
 # ----------------------------
 
 _START_EPOCH = time.time()
 _PRINT_LOCK = threading.Lock()
 
 def _rel_ts() -> str:
-    # relative seconds since start, fixed width
     return f"{time.time() - _START_EPOCH:7.2f}s"
 
 def _tid() -> str:
-    # short thread id
     return f"t{threading.get_ident() % 10000:04d}"
 
-def _icon(event: str, status: Optional[int] = None) -> str:
-    # A small visual language:
-    # - entity/workers
-    # - http statuses
+def _icon(event: str) -> str:
     if event == "phase":
         return "🧭"
     if event == "worker_start":
@@ -104,20 +100,8 @@ def _icon(event: str, status: Optional[int] = None) -> str:
         return "🔁"
     if event == "budget":
         return "🎛️"
-    if event == "http":
-        if status is None:
-            return "🌐"
-        if status == 200:
-            return "🟢"
-        if status in (401, 420, 429):
-            return "🟠"
-        if status == 404:
-            return "🟣"
-        if 500 <= status <= 599:
-            return "🔴"
-        if 400 <= status <= 499:
-            return "🟡"
-        return "⚪"
+    if event == "fatal":
+        return "💥"
     return "•"
 
 def vlog(
@@ -127,49 +111,28 @@ def vlog(
     kind: str = "-",
     entity_id: Optional[int] = None,
     entity_name: str = "",
-    page: Optional[int] = None,
-    status: Optional[int] = None,
     msg: str = "",
 ) -> None:
-    # Single-line structured logs, real-time, readable even interleaved.
-    # Example:
-    #  12.34s t1234 🟢 http worker=regions_w1/4 kind=REGION id=10000002 page=7 status=200 xpages=23 rows=...
     parts = [
         _rel_ts(),
         _tid(),
-        _icon(event, status),
+        _icon(event),
         f"{event:12s}",
         f"worker={worker}",
         f"kind={kind}",
     ]
     if entity_id is not None:
         parts.append(f"id={entity_id}")
-    if page is not None:
-        parts.append(f"page={page}")
-    if status is not None:
-        parts.append(f"status={status}")
     if entity_name:
-        # keep name short-ish to avoid huge lines
         safe = entity_name.replace("\n", " ").strip()
-        if len(safe) > 60:
-            safe = safe[:57] + "..."
+        if len(safe) > 70:
+            safe = safe[:67] + "..."
         parts.append(f"name=\"{safe}\"")
     if msg:
         parts.append(msg)
 
-    line = " ".join(parts)
     with _PRINT_LOCK:
-        print(line, flush=True)
-
-def now_utc_epoch() -> int:
-    return int(time.time())
-
-def parse_http_date_to_epoch(s: str) -> Optional[int]:
-    try:
-        dt = datetime.strptime(s, "%a, %d %b %Y %H:%M:%S %Z")
-        return int(dt.replace(tzinfo=timezone.utc).timestamp())
-    except Exception:
-        return None
+        print(" ".join(parts), flush=True)
 
 # ----------------------------
 # Global auth retry budget (shared between workers)
@@ -190,14 +153,11 @@ class GlobalBudget:
             worker=worker,
             kind=kind,
             entity_id=entity_id,
-            page=page,
-            msg=f"consume=1 reason={reason} char_id={char_id} remaining={remaining}",
+            msg=f"consume=1 reason={reason} page={page} char_id={char_id} remaining={remaining}",
         )
 
         if remaining < 0:
             raise RuntimeError("RETRY_BUDGET internal underflow")
-
-        # requisito: “Si se agota el presupuesto global -> FAIL RUN”
         if remaining == 0:
             raise RuntimeError("RETRY_BUDGET exhausted for authenticated/retry requests (401/420/429/5xx).")
 
@@ -345,7 +305,7 @@ def write_pages_cache_atomic(path: str, cache: PagesCache) -> None:
             pass
 
 # ----------------------------
-# Planning: workers count + assignment
+# Planning helpers
 # ----------------------------
 
 def clamp(v: int, lo: int, hi: int) -> int:
@@ -366,6 +326,18 @@ def greedy_balance(items: List[Tuple[int, Any]], workers: int) -> List[List[Any]
         b["w"] += w
     return [b["items"] for b in bins]
 
+def enforce_sum_limit(reg_max: int, str_max: int) -> Tuple[int, int]:
+    if reg_max + str_max <= MAX_WORKERS_SUM_LIMIT:
+        return reg_max, str_max
+    while reg_max + str_max > MAX_WORKERS_SUM_LIMIT:
+        if reg_max >= str_max and reg_max > 1:
+            reg_max -= 1
+        elif str_max > 1:
+            str_max -= 1
+        else:
+            break
+    return reg_max, str_max
+
 # ----------------------------
 # HTTP helpers (A/B)
 # ----------------------------
@@ -379,6 +351,13 @@ def parse_retry_after_seconds(resp: requests.Response) -> Optional[int]:
         return None
     try:
         return int(ra.strip())
+    except Exception:
+        return None
+
+def parse_http_date_to_epoch(s: str) -> Optional[int]:
+    try:
+        dt = datetime.strptime(s, "%a, %d %b %Y %H:%M:%S %Z")
+        return int(dt.replace(tzinfo=timezone.utc).timestamp())
     except Exception:
         return None
 
@@ -404,7 +383,7 @@ def header_int(resp: requests.Response, name: str) -> Optional[int]:
         return None
 
 # ----------------------------
-# Entity fetching with exact state machine (A/B) + visual logs
+# Entity fetching with exact state machine (A/B) + minimal logs
 # ----------------------------
 
 @dataclass
@@ -437,15 +416,15 @@ def fetch_entity_pages(
     max_expires_epoch = 0
     max_last_modified_epoch = 0
 
-    # Dedupe streaming local por worker (C).
-    # Para que sea “ligero” visualmente y seguro en memoria, lo mantenemos por entidad.
+    # Dedupe streaming local por worker (set visto) — aquí se mantiene por ENTIDAD
+    # (sin inventar pipeline; objetivo: reducir buffer)
     seen_order_ids: set[int] = set()
     rows_emitted = 0
 
     vlog(event="entity_start", worker=worker_label, kind=entity_kind, entity_id=entity_id, entity_name=entity_name, msg="start")
 
     while True:
-        # Build URL
+        # Build URL + headers
         if entity_kind == "REGION":
             url = f"{ESI_BASE_URL}/latest/markets/{entity_id}/orders/"
             headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
@@ -463,7 +442,7 @@ def fetch_entity_pages(
         try:
             resp = http_get(url, headers=headers, params=params, timeout_s=60)
         except requests.RequestException as e:
-            # tratamos como retryable (equivalente a 5xx) bajo regla (4)
+            # tratar como retryable (equivalente a 5xx) bajo regla (4)
             budget.consume_or_fail("net_err", entity_kind, entity_id, page, active_char, worker_label)
             sleep_s = 30
             vlog(
@@ -472,15 +451,14 @@ def fetch_entity_pages(
                 kind=entity_kind,
                 entity_id=entity_id,
                 entity_name=entity_name,
-                page=page,
-                msg=f"reason=net_err sleep_s={sleep_s} err={type(e).__name__}",
+                msg=f"reason=net_err page={page} sleep_s={sleep_s} err={type(e).__name__}",
             )
             time.sleep(sleep_s)
             continue
 
         status = resp.status_code
 
-        # Track maxima of Expires/Last-Modified
+        # Track maxima of Expires/Last-Modified (para finalize)
         exp_e = take_expires_epoch(resp) or 0
         lm_e = take_last_modified_epoch(resp) or 0
         if exp_e > max_expires_epoch:
@@ -488,38 +466,7 @@ def fetch_entity_pages(
         if lm_e > max_last_modified_epoch:
             max_last_modified_epoch = lm_e
 
-        # Helpful headers for visibility (rate/error limiting)
         xpages_h = header_int(resp, "X-Pages")
-        err_rem = resp.headers.get("X-ESI-Error-Limit-Remain")
-        err_rst = resp.headers.get("X-ESI-Error-Limit-Reset")
-        rat_rem = resp.headers.get("X-Ratelimit-Remaining")
-        rat_lim = resp.headers.get("X-Ratelimit-Limit")
-        retry_after = resp.headers.get("Retry-After")
-
-        # Print a per-request “HTTP line” for real-time visibility
-        extra = []
-        if xpages_h is not None:
-            extra.append(f"xpages={xpages_h}")
-        if err_rem is not None and err_rst is not None:
-            extra.append(f"esi_err={err_rem}/{err_rst}s")
-        if rat_rem is not None and rat_lim is not None:
-            extra.append(f"rl={rat_rem}/{rat_lim}")
-        if retry_after is not None:
-            extra.append(f"retry_after={retry_after}")
-        extra.append(f"budget={budget.remaining()}")
-        if active_char:
-            extra.append(f"char={active_char}")
-
-        vlog(
-            event="http",
-            worker=worker_label,
-            kind=entity_kind,
-            entity_id=entity_id,
-            entity_name=entity_name,
-            page=page,
-            status=status,
-            msg=" ".join(extra),
-        )
 
         # ----------------------------
         # B) rules by status
@@ -536,32 +483,15 @@ def fetch_entity_pages(
             except Exception:
                 body = []
 
-            new_rows_this_page = 0
-            dupes_this_page = 0
-
             for o in body:
                 try:
                     oid = int(o.get("order_id"))
                 except Exception:
                     continue
                 if oid in seen_order_ids:
-                    dupes_this_page += 1
                     continue
                 seen_order_ids.add(oid)
                 rows_emitted += 1
-                new_rows_this_page += 1
-
-            # Per-page ingestion summary (still real-time)
-            vlog(
-                event="http",
-                worker=worker_label,
-                kind=entity_kind,
-                entity_id=entity_id,
-                entity_name=entity_name,
-                page=page,
-                status=200,
-                msg=f"ingest new={new_rows_this_page} dupes={dupes_this_page} total_emitted={rows_emitted}",
-            )
 
             # X-Pages logic (A/B(1))
             if xpages_h is not None:
@@ -572,8 +502,6 @@ def fetch_entity_pages(
                     continue
                 if page == xpages:
                     break  # FIN without asking page+1
-
-                # Defensive: if somehow page > xpages, also finish
                 break
 
             # No X-Pages => keep incrementing until collision
@@ -595,13 +523,11 @@ def fetch_entity_pages(
                         kind=entity_kind,
                         entity_id=entity_id,
                         entity_name=entity_name,
-                        page=page,
-                        msg=f"reason=404_page1_retry sleep_s={sleep_s}",
+                        msg=f"reason=404_page1_retry page={page} sleep_s={sleep_s}",
                     )
                     time.sleep(sleep_s)
                     continue
 
-                # ignore structure and do not include in cache
                 vlog(
                     event="entity_ignored",
                     worker=worker_label,
@@ -629,7 +555,6 @@ def fetch_entity_pages(
             if entity_kind != "STRUCTURE":
                 raise RuntimeError(f"Unexpected 401 for REGION entity_id={entity_id} page={page}")
 
-            # rotate token + sleep 5s + retry same page; consume global budget
             cid_before, _ = rotator.current() if rotator else (None, None)
             budget.consume_or_fail("401", entity_kind, entity_id, page, cid_before, worker_label)
             cid_new, _ = rotator.rotate_next() if rotator else (None, None)
@@ -640,25 +565,22 @@ def fetch_entity_pages(
                 kind=entity_kind,
                 entity_id=entity_id,
                 entity_name=entity_name,
-                page=page,
-                msg=f"reason=401 rotate {cid_before}->{cid_new} sleep_s={sleep_s}",
+                msg=f"reason=401 rotate {cid_before}->{cid_new} page={page} sleep_s={sleep_s}",
             )
             time.sleep(sleep_s)
             continue
 
         if status in (420, 429) or (500 <= status <= 599):
-            # retry/backoff; Retry-After preferred else 30s
             ra = parse_retry_after_seconds(resp)
             sleep_s = ra if (ra is not None and ra > 0) else 30
-            budget.consume_or_fail(str(status), entity_kind, entity_id, page, active_char, worker_label)
+            budget.consume_or_fail(str(status), entity_kind, entity_id, page, (rotator.current()[0] if rotator else None), worker_label)
             vlog(
                 event="retry",
                 worker=worker_label,
                 kind=entity_kind,
                 entity_id=entity_id,
                 entity_name=entity_name,
-                page=page,
-                msg=f"reason={status} sleep_s={sleep_s}",
+                msg=f"reason={status} page={page} sleep_s={sleep_s}",
             )
             time.sleep(sleep_s)
             continue
@@ -672,7 +594,7 @@ def fetch_entity_pages(
                     kind=entity_kind,
                     entity_id=entity_id,
                     entity_name=entity_name,
-                    msg=f"reason=other4xx status={status}",
+                    msg=f"reason=other4xx status={status} page={page}",
                 )
                 return EntityResult(
                     entity_kind=entity_kind,
@@ -718,29 +640,15 @@ def ceil_div(a: int, b: int) -> int:
     return int(math.ceil(a / float(b))) if b else a
 
 def update_max_slow(*, current_max: int, recommended_max: int, min_workers: int) -> int:
-    # Increase: +1 max per run
     if recommended_max > current_max:
         return current_max + 1
 
-    # Decrease: only if recommended < current/4
     if recommended_max < (current_max / 4.0):
         lower_bound = min_workers * 2
         new_max = max(lower_bound, current_max - ceil_div(current_max, 2))
         return max(new_max, lower_bound)
 
     return current_max
-
-def enforce_sum_limit(reg_max: int, str_max: int) -> Tuple[int, int]:
-    if reg_max + str_max <= MAX_WORKERS_SUM_LIMIT:
-        return reg_max, str_max
-    while reg_max + str_max > MAX_WORKERS_SUM_LIMIT:
-        if reg_max >= str_max and reg_max > 1:
-            reg_max -= 1
-        elif str_max > 1:
-            str_max -= 1
-        else:
-            break
-    return reg_max, str_max
 
 # ----------------------------
 # Tokens
@@ -782,7 +690,6 @@ def main() -> int:
 
     vlog(event="phase", msg="loading indices...")
 
-    # Load truth lists
     regions = read_jsonl_gz(SDE_REGIONS_PATH)
     region_ids = [int(r["regionID"]) for r in regions if "regionID" in r]
     region_name_by_id = {int(r["regionID"]): str(r.get("region", "")) for r in regions if "regionID" in r}
@@ -793,24 +700,20 @@ def main() -> int:
 
     vlog(event="phase", msg=f"regions_count={len(region_ids)} structures_market_count={len(structure_ids)}")
 
-    # Tokens
     tokens = merge_tokens(EOU_ACCESS_TOKENS_1, EOU_ACCESS_TOKENS_2)
     rotator = TokenRotator(tokens, PRIMARY_CHAR_ID) if tokens else None
     vlog(event="phase", msg=f"tokens_count={len(tokens)} primary_char_id={PRIMARY_CHAR_ID}")
 
-    # Load cache
     cache0 = load_pages_cache(PAGES_CACHE_PATH)
     station_pages_cache, struct_pages_cache, reg_max_current, str_max_current = build_cache_maps(cache0)
     reg_max_current, str_max_current = enforce_sum_limit(reg_max_current, str_max_current)
 
-    # Planner weights (new => pages=0)
     region_items: List[Tuple[int, int]] = [(int(station_pages_cache.get(rid, 0)), rid) for rid in region_ids]
     struct_items: List[Tuple[int, int]] = [(int(struct_pages_cache.get(sid, 0)), sid) for sid in structure_ids]
 
     total_region_pages = sum(w for w, _ in region_items)
     total_struct_pages = sum(w for w, _ in struct_items)
 
-    # Choose worker counts for this run
     reg_workers = calc_recommended_workers(total_region_pages, REGIONS_TARGET_PAGES_PER_WORKER, REGIONS_WORKERS_MIN, reg_max_current)
     str_workers = calc_recommended_workers(total_struct_pages, STRUCTS_TARGET_PAGES_PER_WORKER, STRUCTS_WORKERS_MIN, str_max_current)
     reg_workers, str_workers = enforce_sum_limit(reg_workers, str_workers)
@@ -818,14 +721,11 @@ def main() -> int:
     vlog(event="phase", msg=f"planner regions_total_pages_cached={total_region_pages} workers={reg_workers} max={reg_max_current} min={REGIONS_WORKERS_MIN}")
     vlog(event="phase", msg=f"planner structs_total_pages_cached={total_struct_pages} workers={str_workers} max={str_max_current} min={STRUCTS_WORKERS_MIN}")
 
-    # Assign entities to workers (greedy)
     reg_assign = greedy_balance(region_items, reg_workers)
     str_assign = greedy_balance(struct_items, str_workers)
 
-    # Global budget shared across workers
     budget = GlobalBudget(RETRY_BUDGET)
 
-    # Aggregates
     max_expires_epoch = 0
     max_last_modified_epoch = 0
 
@@ -867,7 +767,6 @@ def main() -> int:
         vlog(event="worker_done", worker=label, kind="STRUCTURE", msg="done")
         return out
 
-    # Execute in parallel (workers), but no pipelining inside workers/entities.
     vlog(event="phase", msg="phase=workers start")
     t0 = time.time()
 
@@ -885,7 +784,6 @@ def main() -> int:
 
     vlog(event="phase", msg=f"phase=workers end elapsed_s={time.time()-t0:.2f}")
 
-    # Aggregate maxima + observed pages
     for r in results:
         max_expires_epoch = max(max_expires_epoch, r.max_expires_epoch)
         max_last_modified_epoch = max(max_last_modified_epoch, r.max_last_modified_epoch)
@@ -900,12 +798,11 @@ def main() -> int:
                 pages_val = int(r.xpages) if (r.had_xpages and r.xpages is not None) else int(r.pages_ok)
                 struct_pages_observed[r.entity_id] = pages_val
 
-    # Build new cache (D)
     new_stations = [
         CacheStation(regionID=rid, region=region_name_by_id.get(rid, ""), pages=int(region_pages_observed.get(rid, 0)))
         for rid in sorted(region_ids)
     ]
-    new_structs = []
+    new_structs: List[CacheStructure] = []
     for sid in sorted(structure_ids):
         if sid in ignored_structures:
             continue
@@ -913,7 +810,6 @@ def main() -> int:
             CacheStructure(stationID=sid, station=structure_name_by_id.get(sid, ""), pages=int(struct_pages_observed.get(sid, 0)))
         )
 
-    # Recompute recommended MAX (E) from observed totals
     observed_region_pages_total = sum(s.pages for s in new_stations)
     observed_struct_pages_total = sum(s.pages for s in new_structs)
 
@@ -936,11 +832,9 @@ def main() -> int:
         structures=new_structs,
     )
 
-    # Write cache only on success
     write_pages_cache_atomic(PAGES_CACHE_PATH, new_cache)
     vlog(event="phase", msg=f"cache_written path={PAGES_CACHE_PATH} stations={len(new_stations)} structures={len(new_structs)}")
 
-    # Outputs for finalize step
     print(f"max_expires_epoch={max_expires_epoch}", flush=True)
     print(f"max_last_modified_epoch={max_last_modified_epoch}", flush=True)
     return 0
@@ -949,5 +843,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as e:
-        vlog(event="phase", msg=f"FATAL {e}")
+        vlog(event="fatal", msg=str(e))
         raise
