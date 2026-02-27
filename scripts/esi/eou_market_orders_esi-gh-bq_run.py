@@ -43,21 +43,17 @@ OUT_DIR = os.environ.get("OUT_DIR", ".tmp_eou_market_orders")
 EOU_ACCESS_TOKENS_1 = os.environ.get("EOU_ACCESS_TOKENS_1", "")
 EOU_ACCESS_TOKENS_2 = os.environ.get("EOU_ACCESS_TOKENS_2", "")
 
-# Archivo de hubs (nuevo requisito)
 HUBS_PATH = os.environ.get("HUBS_PATH", "data/esi/hubs.jsonl")
 
-# Defaults if no cache exists (E)
 DEFAULT_REGIONS_WORKERS_MAX = 8
 DEFAULT_STRUCTS_WORKERS_MAX = 3
 
-# Restriction global (E)
 MAX_WORKERS_SUM_LIMIT = 13
 
 USER_AGENT = os.environ.get("ESI_USER_AGENT", "EOU/market-orders (+https://github.com/landu-eou/eou)")
 
-# Umbrales para decidir station vs structure (según tu regla)
 STATION_MIN_ID = 60_000_000
-STATION_MAX_ID = 70_000_000  # exclusivo: [60M,70M) es station; >=70M es structure
+STATION_MAX_ID = 70_000_000  # [60M,70M) station ; >=70M structure
 
 # ----------------------------
 # Minimal logs
@@ -120,6 +116,11 @@ def vlog(
 # ----------------------------
 
 class GlobalBudget:
+    """
+    RETRY_BUDGET cuenta *reintentos*. Si budget=3:
+      - puedes consumir 1 hasta llegar a 0 (aún permitido),
+      - sólo fallas si necesitas consumir otra vez y pasa a -1.
+    """
     def __init__(self, initial: int):
         self._lock = threading.Lock()
         self._remaining = initial
@@ -137,9 +138,8 @@ class GlobalBudget:
             msg=f"consume=1 reason={reason} page={page} char_id={char_id} remaining={remaining}",
         )
 
+        # ✅ FIX: fallar sólo si se pasa de 0 -> -1 (o menos)
         if remaining < 0:
-            raise RuntimeError("RETRY_BUDGET internal underflow")
-        if remaining == 0:
             raise RuntimeError("RETRY_BUDGET exhausted for authenticated/retry requests (401/420/429/5xx).")
 
 # ----------------------------
@@ -201,22 +201,6 @@ def read_jsonl_gz(path: str) -> List[Dict[str, Any]]:
 
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
-
-def write_text_atomic(path: str, content: str) -> None:
-    tmp_dir = os.path.dirname(path) or "."
-    ensure_dir(tmp_dir)
-    fd, tmp_path = tempfile.mkstemp(prefix=".tmp_", suffix=".tmp", dir=tmp_dir)
-    os.close(fd)
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(tmp_path, path)
-    finally:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except Exception:
-            pass
 
 def write_jsonl_atomic(path: str, rows: List[Dict[str, Any]]) -> None:
     tmp_dir = os.path.dirname(path) or "."
@@ -424,28 +408,73 @@ def normalize_range_to_int64(r: Any) -> Optional[int]:
     except Exception:
         return None
 
-def normalize_order_raw(o: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _as_int(v: Any, default: Optional[int] = None) -> Optional[int]:
+    if v is None:
+        return default
     try:
-        r_int = normalize_range_to_int64(o.get("range"))
-        if r_int is None:
-            return None
-        out = {
-            "duration": int(o.get("duration")),
-            "is_buy_order": bool(o.get("is_buy_order")),
-            "issued": str(o.get("issued")),
-            "location_id": int(o.get("location_id")),
-            "min_volume": int(o.get("min_volume")),
-            "order_id": int(o.get("order_id")),
-            "price": float(o.get("price")),
-            "range": int(r_int),
-            "system_id": int(o.get("system_id")),
-            "type_id": int(o.get("type_id")),
-            "volume_remain": int(o.get("volume_remain")),
-            "volume_total": int(o.get("volume_total")),
-        }
-        return out
+        return int(v)
     except Exception:
+        return default
+
+def _as_float(v: Any, default: Optional[float] = None) -> Optional[float]:
+    if v is None:
+        return default
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+def normalize_order_raw(o: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Mantiene RAW tal y como pediste, pero:
+      - range: string -> int64 según reglas
+      - min_volume: si no viene, lo guardamos como 0 (para evitar descartar sells)
+    """
+    r_int = normalize_range_to_int64(o.get("range"))
+    if r_int is None:
         return None
+
+    duration = _as_int(o.get("duration"))
+    issued = o.get("issued")
+    location_id = _as_int(o.get("location_id"))
+    order_id = _as_int(o.get("order_id"))
+    price = _as_float(o.get("price"))
+    system_id = _as_int(o.get("system_id"))
+    type_id = _as_int(o.get("type_id"))
+    volume_remain = _as_int(o.get("volume_remain"))
+    volume_total = _as_int(o.get("volume_total"))
+
+    # Campos obligatorios (excepto min_volume)
+    if (
+        duration is None
+        or issued is None
+        or location_id is None
+        or order_id is None
+        or price is None
+        or system_id is None
+        or type_id is None
+        or volume_remain is None
+        or volume_total is None
+    ):
+        return None
+
+    min_volume = _as_int(o.get("min_volume"), default=0)  # ✅ FIX
+
+    out = {
+        "duration": int(duration),
+        "is_buy_order": bool(o.get("is_buy_order")),
+        "issued": str(issued),
+        "location_id": int(location_id),
+        "min_volume": int(min_volume),
+        "order_id": int(order_id),
+        "price": float(price),
+        "range": int(r_int),
+        "system_id": int(system_id),
+        "type_id": int(type_id),
+        "volume_remain": int(volume_remain),
+        "volume_total": int(volume_total),
+    }
+    return out
 
 # ----------------------------
 # Per-worker hubs aggregation
@@ -470,10 +499,7 @@ def hub_add(hubs: Dict[int, HubAgg], raw: Dict[str, Any]) -> None:
         cur.value_sum += value
 
 # ----------------------------
-# Entity fetching state machine (A/B)
-# - NO logs per page
-# - Dedupe per worker
-# - Update hubs per order (after dedupe)
+# Entity state machine
 # ----------------------------
 
 @dataclass
@@ -525,7 +551,11 @@ def fetch_entity_pages(
             active_char = cid
             if not tok:
                 raise RuntimeError("No access tokens available for authenticated structure requests.")
-            headers = {"Accept": "application/json", "User-Agent": USER_AGENT, "Authorization": f"Bearer {tok}"}
+            headers = {
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
+                "Authorization": f"Bearer {tok}",
+            }
 
         params = {"datasource": ESI_DATASOURCE, "page": page}
 
@@ -575,10 +605,7 @@ def fetch_entity_pages(
                 seen_order_ids_worker.add(oid)
                 rows_emitted += 1
 
-                # NUEVO: acumulación hubs (solo tras dedupe)
                 hub_add(hubs_worker, raw)
-
-                # No se escribe ni se comitea ninguna orden
 
             # X-Pages regla de oro
             if xpages_h is not None:
@@ -591,7 +618,6 @@ def fetch_entity_pages(
                     break
                 break
 
-            # sin X-Pages: avanzar hasta colisión
             page += 1
             continue
 
@@ -612,7 +638,7 @@ def fetch_entity_pages(
                      msg="reason=404_page1_after_retry")
                 return EntityResult(entity_kind, entity_id, 0, False, None, True, max_expires_epoch, max_last_modified_epoch, 0, rows_seen)
 
-            break  # page>1 => fin paginación
+            break
 
         # (3) 401 (solo structures)
         if status == 401:
@@ -708,11 +734,6 @@ def build_hubs_rows(
             continue
         sortable.append((agg.orders, len(agg.types), agg.value_sum, loc))
 
-    # Orden:
-    # 1) orders DESC
-    # 2) types DESC
-    # 3) value_sum DESC
-    # 4) location_id ASC
     sortable.sort(key=lambda x: (-x[0], -x[1], -x[2], x[3]))
 
     rows: List[Dict[str, Any]] = []
@@ -783,7 +804,6 @@ def main() -> int:
     total_raw_seen = 0
     total_unique_emitted = 0
 
-    # NUEVO: hubs global
     hubs_global: Dict[int, HubAgg] = {}
     hubs_lock = threading.Lock()
 
@@ -886,7 +906,6 @@ def main() -> int:
 
     vlog(event="phase", msg=f"ingest_summary raw_seen={total_raw_seen} unique_emitted_worker_deduped={total_unique_emitted}")
 
-    # Rebuild pages cache (exclude ignored structures)
     new_stations = [
         CacheStation(regionID=rid, region=region_name_by_id.get(rid, ""), pages=int(region_pages_observed.get(rid, 0)))
         for rid in sorted(region_ids)
@@ -921,16 +940,13 @@ def main() -> int:
         structures=new_structs,
     )
 
-    # Escribir cache SOLO en éxito (estamos en éxito)
     write_pages_cache_atomic(PAGES_CACHE_PATH, new_cache)
     vlog(event="phase", msg=f"cache_written path={PAGES_CACHE_PATH} stations={len(new_stations)} structures={len(new_structs)}")
 
-    # NUEVO: escribir hubs SOLO en éxito
     hubs_rows = build_hubs_rows(hubs_global, stations_by_id, structures_by_id)
     write_jsonl_atomic(HUBS_PATH, hubs_rows)
     vlog(event="phase", msg=f"hubs_written path={HUBS_PATH} rows={len(hubs_rows)}")
 
-    # Exports for finalize step
     print(f"max_expires_epoch={max_expires_epoch}", flush=True)
     print(f"max_last_modified_epoch={max_last_modified_epoch}", flush=True)
     return 0
