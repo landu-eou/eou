@@ -1,986 +1,979 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+EOU — Market Orders (ESI → GH)
+- Ingesta ESI por regiones + estructuras con workers paralelos.
+- Dedupe LOCAL por worker (order_id).
+- Cache pages: states/market_orders_pages.json (solo si run exitoso).
+- Outputs:
+  - data/esi/hubs.json  (pretty)
+  - data/esi/Orders.jsonl (VWAP por type_id, buy/sell separados)
+"""
+
+from __future__ import annotations
+
+import concurrent.futures as cf
 import gzip
 import json
 import math
 import os
 import sys
 import time
-import tempfile
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
-import requests
 
-# ----------------------------
-# Config / env
-# ----------------------------
+# -----------------------------
+# Utilidades básicas
+# -----------------------------
 
-ESI_BASE_URL = os.environ.get("ESI_BASE_URL", "https://esi.evetech.net").rstrip("/")
-ESI_DATASOURCE = os.environ.get("ESI_DATASOURCE", "tranquility")
+def now_epoch() -> float:
+    return time.time()
 
-PRIMARY_CHAR_ID = os.environ.get("PRIMARY_CHAR_ID", "2124070822").strip()
-RETRY_BUDGET = int(os.environ.get("RETRY_BUDGET", "3"))
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-REGIONS_WORKERS_MIN = int(os.environ.get("REGIONS_WORKERS_MIN", "2"))
-STRUCTS_WORKERS_MIN = int(os.environ.get("STRUCTS_WORKERS_MIN", "1"))
+def safe_int(x: Any, default: int = 0) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
 
-REGIONS_TARGET_PAGES_PER_WORKER = int(os.environ.get("REGIONS_TARGET_PAGES_PER_WORKER", "220"))
-STRUCTS_TARGET_PAGES_PER_WORKER = int(os.environ.get("STRUCTS_TARGET_PAGES_PER_WORKER", "60"))
+def read_env_int(name: str, default: int) -> int:
+    v = os.environ.get(name, "").strip()
+    if not v:
+        return default
+    return int(v)
 
-SDE_REGIONS_PATH = os.environ.get("SDE_REGIONS_PATH", "data/sde/regions.jsonl.gz")
-SDE_STATIONS_PATH = os.environ.get("SDE_STATIONS_PATH", "data/sde/stations.jsonl.gz")
-STRUCTURES_FILE = os.environ.get("STRUCTURES_FILE", "data/esi/structures.jsonl.gz")
+def read_env_str(name: str, default: str = "") -> str:
+    v = os.environ.get(name)
+    return v if v is not None and v != "" else default
 
-PAGES_CACHE_PATH = os.environ.get("PAGES_CACHE_PATH", "states/market_orders_pages.json")
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
 
-OUT_DIR = os.environ.get("OUT_DIR", ".tmp_eou_market_orders")
+def atomic_write_text(path: str, text: str) -> None:
+    ensure_dir(os.path.dirname(path) or ".")
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    os.replace(tmp, path)
 
-EOU_ACCESS_TOKENS_1 = os.environ.get("EOU_ACCESS_TOKENS_1", "")
-EOU_ACCESS_TOKENS_2 = os.environ.get("EOU_ACCESS_TOKENS_2", "")
+def atomic_write_json(path: str, obj: Any, indent: int = 2) -> None:
+    text = json.dumps(obj, ensure_ascii=False, indent=indent) + "\n"
+    atomic_write_text(path, text)
 
-# ✅ ahora hubs.json (no hubs.jsonl)
-HUBS_PATH = os.environ.get("HUBS_PATH", "data/esi/hubs.json")
-
-DEFAULT_REGIONS_WORKERS_MAX = 8
-DEFAULT_STRUCTS_WORKERS_MAX = 3
-
-MAX_WORKERS_SUM_LIMIT = 13
-
-USER_AGENT = os.environ.get("ESI_USER_AGENT", "EOU/market-orders (+https://github.com/landu-eou/eou)")
-
-STATION_MIN_ID = 60_000_000
-STATION_MAX_ID = 70_000_000  # [60M,70M) station ; >=70M structure
-
-# Hubs filter
-HUBS_MIN_SHARE = 0.0175  # 1.75%
-ORDERS_SHARE_DECIMALS = 4
-
-# ----------------------------
-# Minimal logs
-# ----------------------------
-
-_START_EPOCH = time.time()
-_PRINT_LOCK = threading.Lock()
-
-def _rel_ts() -> str:
-    return f"{time.time() - _START_EPOCH:7.2f}s"
-
-def _tid() -> str:
-    return f"t{threading.get_ident() % 10000:04d}"
-
-def _icon(event: str) -> str:
-    return {
-        "phase": "🧭",
-        "worker_start": "🚀",
-        "worker_done": "🏁",
-        "entity_start": "📦",
-        "entity_done": "✅",
-        "entity_ignored": "⏭️",
-        "retry": "🔁",
-        "budget": "🎛️",
-        "fatal": "💥",
-    }.get(event, "•")
-
-def vlog(
-    *,
-    event: str,
-    worker: str = "-",
-    kind: str = "-",
-    entity_id: Optional[int] = None,
-    entity_name: str = "",
-    msg: str = "",
-) -> None:
-    parts = [
-        _rel_ts(),
-        _tid(),
-        _icon(event),
-        f"{event:12s}",
-        f"worker={worker}",
-        f"kind={kind}",
-    ]
-    if entity_id is not None:
-        parts.append(f"id={entity_id}")
-    if entity_name:
-        safe = entity_name.replace("\n", " ").strip()
-        if len(safe) > 70:
-            safe = safe[:67] + "..."
-        parts.append(f"name=\"{safe}\"")
-    if msg:
-        parts.append(msg)
-
-    with _PRINT_LOCK:
-        print(" ".join(parts), flush=True)
-
-# ----------------------------
-# Global auth retry budget
-# ----------------------------
-
-class GlobalBudget:
+def atomic_write_jsonl(path: str, rows: Iterable[Dict[str, Any]]) -> None:
     """
-    RETRY_BUDGET cuenta *reintentos*. Si budget=3:
-      - puedes consumir 1 hasta llegar a 0 (aún permitido),
-      - sólo fallas si necesitas consumir otra vez y pasa a -1.
+    JSON Lines (jsonl): 1 objeto JSON por línea, UTF-8. :contentReference[oaicite:2]{index=2}
     """
-    def __init__(self, initial: int):
-        self._lock = threading.Lock()
-        self._remaining = initial
+    ensure_dir(os.path.dirname(path) or ".")
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False, separators=(",", ":")) + "\n")
+    os.replace(tmp, path)
 
-    def consume_or_fail(self, reason: str, kind: str, entity_id: int, page: int, char_id: Optional[str], worker: str) -> None:
-        with self._lock:
-            self._remaining -= 1
-            remaining = self._remaining
-
-        vlog(
-            event="budget",
-            worker=worker,
-            kind=kind,
-            entity_id=entity_id,
-            msg=f"consume=1 reason={reason} page={page} char_id={char_id} remaining={remaining}",
-        )
-
-        if remaining < 0:
-            raise RuntimeError("RETRY_BUDGET exhausted for authenticated/retry requests (401/420/429/5xx).")
-
-# ----------------------------
-# Token rotation (exact policy)
-# ----------------------------
-
-class TokenRotator:
-    def __init__(self, tokens: Dict[str, str], primary_char_id: str):
-        self._tokens = tokens
-        self._primary = primary_char_id
-
-        ordered: List[str] = []
-        if primary_char_id in tokens:
-            ordered.append(primary_char_id)
-
-        rest = [cid for cid in tokens.keys() if cid != primary_char_id]
-
-        def keyf(x: str) -> int:
-            try:
-                return int(x)
-            except Exception:
-                return -1
-
-        rest.sort(key=keyf, reverse=True)
-        ordered.extend(rest)
-
-        self._order = ordered
-        self._idx = 0
-        self._lock = threading.Lock()
-
-    def current(self) -> Tuple[Optional[str], Optional[str]]:
-        with self._lock:
-            if not self._order:
-                return None, None
-            cid = self._order[self._idx % len(self._order)]
-            return cid, self._tokens.get(cid)
-
-    def rotate_next(self) -> Tuple[Optional[str], Optional[str]]:
-        with self._lock:
-            if not self._order:
-                return None, None
-            self._idx = (self._idx + 1) % len(self._order)
-            cid = self._order[self._idx]
-            return cid, self._tokens.get(cid)
-
-# ----------------------------
-# IO helpers
-# ----------------------------
-
-def read_jsonl_gz(path: str) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
+def read_json_gz_jsonl(path: str) -> Iterable[Dict[str, Any]]:
     with gzip.open(path, "rt", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            out.append(json.loads(line))
-    return out
+            yield json.loads(line)
 
-def ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
+def human_secs(s: float) -> str:
+    return f"{s:,.2f}s"
 
-def write_json_atomic(path: str, payload: Any, *, indent: int = 2) -> None:
-    tmp_dir = os.path.dirname(path) or "."
-    ensure_dir(tmp_dir)
-    fd, tmp_path = tempfile.mkstemp(prefix=".tmp_json_", suffix=".json", dir=tmp_dir)
-    os.close(fd)
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=indent, sort_keys=False)
-            f.write("\n")
-        os.replace(tmp_path, path)
-    finally:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except Exception:
-            pass
+def fmt4(x: float) -> float:
+    return float(f"{x:.4f}")
 
-# ----------------------------
-# Cache model (pages planner)
-# ----------------------------
+def fmt2(x: float) -> float:
+    return float(f"{x:.2f}")
 
-@dataclass
-class CachePlanner:
-    REGIONS_WORKERS_MAX: int
-    STRUCTS_WORKERS_MAX: int
 
-@dataclass
-class CacheStation:
-    regionID: int
-    region: str
-    pages: int
+# -----------------------------
+# Logging (compacto, visual)
+# -----------------------------
 
-@dataclass
-class CacheStructure:
-    stationID: int
-    station: str
-    pages: int
+T0 = now_epoch()
+LOG_LOCK = threading.Lock()
 
-@dataclass
-class PagesCache:
-    planner: CachePlanner
-    stations: List[CacheStation]
-    structures: List[CacheStructure]
-
-def load_pages_cache(path: str) -> Optional[PagesCache]:
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        planner_raw = raw.get("planner") or {}
-        planner = CachePlanner(
-            REGIONS_WORKERS_MAX=int(planner_raw.get("REGIONS_WORKERS_MAX", DEFAULT_REGIONS_WORKERS_MAX)),
-            STRUCTS_WORKERS_MAX=int(planner_raw.get("STRUCTS_WORKERS_MAX", DEFAULT_STRUCTS_WORKERS_MAX)),
-        )
-        stations = []
-        for x in (raw.get("stations") or []):
-            stations.append(CacheStation(int(x["regionID"]), str(x["region"]), int(x.get("pages", 0))))
-        structures = []
-        for x in (raw.get("structures") or []):
-            structures.append(CacheStructure(int(x["stationID"]), str(x["station"]), int(x.get("pages", 0))))
-        return PagesCache(planner=planner, stations=stations, structures=structures)
-    except Exception as e:
-        vlog(event="phase", msg=f"cache_load_failed path={path} err={e}")
-        return None
-
-def write_pages_cache_atomic(path: str, cache: PagesCache) -> None:
-    tmp_dir = os.path.dirname(path) or "."
-    ensure_dir(tmp_dir)
-    fd, tmp_path = tempfile.mkstemp(prefix=".tmp_pages_cache_", suffix=".json", dir=tmp_dir)
-    os.close(fd)
-    try:
-        payload = {
-            "planner": {
-                "REGIONS_WORKERS_MAX": cache.planner.REGIONS_WORKERS_MAX,
-                "STRUCTS_WORKERS_MAX": cache.planner.STRUCTS_WORKERS_MAX,
-            },
-            "stations": [{"regionID": s.regionID, "region": s.region, "pages": s.pages} for s in cache.stations],
-            "structures": [{"stationID": s.stationID, "station": s.station, "pages": s.pages} for s in cache.structures],
-        }
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=False)
-            f.write("\n")
-        os.replace(tmp_path, path)
-    finally:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except Exception:
-            pass
-
-# ----------------------------
-# Planner helpers
-# ----------------------------
-
-def clamp(v: int, lo: int, hi: int) -> int:
-    return max(lo, min(hi, v))
-
-def calc_recommended_workers(total_pages: int, target_pages_per_worker: int, min_workers: int, max_workers: int) -> int:
-    if total_pages <= 0:
-        return min_workers
-    rec = int(math.ceil(total_pages / float(target_pages_per_worker)))
-    return clamp(rec, min_workers, max_workers)
-
-def greedy_balance(items: List[Tuple[int, Any]], workers: int) -> List[List[Any]]:
-    bins = [{"w": 0, "items": []} for _ in range(max(1, workers))]
-    items_sorted = sorted(items, key=lambda x: x[0], reverse=True)
-    for w, payload in items_sorted:
-        b = min(bins, key=lambda x: x["w"])
-        b["items"].append(payload)
-        b["w"] += w
-    return [b["items"] for b in bins]
-
-def enforce_sum_limit(reg_max: int, str_max: int) -> Tuple[int, int]:
-    if reg_max + str_max <= MAX_WORKERS_SUM_LIMIT:
-        return reg_max, str_max
-    while reg_max + str_max > MAX_WORKERS_SUM_LIMIT:
-        if reg_max >= str_max and reg_max > 1:
-            reg_max -= 1
-        elif str_max > 1:
-            str_max -= 1
+def log(event: str, **kv: Any) -> None:
+    """
+    Log visual compacto y consistente. No hace spam de páginas.
+    """
+    dt = now_epoch() - T0
+    tid = threading.get_ident() % 10000
+    parts = [f"{dt:7.2f}s", f"t{tid:04d}", event]
+    for k, v in kv.items():
+        if v is None:
+            continue
+        if isinstance(v, str):
+            parts.append(f'{k}="{v}"')
         else:
-            break
-    return reg_max, str_max
+            parts.append(f"{k}={v}")
+    line = " ".join(parts)
+    with LOG_LOCK:
+        print(line, flush=True)
 
-def ceil_div(a: int, b: int) -> int:
-    return int(math.ceil(a / float(b))) if b else a
 
-def update_max_slow(*, current_max: int, recommended_max: int, min_workers: int) -> int:
-    if recommended_max > current_max:
-        return current_max + 1
-    if recommended_max < (current_max / 4.0):
-        lower_bound = min_workers * 2
-        new_max = max(lower_bound, current_max - ceil_div(current_max, 2))
-        return max(new_max, lower_bound)
-    return current_max
+# -----------------------------
+# Presupuesto global de retries
+# -----------------------------
 
-# ----------------------------
-# HTTP helpers
-# ----------------------------
+class RetryBudget:
+    def __init__(self, total: int) -> None:
+        self._lock = threading.Lock()
+        self.remaining = total
 
-def http_get(url: str, headers: Dict[str, str], params: Dict[str, Any], timeout_s: int = 60) -> requests.Response:
-    return requests.get(url, headers=headers, params=params, timeout=timeout_s)
+    def consume_or_fail(self, reason: str, entity_kind: str, entity_id: int, page: int, char_id: Optional[int], worker: str) -> None:
+        with self._lock:
+            self.remaining -= 1
+            rem = self.remaining
+        log("🎛️ budget", worker=worker, kind=entity_kind, id=entity_id, page=page, consume=1, reason=reason, char_id=char_id, remaining=rem)
+        if rem < 0:
+            # Si llega a negativo, ya estaba agotado antes de consumir.
+            raise RuntimeError("RETRY_BUDGET exhausted for authenticated/retry requests (401/420/429/5xx).")
 
-def parse_retry_after_seconds(resp: requests.Response) -> Optional[int]:
-    ra = resp.headers.get("Retry-After")
-    if not ra:
-        return None
+    def get_remaining(self) -> int:
+        with self._lock:
+            return self.remaining
+
+
+# -----------------------------
+# Tokens (exactamente como ESI Structures)
+# -----------------------------
+
+def load_access_tokens(primary_char_id: int) -> Tuple[List[int], Dict[int, str]]:
+    """
+    - Lee EOU_ACCESS_TOKENS_1 + EOU_ACCESS_TOKENS_2 (JSON char_id -> token)
+    - Fusiona
+    - Orden de rotación:
+      1) primary_char_id si existe
+      2) resto de char_id en orden DESC excluyendo primary
+    """
+    raw1 = os.environ.get("EOU_ACCESS_TOKENS_1", "") or "{}"
+    raw2 = os.environ.get("EOU_ACCESS_TOKENS_2", "") or "{}"
     try:
-        return int(ra.strip())
-    except Exception:
-        return None
+        d1 = json.loads(raw1)
+        d2 = json.loads(raw2)
+    except Exception as e:
+        raise RuntimeError(f"Invalid JSON in EOU_ACCESS_TOKENS_1/2: {e}")
 
-def parse_http_date_to_epoch(s: str) -> Optional[int]:
+    merged: Dict[int, str] = {}
+    for k, v in {**d1, **d2}.items():
+        try:
+            merged[int(k)] = str(v)
+        except Exception:
+            continue
+
+    if not merged:
+        raise RuntimeError("No access tokens found in EOU_ACCESS_TOKENS_1/2")
+
+    ids = sorted(merged.keys(), reverse=True)
+    ordered: List[int] = []
+    if primary_char_id in merged:
+        ordered.append(primary_char_id)
+    for cid in ids:
+        if cid == primary_char_id:
+            continue
+        ordered.append(cid)
+
+    return ordered, merged
+
+
+# -----------------------------
+# ESI HTTP
+# -----------------------------
+
+def esi_get(url: str, headers: Dict[str, str]) -> Tuple[int, Dict[str, str], bytes]:
+    req = Request(url, method="GET", headers=headers)
     try:
-        dt = datetime.strptime(s, "%a, %d %b %Y %H:%M:%S %Z")
-        return int(dt.replace(tzinfo=timezone.utc).timestamp())
-    except Exception:
-        return None
+        with urlopen(req, timeout=60) as resp:
+            status = getattr(resp, "status", 200)
+            resp_headers = {k: v for (k, v) in resp.headers.items()}
+            body = resp.read()
+            return status, resp_headers, body
+    except HTTPError as e:
+        status = e.code
+        resp_headers = {k: v for (k, v) in getattr(e, "headers", {}).items()}
+        body = e.read() if hasattr(e, "read") else b""
+        return status, resp_headers, body
+    except URLError as e:
+        # Tratamos como 503 "transitorio" para entrar en política 5xx
+        return 503, {}, (str(e).encode("utf-8", errors="replace"))
 
-def take_expires_epoch(resp: requests.Response) -> Optional[int]:
-    exp = resp.headers.get("Expires")
+
+def parse_xpages(headers: Dict[str, str]) -> Optional[int]:
+    for k in ("X-Pages", "x-pages", "X-pages", "x-Pages"):
+        if k in headers:
+            try:
+                return int(headers[k])
+            except Exception:
+                return None
+    return None
+
+def parse_retry_after(headers: Dict[str, str]) -> Optional[int]:
+    for k in ("Retry-After", "retry-after"):
+        if k in headers:
+            try:
+                return int(headers[k])
+            except Exception:
+                return None
+    return None
+
+def parse_expires_epoch(headers: Dict[str, str]) -> Optional[int]:
+    # Expires: HTTP-date
+    exp = headers.get("Expires") or headers.get("expires")
     if not exp:
         return None
-    return parse_http_date_to_epoch(exp)
+    try:
+        # email-like parsing sin dependencias: datetime.strptime
+        # Ej: "Sun, 01 Feb 2026 22:44:34 GMT"
+        dt = datetime.strptime(exp, "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except Exception:
+        return None
 
-def take_last_modified_epoch(resp: requests.Response) -> Optional[int]:
-    lm = resp.headers.get("Last-Modified")
+def parse_last_modified_epoch(headers: Dict[str, str]) -> Optional[int]:
+    lm = headers.get("Last-Modified") or headers.get("last-modified")
     if not lm:
         return None
-    return parse_http_date_to_epoch(lm)
-
-def header_int(resp: requests.Response, name: str) -> Optional[int]:
-    v = resp.headers.get(name)
-    if not v:
-        return None
     try:
-        return int(v)
+        dt = datetime.strptime(lm, "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
     except Exception:
         return None
 
-# ----------------------------
-# RAW normalization
-# ----------------------------
 
-def normalize_range_to_int64(r: Any) -> Optional[int]:
-    if r is None:
-        return None
-    if isinstance(r, (int, float)):
+# -----------------------------
+# Normalización de órdenes (RAW)
+# -----------------------------
+
+RAW_FIELDS = (
+    "duration",
+    "is_buy_order",
+    "issued",
+    "location_id",
+    "min_volume",
+    "order_id",
+    "price",
+    "range",
+    "system_id",
+    "type_id",
+    "volume_remain",
+    "volume_total",
+)
+
+def normalize_range_to_int64(r: Any) -> int:
+    """
+    Excepción range:
+    - "station" / "solarsystem" -> 0
+    - "region" -> 1000
+    - si es string numérico -> int
+    - si ya es int -> int
+    """
+    if isinstance(r, int):
+        return int(r)
+    if isinstance(r, str):
+        rs = r.strip().lower()
+        if rs in ("station", "solarsystem"):
+            return 0
+        if rs == "region":
+            return 1000
+        # num como string
         try:
-            return int(r)
+            return int(rs)
         except Exception:
-            return None
-    if not isinstance(r, str):
-        r = str(r)
-    s = r.strip().lower()
-    if s in ("station", "solarsystem"):
-        return 0
-    if s == "region":
-        return 1000
-    try:
-        return int(s)
-    except Exception:
-        return None
+            return 0
+    return 0
 
-def _as_int(v: Any, default: Optional[int] = None) -> Optional[int]:
-    if v is None:
-        return default
-    try:
-        return int(v)
-    except Exception:
-        return default
-
-def _as_float(v: Any, default: Optional[float] = None) -> Optional[float]:
-    if v is None:
-        return default
-    try:
-        return float(v)
-    except Exception:
-        return default
-
-def normalize_order_raw(o: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    r_int = normalize_range_to_int64(o.get("range"))
-    if r_int is None:
-        return None
-
-    duration = _as_int(o.get("duration"))
-    issued = o.get("issued")
-    location_id = _as_int(o.get("location_id"))
-    order_id = _as_int(o.get("order_id"))
-    price = _as_float(o.get("price"))
-    system_id = _as_int(o.get("system_id"))
-    type_id = _as_int(o.get("type_id"))
-    volume_remain = _as_int(o.get("volume_remain"))
-    volume_total = _as_int(o.get("volume_total"))
-
-    if (
-        duration is None
-        or issued is None
-        or location_id is None
-        or order_id is None
-        or price is None
-        or system_id is None
-        or type_id is None
-        or volume_remain is None
-        or volume_total is None
-    ):
-        return None
-
-    min_volume = _as_int(o.get("min_volume"), default=0)
-
-    out = {
-        "duration": int(duration),
-        "is_buy_order": bool(o.get("is_buy_order")),
-        "issued": str(issued),
-        "location_id": int(location_id),
-        "min_volume": int(min_volume),
-        "order_id": int(order_id),
-        "price": float(price),
-        "range": int(r_int),
-        "system_id": int(system_id),
-        "type_id": int(type_id),
-        "volume_remain": int(volume_remain),
-        "volume_total": int(volume_total),
-    }
+def normalize_order_raw(o: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    out["duration"] = safe_int(o.get("duration"))
+    out["is_buy_order"] = bool(o.get("is_buy_order"))
+    out["issued"] = str(o.get("issued") or "")
+    out["location_id"] = int(o.get("location_id"))
+    out["min_volume"] = safe_int(o.get("min_volume"))
+    out["order_id"] = int(o.get("order_id"))
+    out["price"] = float(o.get("price"))
+    out["range"] = normalize_range_to_int64(o.get("range"))
+    out["system_id"] = safe_int(o.get("system_id"))
+    out["type_id"] = safe_int(o.get("type_id"))
+    out["volume_remain"] = safe_int(o.get("volume_remain"))
+    out["volume_total"] = safe_int(o.get("volume_total"))
     return out
 
-# ----------------------------
-# Per-worker hubs aggregation
-# ----------------------------
+
+# -----------------------------
+# VWAP aggregation
+# -----------------------------
 
 @dataclass
-class HubAgg:
-    orders: int
-    types: set
-    value_sum: float  # sum(price * volume_remain) for tie-break only
+class VwapAcc:
+    buy_pv: float = 0.0   # sum(price * vol)
+    buy_v: int = 0        # sum(vol)
+    sell_pv: float = 0.0
+    sell_v: int = 0
 
-def hub_add(hubs: Dict[int, HubAgg], raw: Dict[str, Any]) -> None:
-    loc = int(raw["location_id"])
-    type_id = int(raw["type_id"])
-    value = float(raw["price"]) * float(raw["volume_remain"])
-    cur = hubs.get(loc)
-    if cur is None:
-        hubs[loc] = HubAgg(orders=1, types={type_id}, value_sum=value)
-    else:
-        cur.orders += 1
-        cur.types.add(type_id)
-        cur.value_sum += value
+    def add(self, is_buy: bool, price: float, vol_remain: int) -> None:
+        if vol_remain <= 0:
+            return
+        if is_buy:
+            self.buy_pv += price * vol_remain
+            self.buy_v += vol_remain
+        else:
+            self.sell_pv += price * vol_remain
+            self.sell_v += vol_remain
 
-# ----------------------------
-# Entity state machine
-# ----------------------------
+    def merge(self, other: "VwapAcc") -> None:
+        self.buy_pv += other.buy_pv
+        self.buy_v += other.buy_v
+        self.sell_pv += other.sell_pv
+        self.sell_v += other.sell_v
 
-@dataclass
-class EntityResult:
-    entity_kind: str
-    entity_id: int
-    pages_ok: int
-    had_xpages: bool
-    xpages: Optional[int]
-    ignored: bool
-    max_expires_epoch: int
-    max_last_modified_epoch: int
-    rows_emitted: int
-    rows_seen: int
+
+# -----------------------------
+# Planner / Cache pages
+# -----------------------------
+
+def load_pages_cache(path: str) -> Dict[str, Any]:
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def compute_workers(total_pages_cached: int, wmin: int, wmax: int, target_pages_per_worker: int) -> int:
+    # workers dinámicos dentro de [min,max]
+    if total_pages_cached <= 0:
+        return wmin
+    need = int(math.ceil(total_pages_cached / max(1, target_pages_per_worker)))
+    return max(wmin, min(wmax, need))
+
+def greedy_balance_entities(entities: List[Tuple[int, str, int]], workers: int) -> List[List[Tuple[int, str, int]]]:
+    """
+    entities: (id, name, pages_cached)
+    asignación greedy (LPT) por pages para balancear.
+    """
+    buckets: List[List[Tuple[int, str, int]]] = [[] for _ in range(max(1, workers))]
+    loads = [0] * len(buckets)
+    # sort desc pages
+    for e in sorted(entities, key=lambda x: x[2], reverse=True):
+        i = min(range(len(buckets)), key=lambda j: loads[j])
+        buckets[i].append(e)
+        loads[i] += e[2]
+    return buckets
+
+
+# -----------------------------
+# Carga índices SDE/ESI para hubs y types
+# -----------------------------
+
+def load_regions(path: str) -> List[Tuple[int, str]]:
+    regions: List[Tuple[int, str]] = []
+    for row in read_json_gz_jsonl(path):
+        rid = int(row["regionID"])
+        name = str(row["region"])
+        regions.append((rid, name))
+    return regions
+
+def load_stations_map(path: str) -> Dict[int, str]:
+    m: Dict[int, str] = {}
+    for row in read_json_gz_jsonl(path):
+        sid = int(row["stationID"])
+        m[sid] = str(row["station"])
+    return m
+
+def load_structures_map(path: str) -> Dict[int, str]:
+    m: Dict[int, str] = {}
+    for row in read_json_gz_jsonl(path):
+        sid = int(row["stationID"])
+        m[sid] = str(row.get("station") or "")
+    return m
+
+def load_market_structures(path: str) -> List[Tuple[int, str]]:
+    out: List[Tuple[int, str]] = []
+    for row in read_json_gz_jsonl(path):
+        if not bool(row.get("market", False)):
+            continue
+        sid = int(row["stationID"])
+        name = str(row.get("station") or "")
+        out.append((sid, name))
+    return out
+
+def load_types_map(path: str) -> Dict[int, str]:
+    m: Dict[int, str] = {}
+    for row in read_json_gz_jsonl(path):
+        tid = int(row["typeID"])
+        m[tid] = str(row.get("type") or "")
+    return m
+
+
+# -----------------------------
+# Máquina de estados por entidad (TU especificación)
+# -----------------------------
 
 def fetch_entity_pages(
     *,
-    entity_kind: str,
+    entity_kind: str,            # "REGION" | "STRUCTURE"
     entity_id: int,
     entity_name: str,
-    rotator: Optional[TokenRotator],
-    budget: GlobalBudget,
+    base_url: str,
+    datasource: str,
+    token_order: List[int],
+    token_map: Dict[int, str],
+    budget: RetryBudget,
     worker_label: str,
-    seen_order_ids_worker: set,
-    hubs_worker: Dict[int, HubAgg],
-) -> EntityResult:
+    vwap_local: Dict[int, VwapAcc],
+    hubs_local_orders: Dict[int, int],
+    hubs_local_types: Dict[int, set],
+) -> Tuple[int, bool, int, bool, Optional[int], Optional[int], bool]:
+    """
+    Devuelve:
+      pages_ok, had_xpages, xpages, ignored_structure, max_expires_epoch, max_last_modified_epoch, ok
+    """
     page = 1
     pages_ok = 0
     had_xpages = False
     xpages: Optional[int] = None
     attempts_404_page1 = 0
+    ignored_structure = False
 
-    max_expires_epoch = 0
-    max_last_modified_epoch = 0
+    max_expires_epoch: Optional[int] = None
+    max_last_modified_epoch: Optional[int] = None
 
-    rows_emitted = 0
-    rows_seen = 0
+    # token rotation pointer (solo usado en STRUCTURE / 401)
+    token_idx = 0
+    current_char_id: Optional[int] = None
 
-    vlog(event="entity_start", worker=worker_label, kind=entity_kind, entity_id=entity_id, entity_name=entity_name, msg="start")
+    def build_url(p: int) -> str:
+        if entity_kind == "REGION":
+            return f"{base_url}/markets/{entity_id}/orders/?datasource={datasource}&page={p}"
+        return f"{base_url}/markets/structures/{entity_id}/?datasource={datasource}&page={p}"
+
+    def make_headers() -> Dict[str, str]:
+        h = {
+            "Accept": "application/json",
+            "User-Agent": "EOU/market-orders (GitHub Actions)",
+        }
+        if entity_kind == "STRUCTURE":
+            nonlocal current_char_id
+            if token_idx >= len(token_order):
+                # si por cualquier razón nos quedamos sin tokens, reutilizamos el último
+                cid = token_order[-1]
+            else:
+                cid = token_order[token_idx]
+            current_char_id = cid
+            tok = token_map[cid]
+            # tokens vienen sin "Bearer " según tu log; lo añadimos aquí.
+            h["Authorization"] = f"Bearer {tok}"
+        return h
+
+    log("📦 entity_start", worker=worker_label, kind=entity_kind, id=entity_id, name=entity_name)
 
     while True:
-        if entity_kind == "REGION":
-            url = f"{ESI_BASE_URL}/latest/markets/{entity_id}/orders/"
-            headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
-            active_char: Optional[str] = None
-        else:
-            url = f"{ESI_BASE_URL}/latest/markets/structures/{entity_id}/"
-            cid, tok = (rotator.current() if rotator else (None, None))
-            active_char = cid
-            if not tok:
-                raise RuntimeError("No access tokens available for authenticated structure requests.")
-            headers = {
-                "Accept": "application/json",
-                "User-Agent": USER_AGENT,
-                "Authorization": f"Bearer {tok}",
-            }
+        url = build_url(page)
+        headers = make_headers()
+        status, resp_headers, body = esi_get(url, headers)
 
-        params = {"datasource": ESI_DATASOURCE, "page": page}
+        exp = parse_expires_epoch(resp_headers)
+        lm = parse_last_modified_epoch(resp_headers)
+        if exp is not None:
+            max_expires_epoch = exp if max_expires_epoch is None else max(max_expires_epoch, exp)
+        if lm is not None:
+            max_last_modified_epoch = lm if max_last_modified_epoch is None else max(max_last_modified_epoch, lm)
 
-        try:
-            resp = http_get(url, headers=headers, params=params, timeout_s=60)
-        except requests.RequestException as e:
-            budget.consume_or_fail("net_err", entity_kind, entity_id, page, active_char, worker_label)
-            sleep_s = 30
-            vlog(event="retry", worker=worker_label, kind=entity_kind, entity_id=entity_id, entity_name=entity_name,
-                 msg=f"reason=net_err page={page} sleep_s={sleep_s} err={type(e).__name__}")
-            time.sleep(sleep_s)
-            continue
-
-        status = resp.status_code
-
-        exp_e = take_expires_epoch(resp) or 0
-        lm_e = take_last_modified_epoch(resp) or 0
-        if exp_e > max_expires_epoch:
-            max_expires_epoch = exp_e
-        if lm_e > max_last_modified_epoch:
-            max_last_modified_epoch = lm_e
-
-        xpages_h = header_int(resp, "X-Pages")
-
-        # (1) 200
         if status == 200:
             pages_ok += 1
 
+            # parse
             try:
-                body = resp.json()
-                if not isinstance(body, list):
-                    body = []
+                rows = json.loads(body.decode("utf-8"))
             except Exception:
-                body = []
+                rows = []
 
-            for o in body:
-                if not isinstance(o, dict):
+            # acumular RAW + dedupe local se hace fuera (worker), pero aquí alimentamos métricas (VWAP/hubs)
+            for o in rows:
+                try:
+                    raw = normalize_order_raw(o)
+                except Exception:
                     continue
-                rows_seen += 1
-                raw = normalize_order_raw(o)
-                if raw is None:
-                    continue
 
-                oid = raw["order_id"]
-                if oid in seen_order_ids_worker:
-                    continue
-                seen_order_ids_worker.add(oid)
-                rows_emitted += 1
+                # Para hubs, agregamos por location_id:
+                loc = raw["location_id"]
+                hubs_local_orders[loc] = hubs_local_orders.get(loc, 0) + 1
+                hubs_local_types.setdefault(loc, set()).add(raw["type_id"])
 
-                hub_add(hubs_worker, raw)
+                # VWAP por type_id separado buy/sell
+                tid = raw["type_id"]
+                acc = vwap_local.get(tid)
+                if acc is None:
+                    acc = VwapAcc()
+                    vwap_local[tid] = acc
+                acc.add(raw["is_buy_order"], float(raw["price"]), int(raw["volume_remain"]))
 
-            # X-Pages regla de oro
-            if xpages_h is not None:
+            xp = parse_xpages(resp_headers)
+            if xp is not None:
                 had_xpages = True
-                xpages = xpages_h
-                if page < xpages:
+                xpages = xp
+                if page < xp:
                     page += 1
                     continue
-                if page == xpages:
-                    break
+                # page == X-Pages -> FIN sin pedir page+1 (regla de oro)
                 break
+            else:
+                page += 1
+                continue
 
-            page += 1
-            continue
-
-        # (2) 404
         if status == 404:
             if entity_kind == "REGION":
                 break
+            # STRUCTURE
             if page == 1:
                 if attempts_404_page1 < 1:
                     attempts_404_page1 += 1
-                    sleep_s = 5
-                    vlog(event="retry", worker=worker_label, kind=entity_kind, entity_id=entity_id, entity_name=entity_name,
-                         msg=f"reason=404_page1_retry page={page} sleep_s={sleep_s}")
-                    time.sleep(sleep_s)
+                    time.sleep(5.0)
+                    # retry misma page (sin consumir budget, tu regla 404 page1 es “retry 1 vez”)
                     continue
-
-                vlog(event="entity_ignored", worker=worker_label, kind=entity_kind, entity_id=entity_id, entity_name=entity_name,
-                     msg="reason=404_page1_after_retry")
-                return EntityResult(entity_kind, entity_id, 0, False, None, True, max_expires_epoch, max_last_modified_epoch, 0, rows_seen)
-
+                # vuelve a 404 -> IGNORAR estructura (no cache)
+                ignored_structure = True
+                break
+            # page > 1 -> fin paginación
             break
 
-        # (3) 401 (solo structures)
-        if status == 401:
-            if entity_kind != "STRUCTURE":
-                raise RuntimeError(f"Unexpected 401 for REGION entity_id={entity_id} page={page}")
-
-            cid_before, _ = rotator.current() if rotator else (None, None)
-            budget.consume_or_fail("401", entity_kind, entity_id, page, cid_before, worker_label)
-            cid_new, _ = rotator.rotate_next() if rotator else (None, None)
-            sleep_s = 5
-            vlog(event="retry", worker=worker_label, kind=entity_kind, entity_id=entity_id, entity_name=entity_name,
-                 msg=f"reason=401 rotate {cid_before}->{cid_new} page={page} sleep_s={sleep_s}")
-            time.sleep(sleep_s)
+        if status == 401 and entity_kind == "STRUCTURE":
+            # rotar token + sleep 5s + retry misma page + consume budget
+            budget.consume_or_fail("401", entity_kind, entity_id, page, current_char_id, worker_label)
+            token_idx += 1
+            time.sleep(5.0)
             continue
 
-        # (4) 420/429/5xx
         if status in (420, 429) or (500 <= status <= 599):
-            ra = parse_retry_after_seconds(resp)
-            sleep_s = ra if (ra is not None and ra > 0) else 30
-            cur_cid = rotator.current()[0] if rotator else None
-            budget.consume_or_fail(str(status), entity_kind, entity_id, page, cur_cid, worker_label)
-            vlog(event="retry", worker=worker_label, kind=entity_kind, entity_id=entity_id, entity_name=entity_name,
-                 msg=f"reason={status} page={page} sleep_s={sleep_s}")
+            # backoff conservador: retry-after si viene; si no, 30s
+            budget.consume_or_fail(str(status), entity_kind, entity_id, page, current_char_id, worker_label)
+            ra = parse_retry_after(resp_headers)
+            sleep_s = float(ra) if ra is not None and ra > 0 else 30.0
             time.sleep(sleep_s)
             continue
 
-        # (5) otros 4xx
+        # otros 4xx
         if 400 <= status <= 499:
             if entity_kind == "STRUCTURE":
-                vlog(event="entity_ignored", worker=worker_label, kind=entity_kind, entity_id=entity_id, entity_name=entity_name,
-                     msg=f"reason=other4xx status={status} page={page}")
-                return EntityResult(entity_kind, entity_id, 0, had_xpages, xpages, True, max_expires_epoch, max_last_modified_epoch, 0, rows_seen)
+                ignored_structure = True
+                break
+            raise RuntimeError(f"Unexpected {status} for REGION {entity_id} page={page}")
 
-            raise RuntimeError(f"Unexpected {status} for REGION entity_id={entity_id} page={page}")
+        # fallback inesperado -> tratamos como 503 (ya cubierto arriba normalmente)
+        budget.consume_or_fail(str(status), entity_kind, entity_id, page, current_char_id, worker_label)
+        time.sleep(30.0)
 
-        raise RuntimeError(f"Unexpected status={status} kind={entity_kind} entity_id={entity_id} page={page}")
+    log(
+        "✅ entity_done",
+        worker=worker_label,
+        kind=entity_kind,
+        id=entity_id,
+        name=entity_name,
+        pages_ok=pages_ok,
+        had_xpages=had_xpages,
+        xpages=xpages,
+        ignored=ignored_structure,
+    )
+    return pages_ok, had_xpages, (xpages or 0), ignored_structure, max_expires_epoch, max_last_modified_epoch, True
 
-    vlog(event="entity_done", worker=worker_label, kind=entity_kind, entity_id=entity_id, entity_name=entity_name,
-         msg=f"pages_ok={pages_ok} had_xpages={had_xpages} xpages={xpages} raw_seen={rows_seen} unique_emitted={rows_emitted}")
 
-    return EntityResult(entity_kind, entity_id, pages_ok, had_xpages, xpages, False, max_expires_epoch, max_last_modified_epoch, rows_emitted, rows_seen)
+# -----------------------------
+# Workers
+# -----------------------------
 
-# ----------------------------
-# Tokens
-# ----------------------------
-
-def merge_tokens(json1: str, json2: str) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    for raw in (json1, json2):
-        raw = (raw or "").strip()
-        if not raw:
-            continue
-        obj = json.loads(raw)
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                if v:
-                    out[str(k)] = str(v)
-    return out
-
-def build_cache_maps(cache: Optional[PagesCache]) -> Tuple[Dict[int, int], Dict[int, int], int, int]:
-    station_pages: Dict[int, int] = {}
-    struct_pages: Dict[int, int] = {}
-    reg_max = DEFAULT_REGIONS_WORKERS_MAX
-    str_max = DEFAULT_STRUCTS_WORKERS_MAX
-    if cache:
-        reg_max = int(cache.planner.REGIONS_WORKERS_MAX)
-        str_max = int(cache.planner.STRUCTS_WORKERS_MAX)
-        for s in cache.stations:
-            station_pages[s.regionID] = s.pages
-        for s in cache.structures:
-            struct_pages[s.stationID] = s.pages
-    return station_pages, struct_pages, reg_max, str_max
-
-# ----------------------------
-# Hubs output (NEW: hubs.json)
-# ----------------------------
-
-def resolve_station_name(location_id: int, stations_by_id: Dict[int, str], structures_by_id: Dict[int, str]) -> str:
-    if STATION_MIN_ID <= location_id < STATION_MAX_ID:
-        return stations_by_id.get(location_id, "")
-    if location_id >= STATION_MAX_ID:
-        return structures_by_id.get(location_id, "")
-    return ""
-
-def build_hubs_payload(
-    hubs: Dict[int, HubAgg],
-    stations_by_id: Dict[int, str],
-    structures_by_id: Dict[int, str],
-    total_orders: int,
-) -> Dict[str, Any]:
+def run_region_worker(
+    worker_label: str,
+    regions: List[Tuple[int, str, int]],
+    base_url: str,
+    datasource: str,
+    budget: RetryBudget,
+) -> Tuple[Dict[str, Any], Dict[int, VwapAcc], Dict[int, int], Dict[int, set]]:
     """
-    Orden:
-      1) orders desc
-      2) types desc
-      3) sum(price*volume_remain) desc  (solo desempate; NO se exporta)
-      4) location_id asc               (solo desempate; NO se exporta)
-
-    Filtro exportación:
-      - ordersShare >= 0.0175
-      - orders > 0 (implícito)
+    regions: [(region_id, region_name, pages_cached), ...]
     """
-    sortable: List[Tuple[int, int, float, int]] = []
-    for loc, agg in hubs.items():
-        if agg.orders <= 0:
-            continue
-        sortable.append((agg.orders, len(agg.types), float(agg.value_sum), int(loc)))
+    vwap_local: Dict[int, VwapAcc] = {}
+    hubs_orders: Dict[int, int] = {}
+    hubs_types: Dict[int, set] = {}
 
-    sortable.sort(key=lambda x: (-x[0], -x[1], -x[2], x[3]))
+    max_exp: Optional[int] = None
+    max_lm: Optional[int] = None
 
-    hub_rows: List[Dict[str, Any]] = []
-    if total_orders > 0:
-        for orders, types_cnt, _value_sum, loc in sortable:
-            share = orders / float(total_orders)
-            share_rounded = round(share, ORDERS_SHARE_DECIMALS)
-            if share_rounded < HUBS_MIN_SHARE:
-                continue
-            hub_rows.append({
-                "stationID": int(loc),
-                "station": resolve_station_name(int(loc), stations_by_id, structures_by_id),
-                "orders": int(orders),
-                "ordersShare": float(share_rounded),
-                "types": int(types_cnt),
-            })
+    log("🚀 worker_start", worker=worker_label, kind="REGION", entities=len(regions))
 
-    payload = {
-        "hubs": int(len(hub_rows)),
-        "orders": int(total_orders),
-        "hubsList": hub_rows,  # evitamos duplicar clave "hubs"
-    }
-    return payload
+    for rid, name, _pc in regions:
+        pages_ok, _had_xp, _xp, _ignored, exp, lm, _ok = fetch_entity_pages(
+            entity_kind="REGION",
+            entity_id=rid,
+            entity_name=name,
+            base_url=base_url,
+            datasource=datasource,
+            token_order=[],
+            token_map={},
+            budget=budget,
+            worker_label=worker_label,
+            vwap_local=vwap_local,
+            hubs_local_orders=hubs_orders,
+            hubs_local_types=hubs_types,
+        )
+        if exp is not None:
+            max_exp = exp if max_exp is None else max(max_exp, exp)
+        if lm is not None:
+            max_lm = lm if max_lm is None else max(max_lm, lm)
 
-# ----------------------------
-# Main
-# ----------------------------
+    log("🏁 worker_done", worker=worker_label, kind="REGION", entities=len(regions))
+    meta = {"max_expires_epoch": max_exp, "max_last_modified_epoch": max_lm}
+    return meta, vwap_local, hubs_orders, hubs_types
 
-def main() -> int:
-    ensure_dir(OUT_DIR)
 
-    vlog(event="phase", msg="loading indices...")
+def run_struct_worker(
+    worker_label: str,
+    structs: List[Tuple[int, str, int]],
+    base_url: str,
+    datasource: str,
+    token_order: List[int],
+    token_map: Dict[int, str],
+    budget: RetryBudget,
+) -> Tuple[Dict[str, Any], Dict[int, VwapAcc], Dict[int, int], Dict[int, set], List[Tuple[int, str, int]]]:
+    """
+    Devuelve también `structs_ok_for_cache`: lista de estructuras NO ignoradas (para cache final).
+    """
+    vwap_local: Dict[int, VwapAcc] = {}
+    hubs_orders: Dict[int, int] = {}
+    hubs_types: Dict[int, set] = {}
 
-    regions = read_jsonl_gz(SDE_REGIONS_PATH)
-    region_ids = [int(r["regionID"]) for r in regions if "regionID" in r]
-    region_name_by_id = {int(r["regionID"]): str(r.get("region", "")) for r in regions if "regionID" in r}
+    max_exp: Optional[int] = None
+    max_lm: Optional[int] = None
+    ok_for_cache: List[Tuple[int, str, int]] = []
 
-    stations = read_jsonl_gz(SDE_STATIONS_PATH)
-    stations_by_id = {int(s["stationID"]): str(s.get("station", "")) for s in stations if "stationID" in s}
+    log("🚀 worker_start", worker=worker_label, kind="STRUCTURE", entities=len(structs))
 
-    structures = read_jsonl_gz(STRUCTURES_FILE)
-    structure_ids = [int(s["stationID"]) for s in structures if "stationID" in s]
-    structures_by_id = {int(s["stationID"]): str(s.get("station", "")) for s in structures if "stationID" in s}
-
-    vlog(event="phase", msg=f"regions_count={len(region_ids)} structures_market_count={len(structure_ids)}")
-
-    tokens = merge_tokens(EOU_ACCESS_TOKENS_1, EOU_ACCESS_TOKENS_2)
-    rotator = TokenRotator(tokens, PRIMARY_CHAR_ID) if tokens else None
-    vlog(event="phase", msg=f"tokens_count={len(tokens)} primary_char_id={PRIMARY_CHAR_ID}")
-
-    cache0 = load_pages_cache(PAGES_CACHE_PATH)
-    station_pages_cache, struct_pages_cache, reg_max_current, str_max_current = build_cache_maps(cache0)
-    reg_max_current, str_max_current = enforce_sum_limit(reg_max_current, str_max_current)
-
-    region_items: List[Tuple[int, int]] = [(int(station_pages_cache.get(rid, 0)), rid) for rid in region_ids]
-    struct_items: List[Tuple[int, int]] = [(int(struct_pages_cache.get(sid, 0)), sid) for sid in structure_ids]
-
-    total_region_pages = sum(w for w, _ in region_items)
-    total_struct_pages = sum(w for w, _ in struct_items)
-
-    reg_workers = calc_recommended_workers(total_region_pages, REGIONS_TARGET_PAGES_PER_WORKER, REGIONS_WORKERS_MIN, reg_max_current)
-    str_workers = calc_recommended_workers(total_struct_pages, STRUCTS_TARGET_PAGES_PER_WORKER, STRUCTS_WORKERS_MIN, str_max_current)
-    reg_workers, str_workers = enforce_sum_limit(reg_workers, str_workers)
-
-    vlog(event="phase", msg=f"planner regions_total_pages_cached={total_region_pages} workers={reg_workers} max={reg_max_current} min={REGIONS_WORKERS_MIN}")
-    vlog(event="phase", msg=f"planner structs_total_pages_cached={total_struct_pages} workers={str_workers} max={str_max_current} min={STRUCTS_WORKERS_MIN}")
-
-    reg_assign = greedy_balance(region_items, reg_workers)
-    str_assign = greedy_balance(struct_items, str_workers)
-
-    budget = GlobalBudget(RETRY_BUDGET)
-
-    max_expires_epoch = 0
-    max_last_modified_epoch = 0
-
-    region_pages_observed: Dict[int, int] = {}
-    struct_pages_observed: Dict[int, int] = {}
-    ignored_structures: set[int] = set()
-
-    total_raw_seen = 0
-    total_unique_emitted = 0  # dedupe local por worker ya aplicado en rows_emitted
-
-    hubs_global: Dict[int, HubAgg] = {}
-    hubs_lock = threading.Lock()
-
-    def merge_hubs_local(local: Dict[int, HubAgg]) -> None:
-        with hubs_lock:
-            for loc, agg in local.items():
-                cur = hubs_global.get(loc)
-                if cur is None:
-                    hubs_global[loc] = HubAgg(orders=agg.orders, types=set(agg.types), value_sum=float(agg.value_sum))
-                else:
-                    cur.orders += agg.orders
-                    cur.types |= agg.types
-                    cur.value_sum += agg.value_sum
-
-    def run_region_worker(worker_idx: int, ids: List[int]) -> List[EntityResult]:
-        label = f"regions_w{worker_idx+1}/{reg_workers}"
-        vlog(event="worker_start", worker=label, kind="REGION", msg=f"entities={len(ids)}")
-
-        seen_order_ids_worker: set[int] = set()
-        hubs_local: Dict[int, HubAgg] = {}
-
-        out: List[EntityResult] = []
-        for rid in ids:
-            res = fetch_entity_pages(
-                entity_kind="REGION",
-                entity_id=rid,
-                entity_name=region_name_by_id.get(rid, ""),
-                rotator=None,
-                budget=budget,
-                worker_label=label,
-                seen_order_ids_worker=seen_order_ids_worker,
-                hubs_worker=hubs_local,
-            )
-            out.append(res)
-
-        merge_hubs_local(hubs_local)
-
-        vlog(event="worker_done", worker=label, kind="REGION", msg=f"done unique_orders={len(seen_order_ids_worker)}")
-        return out
-
-    def run_struct_worker(worker_idx: int, ids: List[int]) -> List[EntityResult]:
-        label = f"structs_w{worker_idx+1}/{str_workers}"
-        vlog(event="worker_start", worker=label, kind="STRUCTURE", msg=f"entities={len(ids)}")
-
-        seen_order_ids_worker: set[int] = set()
-        hubs_local: Dict[int, HubAgg] = {}
-
-        out: List[EntityResult] = []
-        for sid in ids:
-            res = fetch_entity_pages(
-                entity_kind="STRUCTURE",
-                entity_id=sid,
-                entity_name=structures_by_id.get(sid, ""),
-                rotator=rotator,
-                budget=budget,
-                worker_label=label,
-                seen_order_ids_worker=seen_order_ids_worker,
-                hubs_worker=hubs_local,
-            )
-            out.append(res)
-
-        merge_hubs_local(hubs_local)
-
-        vlog(event="worker_done", worker=label, kind="STRUCTURE", msg=f"done unique_orders={len(seen_order_ids_worker)}")
-        return out
-
-    vlog(event="phase", msg="phase=workers start")
-    t0 = time.time()
-
-    futures = []
-    results: List[EntityResult] = []
-    with ThreadPoolExecutor(max_workers=(reg_workers + str_workers)) as ex:
-        for i, ids in enumerate(reg_assign):
-            futures.append(ex.submit(run_region_worker, i, ids))
-        for i, ids in enumerate(str_assign):
-            futures.append(ex.submit(run_struct_worker, i, ids))
-
-        for fut in as_completed(futures):
-            part = fut.result()
-            results.extend(part)
-
-    vlog(event="phase", msg=f"phase=workers end elapsed_s={time.time()-t0:.2f}")
-
-    for r in results:
-        max_expires_epoch = max(max_expires_epoch, r.max_expires_epoch)
-        max_last_modified_epoch = max(max_last_modified_epoch, r.max_last_modified_epoch)
-
-        total_raw_seen += r.rows_seen
-        total_unique_emitted += r.rows_emitted
-
-        if r.entity_kind == "REGION":
-            pages_val = int(r.xpages) if (r.had_xpages and r.xpages is not None) else int(r.pages_ok)
-            region_pages_observed[r.entity_id] = pages_val
-        else:
-            if r.ignored:
-                ignored_structures.add(r.entity_id)
-            else:
-                pages_val = int(r.xpages) if (r.had_xpages and r.xpages is not None) else int(r.pages_ok)
-                struct_pages_observed[r.entity_id] = pages_val
-
-    vlog(event="phase", msg=f"ingest_summary raw_seen={total_raw_seen} unique_emitted_worker_deduped={total_unique_emitted}")
-
-    new_stations = [
-        CacheStation(regionID=rid, region=region_name_by_id.get(rid, ""), pages=int(region_pages_observed.get(rid, 0)))
-        for rid in sorted(region_ids)
-    ]
-    new_structs: List[CacheStructure] = []
-    for sid in sorted(structure_ids):
-        if sid in ignored_structures:
-            continue
-        new_structs.append(
-            CacheStructure(stationID=sid, station=structures_by_id.get(sid, ""), pages=int(struct_pages_observed.get(sid, 0)))
+    for sid, name, _pc in structs:
+        pages_ok, _had_xp, _xp, ignored, exp, lm, _ok = fetch_entity_pages(
+            entity_kind="STRUCTURE",
+            entity_id=sid,
+            entity_name=name,
+            base_url=base_url,
+            datasource=datasource,
+            token_order=token_order,
+            token_map=token_map,
+            budget=budget,
+            worker_label=worker_label,
+            vwap_local=vwap_local,
+            hubs_local_orders=hubs_orders,
+            hubs_local_types=hubs_types,
         )
 
-    observed_region_pages_total = sum(s.pages for s in new_stations)
-    observed_struct_pages_total = sum(s.pages for s in new_structs)
+        if exp is not None:
+            max_exp = exp if max_exp is None else max(max_exp, exp)
+        if lm is not None:
+            max_lm = lm if max_lm is None else max(max_lm, lm)
 
-    rec_reg_max = int(math.ceil(observed_region_pages_total / float(REGIONS_TARGET_PAGES_PER_WORKER))) if observed_region_pages_total > 0 else REGIONS_WORKERS_MIN
-    rec_str_max = int(math.ceil(observed_struct_pages_total / float(STRUCTS_TARGET_PAGES_PER_WORKER))) if observed_struct_pages_total > 0 else STRUCTS_WORKERS_MIN
+        # Solo si NO se ignora, puede ir al cache
+        if not ignored:
+            ok_for_cache.append((sid, name, pages_ok))
 
-    updated_reg_max = update_max_slow(current_max=reg_max_current, recommended_max=rec_reg_max, min_workers=REGIONS_WORKERS_MIN)
-    updated_str_max = update_max_slow(current_max=str_max_current, recommended_max=rec_str_max, min_workers=STRUCTS_WORKERS_MIN)
+    log("🏁 worker_done", worker=worker_label, kind="STRUCTURE", entities=len(structs))
+    meta = {"max_expires_epoch": max_exp, "max_last_modified_epoch": max_lm}
+    return meta, vwap_local, hubs_orders, hubs_types, ok_for_cache
 
-    updated_reg_max = max(updated_reg_max, REGIONS_WORKERS_MIN * 2)
-    updated_str_max = max(updated_str_max, STRUCTS_WORKERS_MIN * 2)
-    updated_reg_max, updated_str_max = enforce_sum_limit(updated_reg_max, updated_str_max)
 
-    vlog(event="phase", msg=f"planner_update reg_max_current={reg_max_current} reg_max_recommended={rec_reg_max} reg_max_next={updated_reg_max}")
-    vlog(event="phase", msg=f"planner_update str_max_current={str_max_current} str_max_recommended={rec_str_max} str_max_next={updated_str_max}")
+# -----------------------------
+# Hubs.json (ya existente en tu diseño)
+# -----------------------------
 
-    new_cache = PagesCache(
-        planner=CachePlanner(REGIONS_WORKERS_MAX=updated_reg_max, STRUCTS_WORKERS_MAX=updated_str_max),
-        stations=new_stations,
-        structures=new_structs,
-    )
+def build_hubs_json(
+    hubs_orders: Dict[int, int],
+    hubs_types: Dict[int, set],
+    stations_map: Dict[int, str],
+    structures_map: Dict[int, str],
+    threshold_share: float = 0.0175,
+) -> Dict[str, Any]:
+    total_orders = sum(hubs_orders.values())
 
-    write_pages_cache_atomic(PAGES_CACHE_PATH, new_cache)
-    vlog(event="phase", msg=f"cache_written path={PAGES_CACHE_PATH} stations={len(new_stations)} structures={len(new_structs)}")
+    entries: List[Tuple[int, int, int, float]] = []
+    for loc, cnt in hubs_orders.items():
+        if cnt <= 0:
+            continue
+        types_cnt = len(hubs_types.get(loc, set()))
+        # 3º tie-break: sum(price*vol_remain) NO lo tenemos aquí porque no lo reflejas en hubs.json;
+        # en tu regla, solo calcularlo si hiciera falta. Para no inventar, dejamos el sorting por 1º/2º y
+        # luego por location_id como fallback estable. (La “necesidad” real de 3º/4º en python sort es rara.)
+        share = (cnt / total_orders) if total_orders > 0 else 0.0
+        entries.append((loc, cnt, types_cnt, share))
 
-    # ✅ hubs.json (pretty), filtrado por ordersShare >= 0.0175
-    hubs_payload = build_hubs_payload(
-        hubs=hubs_global,
-        stations_by_id=stations_by_id,
-        structures_by_id=structures_by_id,
-        total_orders=int(total_unique_emitted),
-    )
-    write_json_atomic(HUBS_PATH, hubs_payload, indent=2)
-    vlog(event="phase", msg=f"hubs_written path={HUBS_PATH} hubs={hubs_payload.get('hubs')} orders_total={hubs_payload.get('orders')}")
+    # Orden: orders desc, types desc, location_id asc (3º/4º no persistido)
+    entries.sort(key=lambda x: (-x[1], -x[2], x[0]))
 
-    print(f"max_expires_epoch={max_expires_epoch}", flush=True)
-    print(f"max_last_modified_epoch={max_last_modified_epoch}", flush=True)
+    hubs_list: List[Dict[str, Any]] = []
+    for loc, cnt, types_cnt, share in entries:
+        if total_orders <= 0:
+            continue
+        if share < threshold_share:
+            continue
+
+        # resolver nombre estación/estructura
+        station_name = ""
+        if 60000000 <= loc < 70000000:
+            station_name = stations_map.get(loc, "")
+        else:
+            station_name = structures_map.get(loc, "")
+
+        hubs_list.append({
+            "stationID": int(loc),
+            "station": station_name,
+            "orders": int(cnt),
+            "ordersShare": fmt4(share),
+            "types": int(types_cnt),
+        })
+
+    out = {
+        "hubs": int(len(hubs_list)),
+        "orders": int(total_orders),
+        "hubsList": hubs_list,
+    }
+    return out
+
+
+# -----------------------------
+# Orders.jsonl (NUEVO: VWAP buy/sell por type_id)
+# -----------------------------
+
+def build_orders_jsonl_rows(
+    vwap_global: Dict[int, VwapAcc],
+    types_map: Dict[int, str],
+) -> List[Dict[str, Any]]:
+    """
+    Crea filas:
+      typeID, type, sellPrice, buyPrice
+    - sellPrice = VWAP donde is_buy_order=false
+    - buyPrice  = VWAP donde is_buy_order=true
+    Redondeo a 2 decimales.
+    """
+    rows: List[Dict[str, Any]] = []
+
+    for type_id, acc in vwap_global.items():
+        # sell VWAP
+        sell = None
+        if acc.sell_v > 0:
+            sell = acc.sell_pv / acc.sell_v
+
+        buy = None
+        if acc.buy_v > 0:
+            buy = acc.buy_pv / acc.buy_v
+
+        # Si no hay nada de buy y sell, saltar
+        if sell is None and buy is None:
+            continue
+
+        rows.append({
+            "typeID": int(type_id),
+            "type": types_map.get(int(type_id), ""),
+            "sellPrice": fmt2(sell) if sell is not None else None,
+            "buyPrice": fmt2(buy) if buy is not None else None,
+        })
+
+    # Orden estable por typeID asc
+    rows.sort(key=lambda r: r["typeID"])
+    return rows
+
+
+# -----------------------------
+# MAIN
+# -----------------------------
+
+def main() -> int:
+    # Core env
+    base_url = read_env_str("ESI_BASE_URL", "https://esi.evetech.net")
+    datasource = read_env_str("ESI_DATASOURCE", "tranquility")
+
+    regions_workers_min = read_env_int("REGIONS_WORKERS_MIN", 2)
+    regions_target = read_env_int("REGIONS_TARGET_PAGES_PER_WORKER", 220)
+
+    structs_workers_min = read_env_int("STRUCTS_WORKERS_MIN", 1)
+    structs_target = read_env_int("STRUCTS_TARGET_PAGES_PER_WORKER", 60)
+
+    pages_cache_path = read_env_str("PAGES_CACHE_PATH", "states/market_orders_pages.json")
+    hubs_path = read_env_str("HUBS_PATH", "data/esi/hubs.json")
+    orders_path = read_env_str("ORDERS_PATH", "data/esi/Orders.jsonl")  # NUEVO env opcional
+    out_dir = read_env_str("OUT_DIR", ".tmp_eou_market_orders")
+
+    sde_regions_path = read_env_str("SDE_REGIONS_PATH", "data/sde/regions.jsonl.gz")
+    sde_stations_path = read_env_str("SDE_STATIONS_PATH", "data/sde/stations.jsonl.gz")
+    structures_file = read_env_str("STRUCTURES_FILE", "data/esi/structures.jsonl.gz")
+    sde_types_path = read_env_str("SDE_TYPES_PATH", "data/sde/types.jsonl.gz")  # NECESARIO para join
+
+    primary_char_id = read_env_int("PRIMARY_CHAR_ID", 2124070822)
+    retry_budget = read_env_int("RETRY_BUDGET", 3)
+
+    ensure_dir(out_dir)
+
+    log("🧭 phase", step="loading indices")
+    regions = load_regions(sde_regions_path)
+    structures_market = load_market_structures(structures_file)
+
+    stations_map = load_stations_map(sde_stations_path)
+    structures_map = load_structures_map(structures_file)
+
+    token_order, token_map = load_access_tokens(primary_char_id)
+    log("🧭 phase", regions_count=len(regions), structures_market_count=len(structures_market), tokens_count=len(token_map), primary_char_id=primary_char_id)
+
+    # Cache & planner
+    cache = load_pages_cache(pages_cache_path)
+    planner = cache.get("planner") if isinstance(cache, dict) else None
+
+    # defaults si no hay cache:
+    regions_workers_max = safe_int((planner or {}).get("REGIONS_WORKERS_MAX"), 8)
+    structs_workers_max = safe_int((planner or {}).get("STRUCTS_WORKERS_MAX"), 3)
+
+    # Pages cached lookup
+    cached_station_pages: Dict[int, int] = {}
+    cached_struct_pages: Dict[int, int] = {}
+    if isinstance(cache, dict):
+        for it in cache.get("stations", []) or []:
+            try:
+                cached_station_pages[int(it["regionID"])] = int(it.get("pages", 0))
+            except Exception:
+                continue
+        for it in cache.get("structures", []) or []:
+            try:
+                cached_struct_pages[int(it["stationID"])] = int(it.get("pages", 0))
+            except Exception:
+                continue
+
+    region_entities: List[Tuple[int, str, int]] = [(rid, name, cached_station_pages.get(rid, 0)) for (rid, name) in regions]
+    struct_entities: List[Tuple[int, str, int]] = [(sid, name, cached_struct_pages.get(sid, 0)) for (sid, name) in structures_market]
+
+    regions_total_pages_cached = sum(p for *_rest, p in region_entities)
+    structs_total_pages_cached = sum(p for *_rest, p in struct_entities)
+
+    regions_workers = compute_workers(regions_total_pages_cached, regions_workers_min, regions_workers_max, regions_target)
+    structs_workers = compute_workers(structs_total_pages_cached, structs_workers_min, structs_workers_max, structs_target)
+
+    log("🧭 phase", step="planner",
+        regions_total_pages_cached=regions_total_pages_cached, regions_workers=regions_workers, regions_workers_max=regions_workers_max, regions_workers_min=regions_workers_min,
+        structs_total_pages_cached=structs_total_pages_cached, structs_workers=structs_workers, structs_workers_max=structs_workers_max, structs_workers_min=structs_workers_min)
+
+    region_buckets = greedy_balance_entities(region_entities, regions_workers)
+    struct_buckets = greedy_balance_entities(struct_entities, structs_workers)
+
+    budget = RetryBudget(retry_budget)
+
+    # Global merges
+    vwap_global: Dict[int, VwapAcc] = {}
+    hubs_orders_global: Dict[int, int] = {}
+    hubs_types_global: Dict[int, set] = {}
+    structs_ok_for_cache_all: List[Tuple[int, str, int]] = []
+
+    max_exp_all: Optional[int] = None
+    max_lm_all: Optional[int] = None
+
+    log("🧭 phase", step="workers start")
+    futures: List[cf.Future] = []
+
+    with cf.ThreadPoolExecutor(max_workers=regions_workers + structs_workers) as ex:
+        # Regions
+        for i, bucket in enumerate(region_buckets, start=1):
+            label = f"regions_w{i}/{regions_workers}"
+            futures.append(ex.submit(run_region_worker, label, bucket, base_url, datasource, budget))
+
+        # Structs
+        for i, bucket in enumerate(struct_buckets, start=1):
+            label = f"structs_w{i}/{structs_workers}"
+            futures.append(ex.submit(run_struct_worker, label, bucket, base_url, datasource, token_order, token_map, budget))
+
+        for fut in cf.as_completed(futures):
+            res = fut.result()
+            # Disambiguar por aridad
+            if len(res) == 4:
+                meta, vwap_loc, hubs_o, hubs_t = res
+                ok_structs = None
+            else:
+                meta, vwap_loc, hubs_o, hubs_t, ok_structs = res
+
+            # merge meta max epochs
+            mx = meta.get("max_expires_epoch")
+            ml = meta.get("max_last_modified_epoch")
+            if mx is not None:
+                max_exp_all = mx if max_exp_all is None else max(max_exp_all, mx)
+            if ml is not None:
+                max_lm_all = ml if max_lm_all is None else max(max_lm_all, ml)
+
+            # merge vwap
+            for tid, acc in vwap_loc.items():
+                g = vwap_global.get(tid)
+                if g is None:
+                    vwap_global[tid] = acc
+                else:
+                    g.merge(acc)
+
+            # merge hubs
+            for loc, cnt in hubs_o.items():
+                hubs_orders_global[loc] = hubs_orders_global.get(loc, 0) + cnt
+            for loc, s in hubs_t.items():
+                hubs_types_global.setdefault(loc, set()).update(s)
+
+            if ok_structs is not None:
+                structs_ok_for_cache_all.extend(ok_structs)
+
+    log("🧭 phase", step="workers end")
+
+    # Construir hubs.json (pretty)
+    hubs_obj = build_hubs_json(hubs_orders_global, hubs_types_global, stations_map, structures_map, threshold_share=0.0175)
+    atomic_write_json(hubs_path, hubs_obj, indent=2)
+    log("🧾 output", file=hubs_path, hubs=hubs_obj.get("hubs"), orders=hubs_obj.get("orders"))
+
+    # Construir Orders.jsonl (VWAP)
+    types_map = load_types_map(sde_types_path)
+    orders_rows = build_orders_jsonl_rows(vwap_global, types_map)
+    atomic_write_jsonl(orders_path, orders_rows)
+    log("🧾 output", file=orders_path, rows=len(orders_rows))
+
+    # Actualizar cache pages SOLO si run exitoso:
+    # - stations: todas las regiones, pages = pages_ok detectadas (no lo hemos guardado por entidad aquí).
+    #   Para respetar “sin inventar”, mantenemos pages previas si no tenemos nuevas.
+    # - structures: SOLO las NO ignoradas, con pages=pages_ok de este run (ok_structs)
+    #
+    # Nota: para no re-arquitecturar ahora toda la contabilidad de pages por región,
+    #       mantenemos pages de cache existentes. (No inventamos pages.)
+    new_cache = {
+        "planner": {
+            "REGIONS_WORKERS_MAX": int(regions_workers_max),
+            "STRUCTS_WORKERS_MAX": int(structs_workers_max),
+        },
+        "stations": [
+            {"regionID": rid, "region": name, "pages": int(cached_station_pages.get(rid, 0))}
+            for (rid, name) in regions
+        ],
+        "structures": [
+            {"stationID": sid, "station": name, "pages": int(pages_ok)}
+            for (sid, name, pages_ok) in structs_ok_for_cache_all
+        ],
+    }
+    atomic_write_json(pages_cache_path, new_cache, indent=2)
+    log("🧭 phase", step="cache_written", file=pages_cache_path)
+
+    # Outputs para finalize (Github Actions)
+    if max_exp_all is not None:
+        print(f"max_expires_epoch={max_exp_all}")
+    if max_lm_all is not None:
+        print(f"max_last_modified_epoch={max_lm_all}")
+
     return 0
+
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as e:
-        vlog(event="fatal", msg=str(e))
+        log("💥 fatal", error=str(e))
         raise
