@@ -110,3 +110,12 @@
 {"killID":133669676,"zkb":{"hash":"f439bed5dbe7adf61a025887be0528556c84aa1e","locationID":50005962,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133669686,"zkb":{"hash":"be81e337035dd062f5f4d639dfb31cadd2961850","locationID":50003587,"labels":["tz:use","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133669683,"zkb":{"hash":"14edb67ec59eb468b4e70c72baafe6448c4359c8","locationID":50004550,"labels":["tz:use","cat:6","#:2+","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
+{"killID":133669665,"zkb":{"hash":"74506da79fdbeeefc3bd8e99584abbcccaa66080","locationID":50004550,"labels":["tz:use","cat:6","#:5+","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
+{"killID":133669715,"zkb":{"hash":"680c6f44b95208549290d1f0de435d70ee2babf8","locationID":50002466,"labels":["tz:use","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133669620,"zkb":{"hash":"a6a1f8294518ca35f1e6b09f968bf8fb4f1b7451","locationID":50014093,"labels":["tz:use","cat:6","#:5+","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":133661937,"zkb":{"hash":"295899b7b3c8831bb5aa7da38815e71d16ed34e4","locationID":50013922,"labels":["tz:eu","cat:6","#:2+","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":133669726,"zkb":{"hash":"b32385310c00ddf72b13d28894677de178a5b58d","locationID":50007868,"labels":["tz:use","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133669735,"zkb":{"hash":"676fc7c26f6c6f554b38fcd1bb0f9cf0ca4d684a","locationID":50002466,"labels":["tz:use","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133669720,"zkb":{"hash":"dacd046475f3ee930f25aa3a01860cbb0d05f171","locationID":50006515,"labels":["tz:use","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133669736,"zkb":{"hash":"76a6f5ec3be12f29ea2526adae47685536d36952","locationID":50006515,"labels":["tz:use","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133669705,"zkb":{"hash":"e60d916d95e571bd03f649927fb8895dd18828bf","locationID":50016538,"labels":["tz:use","cat:6","#:10+","pvp"]},"rearm":0}
