@@ -47,3 +47,12 @@
 {"killID":133668617,"zkb":{"hash":"5f921985168f9c1b34474ebedbc996f37a1829c7","locationID":50003586,"labels":["tz:use","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133668592,"zkb":{"hash":"42357ead4141ea032bd7aa20b4e08616a6ff6eb9","locationID":50007503,"labels":["tz:use","cat:6","#:5+","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
 {"killID":133668642,"zkb":{"hash":"0eda5ca708c45758cc2fb8f3d12e56e9d3b80d4f","locationID":50004550,"labels":["tz:use","cat:6","#:5+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133668641,"zkb":{"hash":"317d38cad61ac37cbf2b6eeab100a71c95b1d26e","locationID":50000060,"labels":["tz:use","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133668652,"zkb":{"hash":"0309697d125b8d0d431cb0fb700e666e36860443","locationID":50000060,"labels":["tz:use","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133668609,"zkb":{"hash":"f3ddb483bdc3f3ace726ca5306b3274fe69710a2","locationID":50007503,"labels":["tz:use","cat:6","#:2+","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
+{"killID":133668676,"zkb":{"hash":"4655b7bf83492174a97244f8caacbff9e5128a13","locationID":50008691,"labels":["tz:use","cat:6","#:2+","pvp","loc:lowsec","fw:caldari","fw:calgal"]},"rearm":0}
+{"killID":133668674,"zkb":{"hash":"c045680d2acf5463d50b936994a07113bf710e44","locationID":50008691,"labels":["tz:use","cat:6","#:2+","pvp","loc:lowsec","fw:caldari","fw:calgal"]},"rearm":0}
+{"killID":133668685,"zkb":{"hash":"a348119a588fe432c1656186a70518aa77ab073b","locationID":50002573,"labels":["tz:use","cat:6","#:1","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133668683,"zkb":{"hash":"9666f7c47081c78a143dde1d3edad9837eb3032d","locationID":50013982,"labels":["tz:use","cat:6","#:10+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133668694,"zkb":{"hash":"12665d5f0bca62f78f855d6ed78c7557c8c1406e","locationID":50002274,"labels":["tz:use","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133668657,"zkb":{"hash":"8db427e348248ebe607d46896894daaa5f0c1db6","locationID":50004550,"labels":["tz:use","cat:6","#:2+","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
