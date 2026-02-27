@@ -1,4 +1,3 @@
-# .github/workflows/eou_market_orders_esi-gh-bq.yml
 name: ESI Market Orders (ESI → GH Actions)
 
 on:
@@ -19,52 +18,53 @@ jobs:
     timeout-minutes: 30
 
     env:
-      # Orchestrator
       WORKFLOW_FILE: eou_market_orders_esi-gh-bq.yml
+
+      # Sheets
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "11"
       LOCK_TIME: "180"
 
-      # Auth tokens (ESI structures)
-      PRIMARY_CHAR_ID: "2124070822"
-      RETRY_BUDGET: "3"
-
       # ESI
       ESI_BASE_URL: https://esi.evetech.net
       ESI_DATASOURCE: tranquility
 
-      # Planner (dynamic workers inside python)
+      # Workers (fixed mins; max comes from cache)
       REGIONS_WORKERS_MIN: "2"
       REGIONS_TARGET_PAGES_PER_WORKER: "220"
       STRUCTS_WORKERS_MIN: "1"
       STRUCTS_TARGET_PAGES_PER_WORKER: "60"
 
-      # Truth sources
+      # Paths
       SDE_REGIONS_PATH: data/sde/regions.jsonl.gz
+      SDE_STATIONS_PATH: data/sde/stations.jsonl.gz
       STRUCTURES_FILE: data/esi/structures.jsonl.gz
-
-      # Cache
       PAGES_CACHE_PATH: states/market_orders_pages.json
-
-      # Output temp
       OUT_DIR: .tmp_eou_market_orders
 
-      # Jita 4-4 (kept for compatibility with existing script env)
-      JITA44_LOCATION_ID: "60003760"
+      # NEW: hubs output
+      HUBS_PATH: data/esi/hubs.jsonl
+
+      # Tokens (ESI Structures pattern)
+      PRIMARY_CHAR_ID: "2124070822"
+      RETRY_BUDGET: "3"
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Anti-queue guard
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
         run: |
-          set -euo pipefail
-          bash scripts/esi/eou_market_orders_esi-gh-bq_guard.sh
+          python -m pip install --upgrade pip
+          pip install -r requirements/esi/eou_market_orders_esi-gh-bq_requirements.txt
 
       - name: Auth to Google (WIF)
         id: gcp_auth
@@ -78,17 +78,6 @@ jobs:
             https://www.googleapis.com/auth/spreadsheets
             https://www.googleapis.com/auth/cloud-platform
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install -r requirements/esi/eou_market_orders_esi-gh-bq_requirements.txt
-
       - name: Sheets init
         env:
           GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
@@ -96,9 +85,10 @@ jobs:
           set -euo pipefail
           python scripts/esi/eou_market_orders_esi-gh-bq_sheets.py init
 
-      - name: Run (market orders)
-        id: run_market
+      - name: Run ingest workers
+        id: ingest
         env:
+          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
           EOU_ACCESS_TOKENS_1: ${{ secrets.EOU_ACCESS_TOKENS_1 }}
           EOU_ACCESS_TOKENS_2: ${{ secrets.EOU_ACCESS_TOKENS_2 }}
         run: |
@@ -106,7 +96,17 @@ jobs:
           python scripts/esi/eou_market_orders_esi-gh-bq_run.py | tee /tmp/objective_out.txt
           grep -E '^(max_expires_epoch|max_last_modified_epoch)=' /tmp/objective_out.txt >> "$GITHUB_OUTPUT" || true
 
-      - name: Commit pages cache
+      - name: Sheets finalize
+        if: always()
+        env:
+          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+          MAX_EXPIRES_EPOCH: ${{ steps.ingest.outputs.max_expires_epoch }}
+          MAX_LAST_MODIFIED_EPOCH: ${{ steps.ingest.outputs.max_last_modified_epoch }}
+        run: |
+          set -euo pipefail
+          python scripts/esi/eou_market_orders_esi-gh-bq_sheets.py finalize
+
+      - name: Commit pages cache + hubs
         if: success()
         run: |
           set -euo pipefail
@@ -114,31 +114,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add "${PAGES_CACHE_PATH}" || true
+          git add "${PAGES_CACHE_PATH}" "${HUBS_PATH}" || true
+
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
 
-          git commit -m "EOU: update market orders pages cache"
+          git commit -m "EOU: update market orders pages cache + hubs"
 
-          git pull --rebase origin "${GITHUB_REF_NAME}"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          # Evita non-fast-forward si otro run ha empujado antes
+          git pull --rebase origin main
 
-      - name: Sheets finalize
-        if: success()
-        env:
-          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
-          MAX_EXPIRES_EPOCH: ${{ steps.run_market.outputs.max_expires_epoch }}
-          MAX_LAST_MODIFIED_EPOCH: ${{ steps.run_market.outputs.max_last_modified_epoch }}
-        run: |
-          set -euo pipefail
-          python scripts/esi/eou_market_orders_esi-gh-bq_sheets.py finalize
-
-      - name: Sheets fail
-        if: failure()
-        env:
-          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
-        run: |
-          set -euo pipefail
-          python scripts/esi/eou_market_orders_esi-gh-bq_sheets.py fail
+          git push origin HEAD:main
