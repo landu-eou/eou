@@ -43,7 +43,8 @@ OUT_DIR = os.environ.get("OUT_DIR", ".tmp_eou_market_orders")
 EOU_ACCESS_TOKENS_1 = os.environ.get("EOU_ACCESS_TOKENS_1", "")
 EOU_ACCESS_TOKENS_2 = os.environ.get("EOU_ACCESS_TOKENS_2", "")
 
-HUBS_PATH = os.environ.get("HUBS_PATH", "data/esi/hubs.jsonl")
+# ✅ ahora hubs.json (no hubs.jsonl)
+HUBS_PATH = os.environ.get("HUBS_PATH", "data/esi/hubs.json")
 
 DEFAULT_REGIONS_WORKERS_MAX = 8
 DEFAULT_STRUCTS_WORKERS_MAX = 3
@@ -54,6 +55,10 @@ USER_AGENT = os.environ.get("ESI_USER_AGENT", "EOU/market-orders (+https://githu
 
 STATION_MIN_ID = 60_000_000
 STATION_MAX_ID = 70_000_000  # [60M,70M) station ; >=70M structure
+
+# Hubs filter
+HUBS_MIN_SHARE = 0.0175  # 1.75%
+ORDERS_SHARE_DECIMALS = 4
 
 # ----------------------------
 # Minimal logs
@@ -138,7 +143,6 @@ class GlobalBudget:
             msg=f"consume=1 reason={reason} page={page} char_id={char_id} remaining={remaining}",
         )
 
-        # ✅ FIX: fallar sólo si se pasa de 0 -> -1 (o menos)
         if remaining < 0:
             raise RuntimeError("RETRY_BUDGET exhausted for authenticated/retry requests (401/420/429/5xx).")
 
@@ -202,16 +206,15 @@ def read_jsonl_gz(path: str) -> List[Dict[str, Any]]:
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
-def write_jsonl_atomic(path: str, rows: List[Dict[str, Any]]) -> None:
+def write_json_atomic(path: str, payload: Any, *, indent: int = 2) -> None:
     tmp_dir = os.path.dirname(path) or "."
     ensure_dir(tmp_dir)
-    fd, tmp_path = tempfile.mkstemp(prefix=".tmp_jsonl_", suffix=".jsonl", dir=tmp_dir)
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp_json_", suffix=".json", dir=tmp_dir)
     os.close(fd)
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
-            for r in rows:
-                f.write(json.dumps(r, ensure_ascii=False))
-                f.write("\n")
+            json.dump(payload, f, ensure_ascii=False, indent=indent, sort_keys=False)
+            f.write("\n")
         os.replace(tmp_path, path)
     finally:
         try:
@@ -425,11 +428,6 @@ def _as_float(v: Any, default: Optional[float] = None) -> Optional[float]:
         return default
 
 def normalize_order_raw(o: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Mantiene RAW tal y como pediste, pero:
-      - range: string -> int64 según reglas
-      - min_volume: si no viene, lo guardamos como 0 (para evitar descartar sells)
-    """
     r_int = normalize_range_to_int64(o.get("range"))
     if r_int is None:
         return None
@@ -444,7 +442,6 @@ def normalize_order_raw(o: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     volume_remain = _as_int(o.get("volume_remain"))
     volume_total = _as_int(o.get("volume_total"))
 
-    # Campos obligatorios (excepto min_volume)
     if (
         duration is None
         or issued is None
@@ -458,7 +455,7 @@ def normalize_order_raw(o: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     ):
         return None
 
-    min_volume = _as_int(o.get("min_volume"), default=0)  # ✅ FIX
+    min_volume = _as_int(o.get("min_volume"), default=0)
 
     out = {
         "duration": int(duration),
@@ -484,7 +481,7 @@ def normalize_order_raw(o: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 class HubAgg:
     orders: int
     types: set
-    value_sum: float
+    value_sum: float  # sum(price * volume_remain) for tie-break only
 
 def hub_add(hubs: Dict[int, HubAgg], raw: Dict[str, Any]) -> None:
     loc = int(raw["location_id"])
@@ -713,7 +710,7 @@ def build_cache_maps(cache: Optional[PagesCache]) -> Tuple[Dict[int, int], Dict[
     return station_pages, struct_pages, reg_max, str_max
 
 # ----------------------------
-# Hubs output
+# Hubs output (NEW: hubs.json)
 # ----------------------------
 
 def resolve_station_name(location_id: int, stations_by_id: Dict[int, str], structures_by_id: Dict[int, str]) -> str:
@@ -723,28 +720,52 @@ def resolve_station_name(location_id: int, stations_by_id: Dict[int, str], struc
         return structures_by_id.get(location_id, "")
     return ""
 
-def build_hubs_rows(
+def build_hubs_payload(
     hubs: Dict[int, HubAgg],
     stations_by_id: Dict[int, str],
     structures_by_id: Dict[int, str],
-) -> List[Dict[str, Any]]:
+    total_orders: int,
+) -> Dict[str, Any]:
+    """
+    Orden:
+      1) orders desc
+      2) types desc
+      3) sum(price*volume_remain) desc  (solo desempate; NO se exporta)
+      4) location_id asc               (solo desempate; NO se exporta)
+
+    Filtro exportación:
+      - ordersShare >= 0.0175
+      - orders > 0 (implícito)
+    """
     sortable: List[Tuple[int, int, float, int]] = []
     for loc, agg in hubs.items():
         if agg.orders <= 0:
             continue
-        sortable.append((agg.orders, len(agg.types), agg.value_sum, loc))
+        sortable.append((agg.orders, len(agg.types), float(agg.value_sum), int(loc)))
 
     sortable.sort(key=lambda x: (-x[0], -x[1], -x[2], x[3]))
 
-    rows: List[Dict[str, Any]] = []
-    for orders, types_cnt, _value_sum, loc in sortable:
-        rows.append({
-            "stationID": int(loc),
-            "station": resolve_station_name(int(loc), stations_by_id, structures_by_id),
-            "orders": int(orders),
-            "types": int(types_cnt),
-        })
-    return rows
+    hub_rows: List[Dict[str, Any]] = []
+    if total_orders > 0:
+        for orders, types_cnt, _value_sum, loc in sortable:
+            share = orders / float(total_orders)
+            share_rounded = round(share, ORDERS_SHARE_DECIMALS)
+            if share_rounded < HUBS_MIN_SHARE:
+                continue
+            hub_rows.append({
+                "stationID": int(loc),
+                "station": resolve_station_name(int(loc), stations_by_id, structures_by_id),
+                "orders": int(orders),
+                "ordersShare": float(share_rounded),
+                "types": int(types_cnt),
+            })
+
+    payload = {
+        "hubs": int(len(hub_rows)),
+        "orders": int(total_orders),
+        "hubsList": hub_rows,  # evitamos duplicar clave "hubs"
+    }
+    return payload
 
 # ----------------------------
 # Main
@@ -802,7 +823,7 @@ def main() -> int:
     ignored_structures: set[int] = set()
 
     total_raw_seen = 0
-    total_unique_emitted = 0
+    total_unique_emitted = 0  # dedupe local por worker ya aplicado en rows_emitted
 
     hubs_global: Dict[int, HubAgg] = {}
     hubs_lock = threading.Lock()
@@ -943,9 +964,15 @@ def main() -> int:
     write_pages_cache_atomic(PAGES_CACHE_PATH, new_cache)
     vlog(event="phase", msg=f"cache_written path={PAGES_CACHE_PATH} stations={len(new_stations)} structures={len(new_structs)}")
 
-    hubs_rows = build_hubs_rows(hubs_global, stations_by_id, structures_by_id)
-    write_jsonl_atomic(HUBS_PATH, hubs_rows)
-    vlog(event="phase", msg=f"hubs_written path={HUBS_PATH} rows={len(hubs_rows)}")
+    # ✅ hubs.json (pretty), filtrado por ordersShare >= 0.0175
+    hubs_payload = build_hubs_payload(
+        hubs=hubs_global,
+        stations_by_id=stations_by_id,
+        structures_by_id=structures_by_id,
+        total_orders=int(total_unique_emitted),
+    )
+    write_json_atomic(HUBS_PATH, hubs_payload, indent=2)
+    vlog(event="phase", msg=f"hubs_written path={HUBS_PATH} hubs={hubs_payload.get('hubs')} orders_total={hubs_payload.get('orders')}")
 
     print(f"max_expires_epoch={max_expires_epoch}", flush=True)
     print(f"max_last_modified_epoch={max_last_modified_epoch}", flush=True)
