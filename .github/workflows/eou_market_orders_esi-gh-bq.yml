@@ -3,11 +3,17 @@ name: ESI Market Orders (ESI → GH Actions)
 on:
   workflow_dispatch:
 
+# Permisos mínimos:
+# - actions:read   -> Guard (listar runs)
+# - contents:write -> commit de states/market_orders_pages.json + data/esi/hubs.json + data/esi/Orders.jsonl
+# - id-token:write -> WIF/OIDC hacia Google (Sheets token)
 permissions:
   actions: read
   contents: write
   id-token: write
 
+# Candado oficial: evita solapamiento real.
+# Los duplicados/colas "útiles" se cortan con el Guard + Sheets gate.
 concurrency:
   group: eou_market_orders_esi-gh-bq
   cancel-in-progress: false
@@ -18,56 +24,97 @@ jobs:
     timeout-minutes: 30
 
     env:
+      # Identidad workflow
       WORKFLOW_FILE: eou_market_orders_esi-gh-bq.yml
 
-      # Sheets
+      # Sheets orchestration
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
       SHEET_TAB: workflows
       SHEETS_WORKFLOW_ROW: "11"
       LOCK_TIME: "180"
 
+      # Tokens (igual que ESI Structures)
+      PRIMARY_CHAR_ID: "2124070822"
+      RETRY_BUDGET: "3"
+
       # ESI
       ESI_BASE_URL: https://esi.evetech.net
       ESI_DATASOURCE: tranquility
 
-      # Workers (fixed mins; max comes from cache)
+      # Planner
       REGIONS_WORKERS_MIN: "2"
       REGIONS_TARGET_PAGES_PER_WORKER: "220"
       STRUCTS_WORKERS_MIN: "1"
       STRUCTS_TARGET_PAGES_PER_WORKER: "60"
 
-      # Paths
+      # Inputs repo (SDE/ESI)
       SDE_REGIONS_PATH: data/sde/regions.jsonl.gz
+      SDE_TYPES_PATH: data/sde/types.jsonl.gz
       SDE_STATIONS_PATH: data/sde/stations.jsonl.gz
       STRUCTURES_FILE: data/esi/structures.jsonl.gz
-      PAGES_CACHE_PATH: states/market_orders_pages.json
-      OUT_DIR: .tmp_eou_market_orders
 
-      # NEW: hubs output
-      SDE_TYPES_PATH: data/sde/types.jsonl.gz
+      # Cache / outputs repo
+      PAGES_CACHE_PATH: states/market_orders_pages.json
       HUBS_PATH: data/esi/hubs.json
       ORDERS_PATH: data/esi/Orders.jsonl
 
-      # Tokens (ESI Structures pattern)
-      PRIMARY_CHAR_ID: "2124070822"
-      RETRY_BUDGET: "3"
+      # Temp
+      OUT_DIR: .tmp_eou_market_orders
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # ------------------------
+      # Guard (anti-cola)
+      # ------------------------
+      # Si el cron externo dispara 2 veces, el segundo run puede quedarse en cola.
+      # Cuando arranca, este guard corta si detecta que AÚN hay otro run in_progress del mismo workflow.
+      - name: Guard - exit if another run is in progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          echo "guard: checking in-progress runs for ${REPO}..."
+          # Lista runs en progreso del mismo workflow file.
+          # Si existe otro run distinto a este, salimos 0 (sin trabajo).
+          resp="$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs?status=in_progress&per_page=100")"
+
+          other_count="$(echo "${resp}" | jq -r --arg rid "${RUN_ID}" '
+            [.workflow_runs[] | select((.id|tostring) != $rid)] | length
+          ')"
+
+          if [ "${other_count}" != "0" ]; then
+            echo "guard: another run is in_progress (${other_count}). exiting without work."
+            exit 0
+          fi
+
+          echo "guard: ok (no other in_progress runs)."
+
+      # ------------------------
+      # Python deps
+      # ------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install requirements
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements/esi/eou_market_orders_esi-gh-bq_requirements.txt
 
+      # ------------------------
+      # Auth Google (WIF) → Sheets token
+      # ------------------------
       - name: Auth to Google (WIF)
         id: gcp_auth
         uses: google-github-actions/auth@v2
@@ -80,6 +127,9 @@ jobs:
             https://www.googleapis.com/auth/spreadsheets
             https://www.googleapis.com/auth/cloud-platform
 
+      # ------------------------
+      # Sheets init (status=in progress, next_run=now+LOCK_TIME)
+      # ------------------------
       - name: Sheets init
         env:
           GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
@@ -87,45 +137,62 @@ jobs:
           set -euo pipefail
           python scripts/esi/eou_market_orders_esi-gh-bq_sheets.py init
 
-      - name: Run ingest workers
-        id: ingest
+      # ------------------------
+      # Run ingestion + build hubs/orders + cache update
+      # ------------------------
+      - name: Run market orders
+        id: run_market
         env:
           GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
           EOU_ACCESS_TOKENS_1: ${{ secrets.EOU_ACCESS_TOKENS_1 }}
           EOU_ACCESS_TOKENS_2: ${{ secrets.EOU_ACCESS_TOKENS_2 }}
         run: |
           set -euo pipefail
+          mkdir -p "${OUT_DIR}"
           python scripts/esi/eou_market_orders_esi-gh-bq_run.py | tee /tmp/objective_out.txt
+
+          # Publicar outputs para el finalize
           grep -E '^(max_expires_epoch|max_last_modified_epoch)=' /tmp/objective_out.txt >> "$GITHUB_OUTPUT" || true
 
-      - name: Sheets finalize
-        if: always()
-        env:
-          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
-          MAX_EXPIRES_EPOCH: ${{ steps.ingest.outputs.max_expires_epoch }}
-          MAX_LAST_MODIFIED_EPOCH: ${{ steps.ingest.outputs.max_last_modified_epoch }}
+      # ------------------------
+      # Commit cache + outputs
+      # ------------------------
+      - name: Commit outputs (pages cache + hubs + Orders.jsonl)
+        if: ${{ success() }}
         run: |
           set -euo pipefail
-          python scripts/esi/eou_market_orders_esi-gh-bq_sheets.py finalize
-
-      - name: Commit pages cache + hubs
-        if: success()
-        run: |
-          set -euo pipefail
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add "${PAGES_CACHE_PATH}" "${HUBS_PATH}" || true
+          # Importante para evitar "fetch first" si otro workflow empujó antes.
+          git pull --rebase origin "${GITHUB_REF_NAME}"
 
+          git add "${PAGES_CACHE_PATH}" "${HUBS_PATH}" "${ORDERS_PATH}" || true
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
 
-          git commit -m "EOU: update market orders pages cache + hubs"
+          git commit -m "EOU: update market orders cache + hubs + Orders"
+          git push origin "${GITHUB_REF_NAME}"
 
-          # Evita non-fast-forward si otro run ha empujado antes
-          git pull --rebase origin main
+      # ------------------------
+      # Sheets finalize (si ok → next_run=Expires(max)+5s; si fail → now+5m)
+      # ------------------------
+      - name: Sheets finalize (success)
+        if: ${{ success() }}
+        env:
+          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+          MAX_EXPIRES_EPOCH: ${{ steps.run_market.outputs.max_expires_epoch }}
+          MAX_LAST_MODIFIED_EPOCH: ${{ steps.run_market.outputs.max_last_modified_epoch }}
+        run: |
+          set -euo pipefail
+          python scripts/esi/eou_market_orders_esi-gh-bq_sheets.py finalize_success
 
-          git push origin HEAD:main
+      - name: Sheets finalize (failure)
+        if: ${{ failure() }}
+        env:
+          GOOGLE_SHEETS_ACCESS_TOKEN: ${{ steps.gcp_auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          python scripts/esi/eou_market_orders_esi-gh-bq_sheets.py finalize_failure
