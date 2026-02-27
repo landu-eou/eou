@@ -44,7 +44,9 @@ jobs:
       OUT_DIR: .tmp_eou_market_orders
 
       # NEW: hubs output
+      SDE_TYPES_PATH: data/sde/types.jsonl.gz
       HUBS_PATH: data/esi/hubs.json
+      ORDERS_PATH: data/esi/Orders.jsonl
 
       # Tokens (ESI Structures pattern)
       PRIMARY_CHAR_ID: "2124070822"
