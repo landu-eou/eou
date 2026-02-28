@@ -904,3 +904,6 @@
 {"killID":133707945,"zkb":{"hash":"28ac707b02d3340e607e13a2eb37adc8fc8eaeee","locationID":50013548,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133707941,"zkb":{"hash":"507ac34056b37adc635f12235b46f60f6bdbab20","locationID":50013548,"labels":["tz:eu","cat:6","#:10+","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133707905,"zkb":{"hash":"57bd1980a5b3d1f2d6429227fa7a4f5e1ed58c61","locationID":50016493,"labels":["tz:eu","cat:6","solo","pvp"]},"rearm":0}
+{"killID":133707670,"zkb":{"hash":"7bc4eeeb1605008f299d984011b90b231e5b4737","locationID":50013999,"labels":["tz:eu","cat:6","#:1","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":133707646,"zkb":{"hash":"2c0b214f4fc6f30268a36c707aa9990fe035530f","locationID":50013999,"labels":["tz:eu","cat:6","solo","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":133707928,"zkb":{"hash":"8dcb4b2270616c194eea0110cd5426fa9953ad0a","locationID":50005991,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
