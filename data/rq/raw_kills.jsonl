@@ -198,3 +198,12 @@
 {"killID":133744050,"zkb":{"hash":"8800cae2ebd1a4081e376b67a29b8908baa3f4e5","locationID":50009005,"labels":["tz:use","cat:6","#:1","pvp","loc:lowsec"]},"rearm":0}
 {"killID":133744079,"zkb":{"hash":"59d9113e86e2502c13066905a50b6328976cb133","locationID":50001692,"labels":["tz:use","cat:6","#:1","pvp","loc:highsec"]},"rearm":0}
 {"killID":133744108,"zkb":{"hash":"0bbc880321da46f804e2e7bdcb6ae5e0932ee59b","locationID":50001344,"labels":["tz:use","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133744129,"zkb":{"hash":"ab076782cf8d26448933b1f6e1562d5a43f0164a","locationID":50013976,"labels":["tz:use","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133744078,"zkb":{"hash":"fc5ae11dcbb1fa6e9c39f05111ed207a4f4ad5fb","locationID":50001692,"labels":["tz:use","cat:6","#:5+","pvp","loc:highsec"]},"rearm":0}
+{"killID":133744107,"zkb":{"hash":"7a9b7439a5e8e550666f51c9a1d1e7fb130c5b80","locationID":50008276,"labels":["tz:use","cat:6","solo","pvp","loc:lowsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":133744134,"zkb":{"hash":"79c9a90fbe15c593cd2ee9218a0e19ae40994c0a","locationID":50001970,"labels":["tz:use","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133743966,"zkb":{"hash":"0b8cb626e0c83cde20c4e9b74cc07d45bf043481","locationID":50014000,"labels":["tz:use","cat:6","#:2+","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":133744133,"zkb":{"hash":"94d75c8b39f026c5effb6fcbd98a8f3dc79ba241","locationID":50014000,"labels":["tz:use","cat:6","#:2+","pvp","loc:highsec"]},"rearm":0}
+{"killID":133744140,"zkb":{"hash":"7a60fcbc22b844c83bbfba96c5c93876c83ba8d2","locationID":50002837,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133744124,"zkb":{"hash":"e1e5ace410ea85ad37951d8042d407a2d2d54bdc","locationID":50002837,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133740656,"zkb":{"hash":"89c501434230851d9bf2e63a7b929b6692afae04","locationID":50007950,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
