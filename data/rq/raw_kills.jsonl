@@ -472,3 +472,5 @@
 {"killID":133777115,"zkb":{"hash":"db2fe540daf84eeb83e54ab8db3da3938db011be","locationID":50004552,"labels":["tz:eu","cat:6","#:5+","pvp","loc:lowsec","fw:minmatar","fw:amamin"]},"rearm":0}
 {"killID":133777112,"zkb":{"hash":"5b73bc81f3228f2b71aeacba3a366535acd8c723","locationID":50004552,"labels":["tz:eu","cat:6","#:5+","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
 {"killID":133776031,"zkb":{"hash":"58d9019194ef794fb6966161d05f9d2b3474c8d3","locationID":50002573,"labels":["tz:eu","cat:6","#:1","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133777085,"zkb":{"hash":"5698f48486d80bcd58a5846bf9e107313f44f694","locationID":50006964,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133777123,"zkb":{"hash":"c9fee7ec3eb76aeed6191645117b25881b88ac53","locationID":50014000,"labels":["tz:eu","cat:6","solo","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
