@@ -427,3 +427,9 @@
 {"killID":133776958,"zkb":{"hash":"ddcadfe6f2f566d55158e729c283aba72268e7bb","locationID":50012090,"labels":["tz:eu","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
 {"killID":133776999,"zkb":{"hash":"d8c9618846d75f34b37d76939b564a098d535238","locationID":50007813,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133776948,"zkb":{"hash":"9e6c58e6b1f2f17ededaa02db7ba3aea2d722e6f","locationID":50005459,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133776995,"zkb":{"hash":"462d4e7addffa614076e3ec5edfdcf5a84d033d2","locationID":50007503,"labels":["tz:eu","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":132538979,"zkb":{"hash":"c08a63028afcb74c0ad883951f0a83eff9daca7b","locationID":50000060,"labels":["tz:ru","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133776974,"zkb":{"hash":"cd25018db86e9ce7453b367f19aa34942dba77ab","locationID":50007503,"labels":["tz:eu","cat:6","#:5+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133777025,"zkb":{"hash":"f87c1d4cc1624f87de7d11e705677203a64778cb","locationID":50007813,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133777020,"zkb":{"hash":"8c173fc8a5aeee6e70c45506849ad7e116afdb6e","locationID":50002774,"labels":["tz:eu","cat:6","solo","pvp","loc:highsec"]},"rearm":0}
+{"killID":133777014,"zkb":{"hash":"31d21fe9c0a19f44c13b3e37a78fb079e0f5839b","locationID":50002774,"labels":["tz:eu","cat:6","#:2+","pvp","loc:highsec","isk:1b+"]},"rearm":0}
