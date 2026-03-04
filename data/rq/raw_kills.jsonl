@@ -333,3 +333,12 @@
 {"killID":133797153,"zkb":{"hash":"9fe371cf6075ab5b29f622d5e0fe9dc482ea17fc","locationID":50012000,"labels":["tz:eu","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133797164,"zkb":{"hash":"07a93563a97bb1be8267546cc047e3b5fd61accd","locationID":50012000,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133797126,"zkb":{"hash":"1ecdc8e1dfb53e565176050d2634ed23ce7dbcb1","locationID":50006518,"labels":["tz:eu","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133797116,"zkb":{"hash":"f264707d3217edb9a59165e6df64a53f3d20c636","locationID":50004707,"labels":["tz:eu","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133797120,"zkb":{"hash":"4ad54b6c4694c2f43568b7b2f45bd39bec66150e","locationID":50004707,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133797189,"zkb":{"hash":"48f34adb8f4d4b167efb4244cb59336f38564b2d","locationID":50016486,"labels":["tz:eu","cat:6","solo","pvp","loc:lowsec","fw:minmatar","fw:amamin"]},"rearm":0}
+{"killID":133797192,"zkb":{"hash":"48555aaab31055ec9f6ad2a1c2f6c285dcd0e1b9","locationID":50016486,"labels":["tz:eu","cat:6","#:2+","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
+{"killID":133797195,"zkb":{"hash":"6d51774a1a0ca791c5dcaa22525a653b83a1cb3c","locationID":50010009,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133797185,"zkb":{"hash":"0292a7eb875c2ec472108ca526805913cca91c7c","locationID":50013113,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133797186,"zkb":{"hash":"0ab96dc114c5f1c964d462bb409a86637e7cf0a1","locationID":50010009,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133797151,"zkb":{"hash":"8965cb8ed8869af89a7ed24f30db3471621fdaa5","locationID":50014000,"labels":["tz:eu","cat:6","solo","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":133797191,"zkb":{"hash":"46b842b8799d10e4dc424e750da8779e56d7fcd2","locationID":50014000,"labels":["tz:eu","cat:6","solo","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
