@@ -1519,3 +1519,5 @@
 {"killID":133834457,"zkb":{"hash":"f72a9480581a5dce401831abd84a6dbca897ccd4","locationID":50016235,"labels":["tz:ru","cat:6","#:10+","pvp","loc:lowsec"]},"rearm":0}
 {"killID":133834468,"zkb":{"hash":"a5320297dd72e8541e78cdb43c6eb1be52a98d72","locationID":50002774,"labels":["tz:ru","cat:6","#:2+","pvp","loc:highsec","isk:5b+","ganked"]},"rearm":0}
 {"killID":133834437,"zkb":{"hash":"ce2886950e715a1d52983fe347828d801ea48b1e","locationID":50011016,"labels":["tz:ru","cat:6","#:10+","pvp","loc:lowsec","isk:1b+"]},"rearm":0}
+{"killID":133834464,"zkb":{"hash":"7fa8caea5f8bba46998dbfbcd336c3643dff84d7","locationID":50016544,"labels":["tz:ru","cat:6","solo","pvp"]},"rearm":0}
+{"killID":133834476,"zkb":{"hash":"b782e1111702a43fd05b64e12a65018d09da8b81","locationID":50016544,"labels":["tz:ru","cat:6","#:1","pvp"]},"rearm":0}
