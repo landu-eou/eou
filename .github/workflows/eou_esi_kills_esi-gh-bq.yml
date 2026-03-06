@@ -1,32 +1,15 @@
-# Repo file tree used by this workflow
-#
-# .github/
-#   workflows/
-#     eou_esi_kills_esi-gh-bq.yml
-#
-# data/
-#   sde/
-#     solarsystems.jsonl.gz
-#
-# states/
-#   system_kills.json
+# .github/workflows/eou_esi_kills_esi-gh-bq.yml
 
 name: ESI System Kills (ESI → GH → BQ)
 
 on:
   workflow_dispatch:
 
-# Permisos mínimos:
-# - actions:read   -> Guard por REST (listar runs)
-# - contents:write -> commit de states/system_kills.json
-# - id-token:write -> WIF/OIDC hacia Google
 permissions:
   actions: read
   contents: write
   id-token: write
 
-# Candado oficial: evita solapamiento real.
-# Los duplicados/colas "útiles" se cortan con el Guard.
 concurrency:
   group: eou_esi_kills_esi-gh-bq
   cancel-in-progress: false
@@ -59,8 +42,6 @@ jobs:
     steps:
       # ============================================================
       # 0) GUARD (anti-cola / anti-duplicados)
-      # - Si hay otro run in_progress => salir sin trabajo
-      # - Si un run anterior terminó success después de que este run se creara => este run es redundante
       # ============================================================
       - name: Guard - decide proceed (anti-cola)
         id: guard
@@ -128,10 +109,7 @@ jobs:
         run: echo "Queued/duplicate dispatch detected. Exiting without work."
 
       # ============================================================
-      # 1) BOOTSTRAP (serials de Sheets reutilizables)
-      # - RUN_START_EPOCH para el fallback de fallo (run_start + 5min)
-      # - lock_serial = now + LOCK_TIME (fase inicial)
-      # - fail_plus5_serial = run_start + 5min (fase final si falla)
+      # 1) BOOTSTRAP (serials de Sheets)
       # ============================================================
       - name: Bootstrap - compute epoch and Sheets serials
         if: ${{ steps.guard.outputs.proceed == 'true' }}
@@ -148,7 +126,7 @@ jobs:
           echo "fail_plus5_serial=$(to_serial "$((run_start_epoch + 300))")" >> "${GITHUB_OUTPUT}"
 
       # ============================================================
-      # 2) BOOTSTRAP runtime (repo + auth + bq cli)
+      # 2) BOOTSTRAP runtime (repo + auth + gcloud/bq)
       # ============================================================
       - name: Checkout
         if: ${{ steps.guard.outputs.proceed == 'true' }}
@@ -168,17 +146,105 @@ jobs:
             https://www.googleapis.com/auth/spreadsheets
             https://www.googleapis.com/auth/cloud-platform
 
-      - name: Setup gcloud
+      # --- NUEVO: warm-up OIDC token con retries (mitiga #790–#793) ---
+      - name: OIDC warm-up (retry subject token)
         if: ${{ steps.guard.outputs.proceed == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # GitHub documenta estas variables para solicitar el JWT OIDC. :contentReference[oaicite:3]{index=3}
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+            echo "Missing ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN (check id-token: write permission)."
+            exit 1
+          fi
+
+          # Reintentos con backoff por fallos transitorios (conectividad/proxy).
+          # Esto reduce las probabilidades de que gcloud falle al refrescar el subject token.
+          attempts=6
+          delay=2
+
+          for i in $(seq 1 "${attempts}"); do
+            echo "OIDC warm-up attempt ${i}/${attempts} ..."
+            set +e
+            resp="$(
+              curl -sS -m 15 \
+                -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=googleapis.com" \
+                -w "\nHTTP_STATUS:%{http_code}\n"
+            )"
+            rc=$?
+            set -e
+
+            http="$(echo "${resp}" | awk -F: '/^HTTP_STATUS:/ {print $2}' | tr -d '\r' | tail -n 1)"
+            token="$(echo "${resp}" | sed '/^HTTP_STATUS:/,$d' | jq -r '.value // empty' 2>/dev/null || true)"
+
+            if [[ "${rc}" -eq 0 && "${http}" == "200" && -n "${token}" ]]; then
+              echo "OIDC warm-up OK (received JWT)."
+              exit 0
+            fi
+
+            echo "OIDC warm-up failed (rc=${rc}, http=${http:-unknown})."
+            # Si hay JSON de error, imprímelo (sin exponer secretos; GitHub enmascara tokens).
+            echo "${resp}" | sed '/^HTTP_STATUS:/,$d' | head -c 800 || true
+
+            if [[ "${i}" -lt "${attempts}" ]]; then
+              echo "Sleeping ${delay}s before retry..."
+              sleep "${delay}"
+              delay="$((delay * 2))"
+              [[ "${delay}" -gt 30 ]] && delay=30
+            fi
+          done
+
+          echo "OIDC warm-up failed after ${attempts} attempts."
+          exit 1
+
+      # --- NUEVO: setup-gcloud con reintentos (mitiga #790–#793) ---
+      - name: Setup gcloud (attempt 1)
+        if: ${{ steps.guard.outputs.proceed == 'true' }}
+        id: gcloud1
+        continue-on-error: true
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Setup gcloud (attempt 2)
+        if: ${{ steps.guard.outputs.proceed == 'true' && steps.gcloud1.outcome == 'failure' }}
+        id: gcloud2
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "setup-gcloud attempt 1 failed; backoff 8s and retrying..."
+          sleep 8
+        # Re-ejecutamos la action en un step separado
+      - name: Setup gcloud (attempt 2 - action)
+        if: ${{ steps.guard.outputs.proceed == 'true' && steps.gcloud1.outcome == 'failure' }}
+        id: gcloud2a
+        continue-on-error: true
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Setup gcloud (attempt 3)
+        if: ${{ steps.guard.outputs.proceed == 'true' && steps.gcloud1.outcome == 'failure' && steps.gcloud2a.outcome == 'failure' }}
+        id: gcloud3
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "setup-gcloud attempt 2 failed; backoff 16s and retrying..."
+          sleep 16
+      - name: Setup gcloud (attempt 3 - action)
+        if: ${{ steps.guard.outputs.proceed == 'true' && steps.gcloud1.outcome == 'failure' && steps.gcloud2a.outcome == 'failure' }}
+        id: gcloud3a
+        continue-on-error: false
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
 
       # ============================================================
       # 3) ESI headers + snapshot
-      # - lee etag local
-      # - obtiene remote_etag + last_modified (snapshot_ts) + expires(+5min)
-      # - serials: last_modified_serial, expires_plus5_serial
       # ============================================================
       - name: Read state + fetch ESI headers (ETag/Expires/Last-Modified)
         if: ${{ steps.guard.outputs.proceed == 'true' }}
@@ -255,7 +321,8 @@ jobs:
           "
 
       # ============================================================
-      # 5) Decide mode (noop/full/reconcile/repair) + update_state flag
+      # 5) Decide mode + update_state flag
+      #    NUEVO: bq query con retries y log de stderr (diagnóstico tipo #794)
       # ============================================================
       - name: Decide mode (noop/full/reconcile/repair)
         if: ${{ steps.guard.outputs.proceed == 'true' }}
@@ -266,19 +333,64 @@ jobs:
         run: |
           set -euo pipefail
 
+          bq_query_csv_retry() {
+            # $1 = SQL
+            local sql="$1"
+            local attempts=5
+            local delay=2
+            local out
+            local rc
+
+            for i in $(seq 1 "${attempts}"); do
+              echo "bq query attempt ${i}/${attempts}..."
+              set +e
+              out="$(
+                bq --project_id="${GCP_PROJECT_ID}" query --quiet --use_legacy_sql=false --format=csv --headless \
+                  "${sql}" 2> bq_err.txt
+              )"
+              rc=$?
+              set -e
+
+              if [[ "${rc}" -eq 0 ]]; then
+                echo "${out}"
+                return 0
+              fi
+
+              echo "bq query failed (rc=${rc}). stderr:"
+              sed -e 's/[[:cntrl:]]//g' bq_err.txt | tail -n 200 || true
+
+              if [[ "${i}" -lt "${attempts}" ]]; then
+                echo "Retrying in ${delay}s..."
+                sleep "${delay}"
+                delay="$((delay * 2))"
+                [[ "${delay}" -gt 30 ]] && delay=30
+              fi
+            done
+
+            echo "bq query failed after ${attempts} attempts."
+            return 1
+          }
+
           lm_iso="${{ steps.esi.outputs.last_modified_iso }}"
           local_etag="${{ steps.esi.outputs.local_etag }}"
           remote_etag="${{ steps.esi.outputs.remote_etag }}"
           state_exists="${{ steps.esi.outputs.state_exists }}"
 
-          snap_count="$(
-            bq --project_id="${GCP_PROJECT_ID}" query --quiet --use_legacy_sql=false --format=csv --headless \
-              "SELECT COUNT(1) AS c
+          echo "DEBUG: lm_iso=${lm_iso}"
+          echo "DEBUG: local_etag=${local_etag}"
+          echo "DEBUG: remote_etag=${remote_etag}"
+          echo "DEBUG: state_exists=${state_exists}"
+
+          sql="SELECT COUNT(1) AS c
                FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
-               WHERE snapshot_ts = TIMESTAMP('${lm_iso}')" \
-            | tr -d '\r' | tail -n 1 | tr -cd '0-9'
+               WHERE snapshot_ts = TIMESTAMP('${lm_iso}')"
+
+          snap_count="$(
+            bq_query_csv_retry "${sql}" \
+              | tr -d '\r' | tail -n 1 | tr -cd '0-9'
           )"
           snap_count="${snap_count:-0}"
+          echo "DEBUG: snap_count=${snap_count}"
 
           mode="noop"
           if [[ "${snap_count}" == "0" ]]; then
@@ -304,11 +416,7 @@ jobs:
           printf 'update_state=%s\n' "$update_state" >> "${GITHUB_OUTPUT}"
 
       # ============================================================
-      # 6) Prepare load (solo si mode != noop)
-      # - descarga ESI body
-      # - mapea system_id -> solarSystem (SDE)
-      # - reconcile: filtra faltantes comparando con BQ
-      # - error si falta mapping => aborta antes de tocar Sheets/BQ/State
+      # 6) Prepare load (download ESI + validate mapping + build ndjson)
       # ============================================================
       - name: Prepare load (download ESI + validate mapping + build ndjson)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' }}
@@ -368,8 +476,6 @@ jobs:
 
       # ============================================================
       # 7) Sheets lock (fase inicial)
-      # - Se ejecuta tras prep para cumplir: si falta mapping => no tocar nada
-      # - status=in_progress, next_run=now+LOCK_TIME (serial numérico)
       # ============================================================
       - name: Sheets - initial lock (in_progress + next_run = now + LOCK_TIME)
         if: ${{ steps.guard.outputs.proceed == 'true' && (steps.mode.outputs.mode == 'noop' || steps.prep.outputs.prepared == 'true') }}
@@ -409,8 +515,8 @@ jobs:
           echo "locked=true" >> "${GITHUB_OUTPUT}"
 
       # ============================================================
-      # 8) BigQuery load (máximo 1 batch por run)
-      # - Solo si hay filas (load_lines != 0)
+      # 8) BigQuery load (single batch)
+      #    NUEVO: retry + log stderr
       # ============================================================
       - name: BigQuery load (single batch)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.mode.outputs.mode != 'noop' && steps.prep.outputs.load_lines != '0' }}
@@ -420,6 +526,42 @@ jobs:
         run: |
           set -euo pipefail
 
+          bq_load_retry() {
+            local attempts=4
+            local delay=3
+            local rc
+
+            for i in $(seq 1 "${attempts}"); do
+              echo "bq load attempt ${i}/${attempts}..."
+              set +e
+              bq --project_id="${GCP_PROJECT_ID}" load --quiet \
+                --source_format=NEWLINE_DELIMITED_JSON \
+                "${BQ_DATASET}.${BQ_TABLE}" \
+                load.ndjson \
+                schema.json 2> bq_load_err.txt
+              rc=$?
+              set -e
+
+              if [[ "${rc}" -eq 0 ]]; then
+                echo "bq load OK."
+                return 0
+              fi
+
+              echo "bq load failed (rc=${rc}). stderr:"
+              sed -e 's/[[:cntrl:]]//g' bq_load_err.txt | tail -n 200 || true
+
+              if [[ "${i}" -lt "${attempts}" ]]; then
+                echo "Retrying in ${delay}s..."
+                sleep "${delay}"
+                delay="$((delay * 2))"
+                [[ "${delay}" -gt 30 ]] && delay=30
+              fi
+            done
+
+            echo "bq load failed after ${attempts} attempts."
+            return 1
+          }
+
           printf '%s' \
             '[{"name":"snapshot_ts","type":"TIMESTAMP","mode":"REQUIRED"},'\
             '{"name":"solarSystem","type":"STRING","mode":"NULLABLE"},'\
@@ -428,14 +570,10 @@ jobs:
             '{"name":"ship_kills","type":"INT64","mode":"NULLABLE"}]' \
             > schema.json
 
-          bq --project_id="${GCP_PROJECT_ID}" load --quiet \
-            --source_format=NEWLINE_DELIMITED_JSON \
-            "${BQ_DATASET}.${BQ_TABLE}" \
-            load.ndjson \
-            schema.json
+          bq_load_retry
 
       # ============================================================
-      # 9) Update state (solo si lock OK y update_state==true)
+      # 9) Update state (commit etag)
       # ============================================================
       - name: Update state etag (commit to repo)
         if: ${{ steps.guard.outputs.proceed == 'true' && steps.sheets_lock.outputs.locked == 'true' && steps.mode.outputs.update_state == 'true' }}
@@ -458,9 +596,6 @@ jobs:
 
       # ============================================================
       # 10) Sheets finalize (fase final)
-      # - Si success: next_run = Expires + 5min
-      # - Si fail:    next_run = run_start + 5min
-      # - last_modified (col I) solo si success && update_state==true
       # ============================================================
       - name: Sheets - finalize (status + next_run + optional last_modified)
         if: ${{ always() && steps.sheets_lock.outputs.locked == 'true' }}
