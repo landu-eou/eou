@@ -1127,3 +1127,13 @@
 {"killID":133840624,"zkb":{"hash":"1f0c8b63f2883a33a575e10aa83b151cb6efc941","locationID":50001043,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133840625,"zkb":{"hash":"6cc0fd6e0b715ed030ba1930395482368a599b92","locationID":50008768,"labels":["tz:eu","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
 {"killID":133840616,"zkb":{"hash":"1e9b2956c7b12745794a56e80ccf43a44881f7e5","locationID":50006123,"labels":["tz:eu","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133840576,"zkb":{"hash":"f36a1b036e53b7cf83a9c2adeca728b1c4fb1e38","locationID":50008876,"labels":["tz:eu","cat:6","solo","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133840590,"zkb":{"hash":"ff2e06b2023bc68ddfb51eabc3a4b45bebdb7fdd","locationID":50008876,"labels":["tz:eu","cat:6","#:1","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133840607,"zkb":{"hash":"8f519352d7bd28e50bf1e5cb4fb9b13418573c6a","locationID":50004272,"labels":["tz:eu","cat:6","#:10+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133840592,"zkb":{"hash":"bbd29649484759379eddc919b35b54f2a9140bfb","locationID":50016527,"labels":["tz:eu","cat:6","#:5+","pvp"]},"rearm":0}
+{"killID":133840631,"zkb":{"hash":"a626a836d6aa4288fbb9ce168c64a52c1feb108d","locationID":50016527,"labels":["tz:eu","cat:6","#:2+","pvp"]},"rearm":0}
+{"killID":133840632,"zkb":{"hash":"00c5d3d8b677aae3c0452634d2844048a937d52d","locationID":50016527,"labels":["tz:eu","cat:6","#:2+","pvp"]},"rearm":0}
+{"killID":133840568,"zkb":{"hash":"11f48b24bbb3a5f052dc4d3b606530c9bb26d08a","locationID":50016533,"labels":["tz:eu","cat:6","solo","pvp"]},"rearm":0}
+{"killID":133840608,"zkb":{"hash":"f9e1a40be5e08345a662485b08596634d2dddee4","locationID":50016533,"labels":["tz:eu","cat:6","#:1","pvp"]},"rearm":0}
+{"killID":133840681,"zkb":{"hash":"dd5bd06b3803703b87541d682172405acdf22d6b","locationID":50000565,"labels":["tz:eu","cat:6","#:10+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133840647,"zkb":{"hash":"48cdc1b7bfada422aa0bb1a19560c16a695fb9d9","locationID":50000565,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
