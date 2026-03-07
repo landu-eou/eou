@@ -45,3 +45,12 @@
 {"killID":133854825,"zkb":{"hash":"783e60f1d59b325a99828d55d0a259f6f1955651","locationID":50009405,"labels":["tz:au","cat:6","#:10+","pvp","loc:lowsec"]},"rearm":0}
 {"killID":133854818,"zkb":{"hash":"492238a5a08ec69b0a6f4fdf531f62e7cef8c818","locationID":50013452,"labels":["tz:au","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
 {"killID":133854803,"zkb":{"hash":"a0abf147f78efaf3ba6ca06dd1bc1333047580d0","locationID":50009404,"labels":["tz:au","cat:6","#:1","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
+{"killID":133854820,"zkb":{"hash":"d383fd8ab427d2df50644ff74ef0485fbb985546","locationID":50009405,"labels":["tz:au","cat:6","solo","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133854804,"zkb":{"hash":"2a2b09864fc7f77bab331ef5b449916ecfe5d45a","locationID":50009405,"labels":["tz:au","cat:6","#:10+","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
+{"killID":133854814,"zkb":{"hash":"c7547ab36e2b28e1904fb7513fd036af3dc770fd","locationID":50009405,"labels":["tz:au","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133854837,"zkb":{"hash":"6b676d66a97e2b06f7bb4c39463e79210513cf87","locationID":50009047,"labels":["tz:au","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133854839,"zkb":{"hash":"a3fa90fed747e700edef1b2d12dd5b3c66fdb3aa","locationID":50009405,"labels":["tz:au","cat:6","#:10+","pvp","loc:lowsec","fw:minmatar","fw:amamin"]},"rearm":0}
+{"killID":133854816,"zkb":{"hash":"1daaa807d3f8e71827300d1dd0e68144109a2dc0","locationID":50009405,"labels":["tz:au","cat:6","#:10+","pvp","loc:lowsec","fw:minmatar","fw:amamin"]},"rearm":0}
+{"killID":133854842,"zkb":{"hash":"9e28ff0bdb6d8f74727fdcf72595de853cfbe4fd","locationID":50009047,"labels":["tz:au","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133854846,"zkb":{"hash":"1b4a4613efe08fcaf1526db47460a82a769156db","locationID":50010647,"labels":["tz:au","cat:6","solo","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133854841,"zkb":{"hash":"b253fea9878cd32f124c1d89ccceb2b98ea5b98a","locationID":50013876,"labels":["tz:au","cat:6","solo","pvp","loc:highsec"]},"rearm":0}
