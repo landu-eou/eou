@@ -1563,3 +1563,12 @@
 {"killID":133859595,"zkb":{"hash":"f7987995fbd1388a3726b77e6c54b6508fca5495","locationID":50005272,"labels":["tz:ru","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133859511,"zkb":{"hash":"0c16657513d34c70aaf7b6259bf40cb57d24be64","locationID":50014269,"labels":["tz:ru","cat:6","#:50+","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133857536,"zkb":{"hash":"f77fd5c97a21ca3d0bb79cf382bc12492f7e1ddb","locationID":50000802,"labels":["tz:au","cat:6","#:2+","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":133859578,"zkb":{"hash":"6330ef8a0d1b506329b3cdf1f93b7d767259b96e","locationID":50014269,"labels":["tz:ru","cat:6","#:100+","pvp","loc:nullsec","isk:1b+"]},"rearm":0}
+{"killID":133859538,"zkb":{"hash":"d88cfa2698b45dc38d3983b0d8c87dd80d36cca7","locationID":50014269,"labels":["tz:ru","cat:6","#:10+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133859527,"zkb":{"hash":"10175268e23b405873d3da873a812f32f96d380a","locationID":50014269,"labels":["tz:ru","cat:6","#:50+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133859532,"zkb":{"hash":"f53bcd88f9008817a7369c39b0d3fbbd1b281140","locationID":50014269,"labels":["tz:ru","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133859554,"zkb":{"hash":"7aa6b55e3d7b4799d7f37765fdb983e82c197719","locationID":50014269,"labels":["tz:ru","cat:6","#:10+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133859569,"zkb":{"hash":"970e7fd705d756b1b2a79700e540c34a8651651b","locationID":50014269,"labels":["tz:ru","cat:6","#:50+","pvp","loc:nullsec","isk:1b+"]},"rearm":0}
+{"killID":133859586,"zkb":{"hash":"90701fb00ae5ea555216a8f58bcf5b6f42295ed1","locationID":50014269,"labels":["tz:ru","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133859609,"zkb":{"hash":"2c1f4d1ce561bcaa62d82647146885b4ec9e459a","locationID":50014269,"labels":["tz:ru","cat:6","#:50+","pvp","loc:nullsec","isk:5b+","capital"]},"rearm":0}
+{"killID":133859597,"zkb":{"hash":"6c288134d657cabf443eea6237530e071be1b9c6","locationID":50012727,"labels":["tz:ru","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
