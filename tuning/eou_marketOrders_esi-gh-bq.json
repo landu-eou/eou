@@ -4,7 +4,7 @@
   "next_run": "2026-03-08T03:36:31Z",
   "failed": 0,
   "current": {
-    "max_workers": 4,
+    "max_workers": 5,
     "retry_budget": 15
   },
   "best": {
