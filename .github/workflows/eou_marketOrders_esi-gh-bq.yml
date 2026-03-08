@@ -1,0 +1,202 @@
+name: ESI Market Orders (ESI → GH → BQ)
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_refresh:
+        description: "Ignorar cache planner (pages cache) y reconstruir planificación (usar con cuidado)"
+        required: false
+        type: boolean
+        default: false
+      max_workers:
+        description: "Valor base de workers internos para autotuning"
+        required: false
+        type: number
+        default: 8
+      retry_budget:
+        description: "Valor base de retry_budget para autotuning"
+        required: false
+        type: number
+        default: 8
+
+concurrency:
+  group: eou_marketOrders_esi_gh
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PAGES_CACHE_REL: states/eou_marketOrders_esi-gh-bq_pages.json
+  TUNING_STATE_REL: tuning/eou_marketOrders_esi-gh-bq.json
+  RUN_METRICS_PATH: .tmp/eou_marketOrders_esi-gh-bq_run_metrics.json
+  FINALIZE_SUMMARY_PATH: .tmp/eou_marketOrders_esi-gh-bq_finalize_summary.json
+  SQLITE_PATH: .tmp/eou_marketOrders_esi-gh-bq_orders.sqlite
+
+  SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
+  SHEET_TAB: workflows
+  SHEETS_WORKFLOW_ROW: "11"
+  LOCK_TIME: "300"
+
+  ESI_BASE: https://esi.evetech.net/latest
+  ESI_DATASOURCE: tranquility
+  ESI_USER_AGENT: "eou-market-orders-ingest/1.0 (+https://github.com/landu-eou/eou)"
+
+  REGIONS_PATH: data/sde/regions.jsonl.gz
+  STATIONS_PATH: data/sde/stations.jsonl.gz
+  STRUCTURES_PATH: data/esi/structures.jsonl.gz
+  SDE_DIR: data/sde
+
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # El workflow vive en el propio repositorio y persiste sus estados aquí.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Python 3.11 es una base estable y ampliamente soportada para este pipeline.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements/eou_marketOrders_esi-gh-bq.txt
+
+      # Autenticación a Google Cloud mediante Workload Identity Federation.
+      # Esto evita claves estáticas y permite que sheet.py use ADC.
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Ensure runtime directories
+        run: |
+          mkdir -p .tmp states tuning scripts/esi requirements
+
+      # Marca el workflow como "in progress" y fija next_run temporal = now + LOCK_TIME.
+      - name: Initialize tuning state
+        run: |
+          python scripts/esi/eou_marketOrders_esi-gh-bq_tuning.py init \
+            --path "${TUNING_STATE_REL}" \
+            --requested-max-workers "${{ inputs.max_workers }}" \
+            --requested-retry-budget "${{ inputs.retry_budget }}" \
+            --lock-time "${LOCK_TIME}"
+
+      # Refleja el estado inicial en Google Sheets.
+      - name: Write initial workflow status to Google Sheets
+        run: |
+          python scripts/esi/eou_marketOrders_esi-gh-bq_sheet.py from-files \
+            --sheets-id "${SHEETS_ID}" \
+            --sheet-tab "${SHEET_TAB}" \
+            --row "${SHEETS_WORKFLOW_ROW}" \
+            --tuning-path "${TUNING_STATE_REL}" \
+            --run-metrics-path "${RUN_METRICS_PATH}" \
+            --write-last-modified false
+
+      # Fase principal: ingesta completa de regiones + estructuras, consolidación en SQLite
+      # y persistencia de pages cache + métricas. Se detiene aquí; no hay fase analítica.
+      - name: Run market orders ingest pipeline
+        env:
+          EOU_ACCESS_TOKENS_1: ${{ secrets.EOU_ACCESS_TOKENS_1 }}
+          EOU_ACCESS_TOKENS_2: ${{ secrets.EOU_ACCESS_TOKENS_2 }}
+          PRIMARY_CHAR_ID: ${{ vars.PRIMARY_CHAR_ID }}
+        run: |
+          python scripts/esi/eou_marketOrders_esi-gh-bq_pipeline.py \
+            --regions-path "${REGIONS_PATH}" \
+            --stations-path "${STATIONS_PATH}" \
+            --structures-path "${STRUCTURES_PATH}" \
+            --sde-dir "${SDE_DIR}" \
+            --pages-cache-path "${PAGES_CACHE_REL}" \
+            --tuning-path "${TUNING_STATE_REL}" \
+            --run-metrics-path "${RUN_METRICS_PATH}" \
+            --finalize-summary-path "${FINALIZE_SUMMARY_PATH}" \
+            --sqlite-path "${SQLITE_PATH}" \
+            --esi-base "${ESI_BASE}" \
+            --esi-datasource "${ESI_DATASOURCE}" \
+            --esi-user-agent "${ESI_USER_AGENT}" \
+            --force-refresh "${{ inputs.force_refresh }}"
+
+      - name: Finalize tuning state on success
+        if: success()
+        run: |
+          python scripts/esi/eou_marketOrders_esi-gh-bq_tuning.py finalize-success \
+            --path "${TUNING_STATE_REL}" \
+            --run-metrics-path "${RUN_METRICS_PATH}" \
+            --lock-time "${LOCK_TIME}"
+
+      - name: Finalize tuning state on failure
+        if: failure()
+        run: |
+          python scripts/esi/eou_marketOrders_esi-gh-bq_tuning.py finalize-failure \
+            --path "${TUNING_STATE_REL}" \
+            --run-metrics-path "${RUN_METRICS_PATH}" \
+            --lock-time "${LOCK_TIME}"
+
+      # Siempre escribimos el estado final del workflow en Sheets.
+      - name: Write final workflow status to Google Sheets
+        if: always()
+        run: |
+          WRITE_LAST_MODIFIED=false
+          if [ -f "${RUN_METRICS_PATH}" ]; then
+            python - <<'PY'
+import json, os, sys
+path = os.environ["RUN_METRICS_PATH"]
+ok = False
+if os.path.exists(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        ok = bool(data.get("result", {}).get("ok"))
+    except Exception:
+        ok = False
+print("true" if ok else "false")
+PY
+          else
+            echo "false"
+          fi > .tmp/write_last_modified.flag
+
+          WRITE_LAST_MODIFIED="$(cat .tmp/write_last_modified.flag)"
+          python scripts/esi/eou_marketOrders_esi-gh-bq_sheet.py from-files \
+            --sheets-id "${SHEETS_ID}" \
+            --sheet-tab "${SHEET_TAB}" \
+            --row "${SHEETS_WORKFLOW_ROW}" \
+            --tuning-path "${TUNING_STATE_REL}" \
+            --run-metrics-path "${RUN_METRICS_PATH}" \
+            --write-last-modified "${WRITE_LAST_MODIFIED}"
+
+      # Persiste solo archivos de estado versionados.
+      - name: Commit updated state files
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A -- "${PAGES_CACHE_REL}" "${TUNING_STATE_REL}"
+
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: update market orders ingest state"
+          git push
