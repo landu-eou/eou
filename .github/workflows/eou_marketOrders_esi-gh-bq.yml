@@ -17,7 +17,7 @@ on:
         description: "Valor base de retry_budget para autotuning"
         required: false
         type: number
-        default: 8
+        default: 10
 
 concurrency:
   group: eou_marketOrders_esi_gh_bq
