@@ -37,6 +37,7 @@ env:
   RUN_METRICS_PATH: .tmp/eou_marketOrders_esi-gh-bq_run_metrics.json
   FINALIZE_SUMMARY_PATH: .tmp/eou_marketOrders_esi-gh-bq_finalize_summary.json
   SQLITE_PATH: .tmp/eou_marketOrders_esi-gh-bq_orders.sqlite
+  RUN_LOG_PATH: .tmp/eou_marketOrders_esi-gh-bq_run.log
 
   SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
   SHEET_TAB: workflows
@@ -123,10 +124,21 @@ jobs:
             --run-metrics-path "${RUN_METRICS_PATH}" \
             --finalize-summary-path "${FINALIZE_SUMMARY_PATH}" \
             --sqlite-path "${SQLITE_PATH}" \
+            --run-log-path "${RUN_LOG_PATH}" \
             --esi-base "${ESI_BASE}" \
             --esi-datasource "${ESI_DATASOURCE}" \
             --esi-user-agent "${ESI_USER_AGENT}" \
             --force-refresh "${{ inputs.force_refresh }}"
+
+      - name: Show pipeline log
+        if: always()
+        run: |
+          if [ -f "${RUN_LOG_PATH}" ]; then
+            echo "----- PIPELINE LOG -----"
+            cat "${RUN_LOG_PATH}"
+          else
+            echo "Pipeline log not found."
+          fi
 
       - name: Finalize tuning state on success
         if: success() && hashFiles('.tmp/eou_marketOrders_esi-gh-bq_run_metrics.json') != ''
