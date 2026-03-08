@@ -20,7 +20,7 @@ on:
         default: 8
 
 concurrency:
-  group: eou_marketOrders_esi_gh
+  group: eou_marketOrders_esi_gh_bq
   cancel-in-progress: false
 
 permissions:
@@ -62,13 +62,11 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      # El workflow vive en el propio repositorio y persiste sus estados aquí.
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # Python 3.11 es una base estable y ampliamente soportada para este pipeline.
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -79,8 +77,6 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements/eou_marketOrders_esi-gh-bq.txt
 
-      # Autenticación a Google Cloud mediante Workload Identity Federation.
-      # Esto evita claves estáticas y permite que sheet.py use ADC.
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
@@ -93,7 +89,6 @@ jobs:
         run: |
           mkdir -p .tmp states tuning scripts/esi requirements
 
-      # Marca el workflow como "in progress" y fija next_run temporal = now + LOCK_TIME.
       - name: Initialize tuning state
         run: |
           python scripts/esi/eou_marketOrders_esi-gh-bq_tuning.py init \
@@ -102,7 +97,6 @@ jobs:
             --requested-retry-budget "${{ inputs.retry_budget }}" \
             --lock-time "${LOCK_TIME}"
 
-      # Refleja el estado inicial en Google Sheets.
       - name: Write initial workflow status to Google Sheets
         run: |
           python scripts/esi/eou_marketOrders_esi-gh-bq_sheet.py from-files \
@@ -113,8 +107,6 @@ jobs:
             --run-metrics-path "${RUN_METRICS_PATH}" \
             --write-last-modified false
 
-      # Fase principal: ingesta completa de regiones + estructuras, consolidación en SQLite
-      # y persistencia de pages cache + métricas. Se detiene aquí; no hay fase analítica.
       - name: Run market orders ingest pipeline
         env:
           EOU_ACCESS_TOKENS_1: ${{ secrets.EOU_ACCESS_TOKENS_1 }}
@@ -152,39 +144,17 @@ jobs:
             --run-metrics-path "${RUN_METRICS_PATH}" \
             --lock-time "${LOCK_TIME}"
 
-      # Siempre escribimos el estado final del workflow en Sheets.
       - name: Write final workflow status to Google Sheets
         if: always()
         run: |
-          WRITE_LAST_MODIFIED=false
-          if [ -f "${RUN_METRICS_PATH}" ]; then
-            python - <<'PY'
-import json, os, sys
-path = os.environ["RUN_METRICS_PATH"]
-ok = False
-if os.path.exists(path):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        ok = bool(data.get("result", {}).get("ok"))
-    except Exception:
-        ok = False
-print("true" if ok else "false")
-PY
-          else
-            echo "false"
-          fi > .tmp/write_last_modified.flag
-
-          WRITE_LAST_MODIFIED="$(cat .tmp/write_last_modified.flag)"
           python scripts/esi/eou_marketOrders_esi-gh-bq_sheet.py from-files \
             --sheets-id "${SHEETS_ID}" \
             --sheet-tab "${SHEET_TAB}" \
             --row "${SHEETS_WORKFLOW_ROW}" \
             --tuning-path "${TUNING_STATE_REL}" \
             --run-metrics-path "${RUN_METRICS_PATH}" \
-            --write-last-modified "${WRITE_LAST_MODIFIED}"
+            --write-last-modified true
 
-      # Persiste solo archivos de estado versionados.
       - name: Commit updated state files
         if: always()
         run: |
