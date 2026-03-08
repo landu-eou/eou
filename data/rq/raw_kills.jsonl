@@ -466,3 +466,12 @@
 {"killID":133890105,"zkb":{"hash":"cd004ccd6b9c492ac128c3f897bf6a6c4b8e49e7","locationID":50014044,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133890112,"zkb":{"hash":"6ab1474e517f2ad796045752afe417f9acf78ab0","locationID":50014000,"labels":["tz:eu","cat:6","#:2+","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
 {"killID":133890127,"zkb":{"hash":"11455b47c1db964f80faf824a3238e3d0292a19b","locationID":50014000,"labels":["tz:eu","cat:6","#:2+","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":133890174,"zkb":{"hash":"271224347b94ee209b92309da2e45f03f506f406","locationID":50004551,"labels":["tz:eu","cat:6","#:5+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133890136,"zkb":{"hash":"6128eb9066eb040708050cd28647e0116f325509","locationID":50004551,"labels":["tz:eu","cat:6","#:5+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133890146,"zkb":{"hash":"3eaf77b83753ef1443229a34c8558663c139b4ad","locationID":50014047,"labels":["tz:eu","cat:6","#:10+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133890195,"zkb":{"hash":"0ebb4d5ba2982025e76690993d7c837a1504cae5","locationID":50004551,"labels":["tz:eu","cat:6","#:5+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133890184,"zkb":{"hash":"434acbab1a5be07d133ac78d452c811a60cd72a0","locationID":50013978,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133890151,"zkb":{"hash":"a527317fa2a3c6c91df688b88805d9bb5ccbfde8","locationID":50013978,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133890156,"zkb":{"hash":"57398a9813167b7bd57a6c8ef9abceb162a2e3c2","locationID":50013978,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133890183,"zkb":{"hash":"712674dafabccbe455161d196071370fbc62a3a2","locationID":50013978,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133890201,"zkb":{"hash":"aee61286f6b2a6872b910a88c7f0b0c991f22c2f","locationID":50004551,"labels":["tz:eu","cat:6","#:5+","pvp","loc:lowsec"]},"rearm":0}
