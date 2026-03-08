@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "status": "failed",
-  "next_run": "2026-03-08T02:39:40Z",
+  "status": "in progress",
+  "next_run": "2026-03-08T02:54:53Z",
   "failed": 1,
   "current": {
     "max_workers": 6,
