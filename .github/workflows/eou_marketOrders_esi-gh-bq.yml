@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       force_refresh:
-        description: "Ignorar cache planner (pages cache) y reconstruir planificación (usar con cuidado)"
+        description: "Ignorar cache planner (pages cache) y reconstruir planificación"
         required: false
         type: boolean
         default: false
@@ -62,6 +62,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -87,7 +88,7 @@ jobs:
 
       - name: Ensure runtime directories
         run: |
-          mkdir -p .tmp states tuning scripts/esi requirements
+          mkdir -p .tmp states tuning
 
       - name: Initialize tuning state
         run: |
@@ -129,7 +130,7 @@ jobs:
             --force-refresh "${{ inputs.force_refresh }}"
 
       - name: Finalize tuning state on success
-        if: success()
+        if: success() && hashFiles('.tmp/eou_marketOrders_esi-gh-bq_run_metrics.json') != ''
         run: |
           python scripts/esi/eou_marketOrders_esi-gh-bq_tuning.py finalize-success \
             --path "${TUNING_STATE_REL}" \
@@ -137,7 +138,7 @@ jobs:
             --lock-time "${LOCK_TIME}"
 
       - name: Finalize tuning state on failure
-        if: failure()
+        if: failure() && hashFiles('.tmp/eou_marketOrders_esi-gh-bq_run_metrics.json') != ''
         run: |
           python scripts/esi/eou_marketOrders_esi-gh-bq_tuning.py finalize-failure \
             --path "${TUNING_STATE_REL}" \
@@ -161,10 +162,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add -A -- "${PAGES_CACHE_REL}" "${TUNING_STATE_REL}"
+          git add "${PAGES_CACHE_REL}" "${TUNING_STATE_REL}"
 
           if git diff --cached --quiet; then
-            echo "No state changes to commit."
+            echo "No state changes to commit"
             exit 0
           fi
 
