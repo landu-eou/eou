@@ -28,7 +28,7 @@ from typing import Dict, List, Optional, Tuple
 
 
 MIN_WORKERS = 4
-MAX_WORKERS = 16
+MAX_WORKERS = 8
 MIN_RETRY_BUDGET = 10
 MAX_RETRY_BUDGET = 50
 MAX_HISTORY = 5
