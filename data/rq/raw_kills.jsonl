@@ -209,3 +209,13 @@
 {"killID":133872533,"zkb":{"hash":"4bfefc198b19321420337934984ce5aa123db56c","locationID":50016513,"labels":["tz:use","cat:6","#:2+","pvp"]},"rearm":0}
 {"killID":133872559,"zkb":{"hash":"75f73c710de5bcd43f54cc5516a77af580ac9539","locationID":50002573,"labels":["tz:use","cat:6","#:5+","pvp","loc:lowsec"]},"rearm":0}
 {"killID":133872567,"zkb":{"hash":"ef80fcce3bef68eee7eb254931b34ff0fe1eaf67","locationID":50011401,"labels":["tz:use","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133872572,"zkb":{"hash":"b68b5e5b118e25984fba883b154766ec9ad9d608","locationID":50008069,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133872577,"zkb":{"hash":"a7b2f33d38df29428a9f55ec8175daf936f1c881","locationID":50013840,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133872561,"zkb":{"hash":"aff104ea855a6fb6cf06322238cd78409437e9ce","locationID":50013840,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133872584,"zkb":{"hash":"b6b5a70c012eefdb7bd9df3ed0462f8b92150edb","locationID":50008069,"labels":["tz:use","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133872522,"zkb":{"hash":"aa9275e9c704d9a5727474901b1c4dea6c660d3c","locationID":50012707,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133872539,"zkb":{"hash":"2829076414629c77b9e961b0f7f746d8fc9777f8","locationID":50014048,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133872578,"zkb":{"hash":"dbac935925ff5f45427f710e79ba40efc4269665","locationID":50006123,"labels":["tz:use","cat:6","#:1","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133872547,"zkb":{"hash":"15b0a565ae5300f7679faf6d3b8fd2e0b9f8f460","locationID":50006123,"labels":["tz:use","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133872545,"zkb":{"hash":"eab1ffee94bc40bbae362a4a502eba69e3635da4","locationID":50013922,"labels":["tz:use","cat:6","solo","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":133872557,"zkb":{"hash":"d3b59385ec6b57149dacc83cfa48bf0229dd092e","locationID":50013922,"labels":["tz:use","cat:6","#:1","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
