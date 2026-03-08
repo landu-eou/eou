@@ -1,4 +1,4 @@
-name: ESI Corporation Kills (BQ → GH → ESI → BQ)
+name: BQ Corporation Kills (BQ → GH → ESI → BQ)
 
 on:
   workflow_dispatch:
