@@ -1545,3 +1545,12 @@
 {"killID":133892896,"zkb":{"hash":"f7eac7e80bb2470bb5feba72d4101d1c8c998fd1","locationID":50007833,"labels":["tz:eu","cat:6","#:1","pvp","loc:highsec"]},"rearm":0}
 {"killID":133892907,"zkb":{"hash":"9bcc9a6567d104837ae65a793a30735df7adbf2e","locationID":50008839,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
 {"killID":133892961,"zkb":{"hash":"3b8bab6e09d1133136c4e7a38fac2ddd9b3ecb53","locationID":50016235,"labels":["tz:eu","cat:6","#:5+","pvp","loc:lowsec","fw:caldari","fw:calgal"]},"rearm":0}
+{"killID":133892971,"zkb":{"hash":"89b7416f39b11b06496e8969bb5982f23e6cbeee","locationID":50016235,"labels":["tz:eu","cat:6","solo","pvp","loc:lowsec","fw:caldari","fw:calgal"]},"rearm":0}
+{"killID":133892947,"zkb":{"hash":"4874c28b9f86cdc3413e59a7d1e578731627e86f","locationID":50016235,"labels":["tz:eu","cat:6","#:2+","pvp","loc:lowsec","fw:caldari","fw:calgal"]},"rearm":0}
+{"killID":133892916,"zkb":{"hash":"0b8d4cf7564f8cf23794a611170b0d55c835bad9","locationID":50002736,"labels":["tz:eu","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133892841,"zkb":{"hash":"72d59a779d93bc6711e002edac435018f1cd42d6","locationID":50009003,"labels":["tz:eu","cat:6","#:1","pvp","loc:lowsec"]},"rearm":0}
+{"killID":133892935,"zkb":{"hash":"f36ff0433941974763819cd4c3671282639f7fd6","locationID":50001013,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133892973,"zkb":{"hash":"cb0d64b752fcc6570507855dd02cff213e4a2c32","locationID":50001013,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":133892952,"zkb":{"hash":"1418bc6e731b5ed32045f317bcf64613582e0d1f","locationID":50016235,"labels":["tz:eu","cat:6","#:5+","pvp","loc:lowsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":133892955,"zkb":{"hash":"3c3f4d8d700a26d9523bde83eec92573f5df5e85","locationID":50016235,"labels":["tz:eu","cat:6","#:5+","pvp","loc:lowsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":133892987,"zkb":{"hash":"66ecdd7bbbcc4908e296aa92feef157411ba6ab8","locationID":50016235,"labels":["tz:eu","cat:6","#:5+","pvp","loc:lowsec","fw:gallente","fw:calgal"]},"rearm":0}
