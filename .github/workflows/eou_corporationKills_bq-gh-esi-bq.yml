@@ -1,0 +1,92 @@
+name: EOU Corporation Kills (BQ → GH → ESI → BQ)
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_refresh:
+        description: "Recrear la tabla aunque el hash final sea idéntico"
+        required: false
+        type: boolean
+        default: false
+      source_run_id:
+        description: "ID del run que disparó este workflow"
+        required: false
+        type: string
+      source_workflow:
+        description: "Nombre del workflow que disparó este workflow"
+        required: false
+        type: string
+
+concurrency:
+  group: eou_corporationKills_bq-gh-esi-bq
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: "1"
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      BQ_LOCATION: EU
+      BQ_SOURCE_TABLE: eou-ht.eou.gate_kills
+      BQ_TARGET_TABLE: eou-ht.eou.corporation_kills
+      BQ_STAGING_TABLE: eou-ht.eou._stg_corporation_kills
+      STATE_FILE: states/eou_corporationKills_bq-gh-esi-bq.json
+      SQL_IDS_FILE: sql/eou_corporationKills_bq-gh-esi-bq_ids.sql
+      FORCE_REFRESH: ${{ inputs.force_refresh && 'true' || 'false' }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      SOURCE_WORKFLOW: ${{ inputs.source_workflow }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements/eou_corporationKills_bq-gh-esi-bq.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/eou_corporationKills_bq-gh-esi-bq.txt
+
+      - name: Build corporation_kills
+        id: build
+        run: |
+          python scripts/esi/eou_corporationKills_bq-gh-esi-bq_run.py
+
+      - name: Show summary
+        if: always()
+        run: |
+          echo "table_written=${{ steps.build.outputs.table_written }}"
+          echo "state_changed=${{ steps.build.outputs.state_changed }}"
+          echo "resolved_count=${{ steps.build.outputs.resolved_count }}"
+          echo "unresolved_count=${{ steps.build.outputs.unresolved_count }}"
+          echo "decision=${{ steps.build.outputs.decision_reason }}"
+
+      - name: Commit state file
+        if: steps.build.outputs.state_changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$STATE_FILE"
+          git commit -m "chore(states): update corporation_kills state"
+          git push
