@@ -119,7 +119,7 @@ jobs:
         env:
           EOU_ACCESS_TOKENS_1: ${{ secrets.EOU_ACCESS_TOKENS_1 }}
           EOU_ACCESS_TOKENS_2: ${{ secrets.EOU_ACCESS_TOKENS_2 }}
-          PRIMARY_CHAR_ID: ${{ vars.PRIMARY_CHAR_ID }}
+          PRIMARY_CHAR_ID: "2124070822"
         run: |
           python scripts/esi/eou_marketOrders_esi-gh-bq_pipeline.py \
             --regions-path "${REGIONS_PATH}" \
