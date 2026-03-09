@@ -1,28 +1,33 @@
 from __future__ import annotations
 
+"""
+Configuración de logging del pipeline.
+
+Este módulo mantiene la misma interfaz que ya usa el resto del código,
+pero desactiva la emisión de logs hacia stdout/stderr.
+
+Motivo:
+- El workflow ya está verificado y no se desea mostrar trazas informativas.
+- Se conserva el logger para no cambiar la lógica ni la estructura del resto
+  de módulos.
+"""
+
 import logging
-import os
-import sys
 
 
 LOGGER_NAME = "eou_corporationKills"
 
 
 def configure_logging() -> logging.Logger:
-    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
+    """
+    Devuelve un logger silencioso.
 
+    Se usa NullHandler para que las llamadas logger.info/logger.warning no
+    produzcan salida visible durante la ejecución del workflow.
+    """
     logger = logging.getLogger(LOGGER_NAME)
-    logger.setLevel(level)
+    logger.setLevel(logging.CRITICAL + 1)
     logger.handlers.clear()
     logger.propagate = False
-
-    handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter(
-        fmt="%(asctime)sZ %(levelname)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    )
-    formatter.converter = __import__("time").gmtime
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+    logger.addHandler(logging.NullHandler())
     return logger
