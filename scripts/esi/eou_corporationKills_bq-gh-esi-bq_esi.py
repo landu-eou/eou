@@ -1,5 +1,17 @@
 from __future__ import annotations
 
+"""
+Resolución de nombres de corporaciones en ESI.
+
+Responsabilidades:
+- enviar lotes a /universe/names,
+- reintentar errores transitorios,
+- dividir lotes cuando aparece un 404,
+- devolver dos conjuntos:
+  1) IDs resueltos con nombre,
+  2) IDs no resueltos.
+"""
+
 import math
 import random
 import time
@@ -12,6 +24,13 @@ TRANSIENT_STATUS_CODES = {408, 409, 420, 429, 500, 502, 503, 504}
 
 
 class EsiResolver:
+    """
+    Resolver de nombres de corporación a partir de corporation_id.
+
+    El objeto mantiene estadísticas internas del proceso para que el pipeline
+    pueda consultarlas, aunque ya no se muestren como logs visibles.
+    """
+
     def __init__(
         self,
         logger,
@@ -39,6 +58,11 @@ class EsiResolver:
         }
 
     def resolve(self, corporation_ids: Iterable[int]) -> Tuple[Dict[int, str], List[int]]:
+        """
+        Resuelve todos los IDs recibidos y devuelve:
+        - mapping resuelto {corporation_id: corporation}
+        - lista de IDs no resueltos
+        """
         unique_ids = sorted({int(value) for value in corporation_ids})
         resolved: Dict[int, str] = {}
         unresolved: List[int] = []
@@ -53,6 +77,14 @@ class EsiResolver:
         return resolved, unresolved
 
     def _resolve_batch(self, batch: List[int]) -> Tuple[Dict[int, str], List[int]]:
+        """
+        Procesa un lote.
+
+        Casos:
+        - 200: parsea respuesta normal.
+        - 404: divide el lote para aislar IDs problemáticos.
+        - resto: devuelve lote no resuelto para que el pipeline decida fallback.
+        """
         if not batch:
             return {}, []
 
@@ -86,6 +118,9 @@ class EsiResolver:
         return {}, batch
 
     def _post_with_retries(self, batch: List[int]) -> requests.Response | None:
+        """
+        Envía la petición a ESI con reintentos prudentes en errores transitorios.
+        """
         response: requests.Response | None = None
 
         for attempt in range(self.max_transient_retries + 1):
@@ -131,6 +166,9 @@ class EsiResolver:
         batch: List[int],
         response: requests.Response,
     ) -> Tuple[Dict[int, str], List[int]]:
+        """
+        Interpreta una respuesta 200 de ESI y separa resueltos/no resueltos.
+        """
         resolved: Dict[int, str] = {}
         unresolved = set(batch)
 
@@ -181,6 +219,12 @@ class EsiResolver:
         return resolved, sorted(unresolved)
 
     def _inspect_error_limit(self, response: requests.Response) -> None:
+        """
+        Lee los headers de error limiting de ESI.
+
+        Si el margen restante es muy bajo, duerme unos segundos para reducir
+        el riesgo de seguir golpeando el endpoint en mal momento.
+        """
         remain = response.headers.get("X-ESI-Error-Limit-Remain")
         reset = response.headers.get("X-ESI-Error-Limit-Reset")
 
@@ -210,6 +254,9 @@ class EsiResolver:
             time.sleep(min(sleep_seconds, 30))
 
     def _sleep_backoff(self, attempt: int, response: requests.Response | None) -> None:
+        """
+        Backoff con jitter para reintentos transitorios.
+        """
         reset_seconds = None
         if response is not None:
             reset_header = response.headers.get("X-ESI-Error-Limit-Reset")
