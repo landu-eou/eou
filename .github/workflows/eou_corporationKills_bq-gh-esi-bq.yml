@@ -1,3 +1,153 @@
+#
+# .
+# ├── .github/
+# │   └── workflows/
+# │      └── eou_corporationKills_bq-gh-esi-bq.yml
+# │         # Workflow principal:
+# │         # - se lanza por workflow_dispatch
+# │         # - autentica contra Google Cloud con WIF
+# │         # - instala dependencias Python
+# │         # - ejecuta el pipeline BQ -> ESI -> BQ
+# │         # - versiona el state si hubo escritura real
+# │         # - actualiza workflows!I9 en Google Sheets solo si el job termina en success
+# │
+# ├── requirements/
+# │   └── eou_corporationKills_bq-gh-esi-bq.txt
+# │      # Dependencias mínimas del pipeline:
+# │      # - google-cloud-bigquery
+# │      # - google-api-python-client
+# │      # - requests
+# │
+# ├── sql/
+# │   └── eou_corporationKills_bq-gh-esi-bq_ids.sql
+# │      # SQL base para extraer todos los corporation_id únicos
+# │      # desde la tabla fuente:
+# │      # - hace UNNEST(corporationID)
+# │      # - filtra NULL
+# │      # - aplica DISTINCT
+# │      # - ordena ASC por corporation_id
+# │      # Usa placeholder {{SOURCE_TABLE}} para inyectar la tabla real desde env.
+# │
+# ├── scripts/
+# │   └── esi/
+# │      ├── eou_corporationKills_bq-gh-esi-bq_run.py
+# │      │   # Orquestador principal del pipeline.
+# │      │   # Flujo:
+# │      │   # 1) lee IDs desde BigQuery
+# │      │   # 2) resuelve nombres en ESI
+# │      │   # 3) usa fallback desde la tabla actual si ESI deja huecos
+# │      │   # 4) canonicaliza filas y calcula hash estable
+# │      │   # 5) decide si reescribe o no la tabla destino
+# │      │   # 6) actualiza el state solo si hubo escritura real
+# │      │   # 7) publica outputs para GitHub Actions:
+# │      │   #    - table_written
+# │      │   #    - state_changed
+# │      │   #    - resolved_count
+# │      │   #    - unresolved_count
+# │      │   #    - decision_reason
+# │      │
+# │      ├── eou_corporationKills_bq-gh-esi-bq_bq.py
+# │      │   # Acceso a BigQuery.
+# │      │   # Responsabilidades:
+# │      │   # - crear el cliente
+# │      │   # - cargar/renderizar la SQL
+# │      │   # - leer corporation_id únicos desde gate_kills
+# │      │   # - leer corporation_kills actual para fallback
+# │      │   # - recrear la tabla final usando staging temporal
+# │      │   # - permitir tabla final vacía con esquema correcto
+# │      │
+# │      ├── eou_corporationKills_bq-gh-esi-bq_esi.py
+# │      │   # Resolución de nombres mediante ESI:
+# │      │   # POST /latest/universe/names/?datasource=tranquility
+# │      │   # Estrategia:
+# │      │   # - requests.Session()
+# │      │   # - User-Agent explícito
+# │      │   # - lotes de hasta 1000 IDs
+# │      │   # - pocos reintentos transitorios con backoff + jitter
+# │      │   # - atención a X-ESI-Error-Limit-Remain / Reset
+# │      │   # - si un lote devuelve 404, se divide recursivamente
+# │      │   #   para aislar IDs problemáticos sin perder el resto
+# │      │   # Devuelve:
+# │      │   # - mapping resuelto {corporation_id: corporation}
+# │      │   # - lista de unresolved_ids
+# │      │
+# │      ├── eou_corporationKills_bq-gh-esi-bq_hash.py
+# │      │   # Canonicalización + hashing del dataset final.
+# │      │   # El hash:
+# │      │   # - se calcula sobre el dataset ya resuelto
+# │      │   # - no sobre la lista de IDs
+# │      │   # - ordena por corporation_id ASC
+# │      │   # - serializa de forma estable
+# │      │   # - produce SHA-256 determinista
+# │      │
+# │      ├── eou_corporationKills_bq-gh-esi-bq_state.py
+# │      │   # Lectura y escritura del state persistente en GitHub.
+# │      │   # Formato:
+# │      │   # {
+# │      │   #   "hash": "...",
+# │      │   #   "last-modified": "YYYY-MM-DDTHH:MM:SSZ"
+# │      │   # }
+# │      │   # Significado:
+# │      │   # - hash del último dataset realmente escrito en BigQuery
+# │      │   # - fecha UTC del último volcado exitoso real
+# │      │
+# │      └── eou_corporationKills_bq-gh-esi-bq_log.py
+# │          # Logger silencioso.
+# │          # Se conserva para mantener la estructura del pipeline,
+# │          # pero sin emitir salida visible innecesaria en el workflow.
+# │
+# └── states/
+#    └── eou_corporationKills_bq-gh-esi-bq.json
+#       # State persistente versionado en el repo.
+#       # Solo se actualiza cuando hubo escritura real en BigQuery.
+#       # Se commitea y pushea con manejo de non-fast-forward:
+#       # - fetch
+#       # - pull --rebase
+#       # - reintentos de push
+#
+# BigQuery
+# ├── Fuente:
+# │   └── eou-ht.eou.gate_kills
+# │      # Tabla fuente de verdad completa.
+# │      # corporationID = ARRAY<STRUCT<corporation_id INT64>>
+# │
+# ├── Destino:
+# │   └── eou-ht.eou.corporation_kills
+# │      # Tabla derivada final:
+# │      # - corporation_id INT64
+# │      # - corporation STRING
+# │
+# └── Staging:
+#    └── eou-ht.eou._stg_corporation_kills
+#       # Nombre base de staging temporal usado durante la recreación.
+#       # El script añade sufijo aleatorio para evitar colisiones entre tablas temporales.
+#
+# Google Sheets
+# └── Spreadsheet: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
+#    └── Tab: workflows
+#       └── Celda: I9
+#          # Se escribe solo al final del workflow y solo si el resultado global es success.
+#          # Se envía como serial numérico de Google Sheets (UTC), no como texto.
+#
+# Regla funcional del pipeline
+# ├── Siempre:
+# │   # 1) leer IDs desde BigQuery fuente
+# │   # 2) consultar ESI
+# │   # 3) construir dataset final canónico
+# │   # 4) calcular hash final
+# │
+# ├── Luego decidir escritura:
+# │   # - force_refresh=true           -> escribir siempre
+# │   # - missing_ids sin fallback     -> NO escribir
+# │   # - state inexistente            -> escribir
+# │   # - hash nuevo != hash previo    -> escribir
+# │   # - hash igual y >55 días        -> escribir
+# │   # - hash igual y <=55 días       -> NO escribir
+# │
+# └── Objetivo de la regla de 55 días:
+#    # Renovar la tabla antes del vencimiento de 60 días de BigQuery Sandbox.
+#
+
 name: BQ Corporation Kills (BQ → GH → ESI → BQ)
 
 on:
