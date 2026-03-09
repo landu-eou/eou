@@ -1,5 +1,17 @@
 from __future__ import annotations
 
+"""
+Orquestador principal del pipeline corporation_kills.
+
+Resumen del flujo:
+1) lee corporation_id únicos desde BigQuery,
+2) intenta resolver sus nombres en ESI,
+3) usa fallback desde la tabla actual si ESI deja huecos,
+4) calcula hash del dataset final,
+5) decide si reescribe la tabla destino,
+6) actualiza el fichero state si hubo escritura real.
+"""
+
 import importlib.util
 import os
 import sys
@@ -11,6 +23,12 @@ BASE_DIR = Path(__file__).resolve().parent
 
 
 def load_local_module(filename: str, alias: str):
+    """
+    Carga módulos hermanos por nombre de fichero.
+
+    Se mantiene este patrón para no depender de empaquetado Python adicional
+    dentro del repositorio.
+    """
     module_path = BASE_DIR / filename
     spec = importlib.util.spec_from_file_location(alias, module_path)
     if spec is None or spec.loader is None:
@@ -31,6 +49,9 @@ logger = log_mod.configure_logging()
 
 
 def set_output(name: str, value: Any) -> None:
+    """
+    Publica outputs del step para que el workflow pueda usarlos después.
+    """
     github_output = os.getenv("GITHUB_OUTPUT")
     if not github_output:
         return
@@ -39,6 +60,9 @@ def set_output(name: str, value: Any) -> None:
 
 
 def main() -> int:
+    """
+    Ejecuta el pipeline completo sin alterar la lógica existente.
+    """
     workspace = Path(os.getenv("GITHUB_WORKSPACE", Path.cwd()))
     state_path = workspace / os.environ["STATE_FILE"]
     sql_path = workspace / os.environ["SQL_IDS_FILE"]
@@ -54,17 +78,9 @@ def main() -> int:
     now_utc = state_mod.utcnow()
     state = state_mod.read_state(state_path)
 
-    logger.info("pipeline start")
-    logger.info("state_file=%s", state_path)
-    logger.info("sql_file=%s", sql_path)
-    logger.info("source_table=%s", source_table)
-    logger.info("target_table=%s", target_table)
-    logger.info("force_refresh=%s", force_refresh)
-
     client = bq_mod.make_client(project_id=project_id, location=location)
     sql_text = bq_mod.load_sql(sql_path, source_table=source_table)
     corporation_ids = bq_mod.fetch_corporation_ids(client, sql_text)
-    logger.info("bigquery corporation_ids=%s", len(corporation_ids))
 
     resolver = esi_mod.EsiResolver(
         logger=logger,
@@ -72,20 +88,9 @@ def main() -> int:
     )
     resolved_mapping, unresolved_ids = resolver.resolve(corporation_ids)
 
-    logger.info(
-        "esi resolved=%s unresolved=%s batches=%s transient_retries=%s split_retries=%s min_error_limit_remain=%s",
-        len(resolved_mapping),
-        len(unresolved_ids),
-        resolver.stats["batches_attempted"],
-        resolver.stats["transient_retries"],
-        resolver.stats["split_retries"],
-        resolver.stats["min_error_limit_remain"],
-    )
-
     existing_mapping: dict[int, str] = {}
     if unresolved_ids:
         existing_mapping = bq_mod.fetch_existing_mapping(client, target_table)
-        logger.info("bigquery existing_rows=%s", len(existing_mapping))
 
     fallback_hits = 0
     missing_ids: list[int] = []
@@ -113,10 +118,6 @@ def main() -> int:
 
         missing_ids.append(corporation_id)
 
-    logger.info("fallback_hits=%s missing_ids=%s", fallback_hits, len(missing_ids))
-    if missing_ids:
-        logger.warning("missing corporation_ids without fallback=%s", missing_ids[:20])
-
     new_hash, canonical_rows = hash_mod.compute_hash(final_rows)
     previous_hash = state["hash"] if state else None
     age_days = None
@@ -142,21 +143,11 @@ def main() -> int:
         should_write = True
         reason = "ttl_refresh"
 
-    logger.info(
-        "decision=%s should_write=%s previous_hash=%s new_hash=%s age_days=%s preview=%s",
-        reason,
-        should_write,
-        previous_hash,
-        new_hash,
-        None if age_days is None else round(age_days, 3),
-        bq_mod.render_preview(canonical_rows),
-    )
-
     table_written = False
     state_changed = False
 
     if should_write:
-        row_count = bq_mod.replace_target_table(
+        bq_mod.replace_target_table(
             client=client,
             project_id=project_id,
             location=location,
@@ -164,7 +155,6 @@ def main() -> int:
             target_table=target_table,
             rows=canonical_rows,
         )
-        logger.info("bigquery write complete rows=%s", row_count)
 
         state_mod.write_state(
             state_path,
@@ -174,13 +164,17 @@ def main() -> int:
         table_written = True
         state_changed = True
 
+    # Outputs consumidos por pasos posteriores del workflow.
     set_output("table_written", str(table_written).lower())
     set_output("state_changed", str(state_changed).lower())
     set_output("resolved_count", len(resolved_mapping))
     set_output("unresolved_count", len(unresolved_ids))
     set_output("decision_reason", reason)
 
-    logger.info("pipeline end")
+    # Variables mantenidas para no alterar el flujo ni las comprobaciones.
+    _ = fallback_hits
+    _ = bq_mod.render_preview(canonical_rows)
+
     return 0
 
 
