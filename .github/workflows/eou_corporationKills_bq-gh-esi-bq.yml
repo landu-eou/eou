@@ -79,20 +79,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install --disable-pip-version-check -r requirements/eou_corporationKills_bq-gh-esi-bq.txt
 
+      # Paso principal del pipeline:
+      # 1) lee corporation_id desde BigQuery,
+      # 2) resuelve nombres en ESI,
+      # 3) decide si reescribe la tabla destino,
+      # 4) actualiza el state local si hubo escritura real.
       - name: Build corporation_kills
         id: build
         run: |
           python scripts/esi/eou_corporationKills_bq-gh-esi-bq_run.py
 
-      - name: Show summary
-        if: always()
-        run: |
-          echo "table_written=${{ steps.build.outputs.table_written }}"
-          echo "state_changed=${{ steps.build.outputs.state_changed }}"
-          echo "resolved_count=${{ steps.build.outputs.resolved_count }}"
-          echo "unresolved_count=${{ steps.build.outputs.unresolved_count }}"
-          echo "decision=${{ steps.build.outputs.decision_reason }}"
-
+      # El state solo se versiona cuando cambió de verdad tras una escritura real.
       - name: Commit state file
         if: steps.build.outputs.state_changed == 'true'
         run: |
@@ -106,24 +103,19 @@ jobs:
           git add "$STATE_FILE"
 
           if git diff --cached --quiet; then
-            echo "No staged changes in state file."
             exit 0
           fi
 
           git commit -m "chore(states): update corporation_kills state"
 
-          # Si otro workflow avanzó la rama, hacemos fetch/rebase y reintentamos el push.
+          # Si otro workflow avanzó la rama, se hace fetch/rebase y se reintenta.
           for attempt in 1 2 3; do
-            echo "Push attempt ${attempt}/3"
-
             git fetch origin "$BRANCH"
 
             if ! git pull --rebase origin "$BRANCH"; then
-              echo "Rebase failed on attempt ${attempt}; aborting rebase and retrying..."
               git rebase --abort || true
 
               if [ "$attempt" -eq 3 ]; then
-                echo "Unable to rebase local state commit onto latest remote branch."
                 exit 1
               fi
 
@@ -132,18 +124,17 @@ jobs:
             fi
 
             if git push origin "HEAD:${BRANCH}"; then
-              echo "State file pushed successfully."
               exit 0
             fi
 
             if [ "$attempt" -eq 3 ]; then
-              echo "Unable to push state commit after retries."
               exit 1
             fi
 
             sleep $((attempt * 2))
           done
 
+      # Esta marca temporal solo se escribe al final cuando el workflow ha sido success.
       - name: Update workflows sheet success timestamp
         if: success()
         run: |
@@ -174,7 +165,6 @@ jobs:
               cache_discovery=False,
           )
 
-          # Esta escritura solo ocurre al final cuando el workflow sigue en estado success.
           body = {
               "valueInputOption": "RAW",
               "data": [
@@ -191,9 +181,4 @@ jobs:
               spreadsheetId=spreadsheet_id,
               body=body,
           ).execute()
-
-          print(
-              f"Updated {target_range} with UTC serial {serial_value:.10f} "
-              f"({now_utc.isoformat().replace('+00:00', 'Z')})"
-          )
           PY
