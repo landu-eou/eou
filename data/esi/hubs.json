@@ -1,40 +1,40 @@
 {
   "hubs": 5,
-  "orders": 1615662,
+  "orders": 1615661,
   "hubsList": [
     {
       "stationID": 60003760,
       "station": "Jita IV - Moon 4 - Caldari Navy",
-      "orders": 348871,
-      "ordersShare": 0.21593068352167719,
+      "orders": 348828,
+      "ordersShare": 0.2159042026761802,
       "types": 18112
     },
     {
       "stationID": 60008494,
       "station": "Amarr VIII - Emperor Family",
-      "orders": 131165,
-      "ordersShare": 0.0811834405958672,
+      "orders": 131166,
+      "ordersShare": 0.08118410978540672,
       "types": 13806
     },
     {
       "stationID": 60011866,
       "station": "Dodixie IX - Moon 20 - Federation Navy",
-      "orders": 65949,
-      "ordersShare": 0.04081856229830249,
+      "orders": 65942,
+      "ordersShare": 0.040814254970566226,
       "types": 10987
     },
     {
       "stationID": 60005686,
       "station": "Hek VIII - Moon 12 - Boundless Creation",
-      "orders": 39877,
-      "ordersShare": 0.02468152373454349,
-      "types": 9216
+      "orders": 39922,
+      "ordersShare": 0.024709391388416258,
+      "types": 9217
     },
     {
       "stationID": 60004588,
       "station": "Rens VI - Moon 8 - Brutor Tribe",
-      "orders": 34599,
-      "ordersShare": 0.021414751352696295,
+      "orders": 34611,
+      "ordersShare": 0.02142219190783215,
       "types": 8827
     }
   ]
