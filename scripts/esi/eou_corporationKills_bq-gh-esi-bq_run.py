@@ -45,9 +45,11 @@ def main() -> int:
 
     project_id = os.environ["GCP_PROJECT_ID"]
     location = os.getenv("BQ_LOCATION", "EU")
+    source_table = os.environ["BQ_SOURCE_TABLE"]
     target_table = os.environ["BQ_TARGET_TABLE"]
     staging_table = os.environ["BQ_STAGING_TABLE"]
     force_refresh = os.getenv("FORCE_REFRESH", "false").lower() == "true"
+    esi_user_agent = os.environ["ESI_USER_AGENT"]
 
     now_utc = state_mod.utcnow()
     state = state_mod.read_state(state_path)
@@ -55,17 +57,21 @@ def main() -> int:
     logger.info("pipeline start")
     logger.info("state_file=%s", state_path)
     logger.info("sql_file=%s", sql_path)
+    logger.info("source_table=%s", source_table)
     logger.info("target_table=%s", target_table)
     logger.info("force_refresh=%s", force_refresh)
 
     client = bq_mod.make_client(project_id=project_id, location=location)
-    sql_text = bq_mod.load_sql(sql_path)
+    sql_text = bq_mod.load_sql(sql_path, source_table=source_table)
     corporation_ids = bq_mod.fetch_corporation_ids(client, sql_text)
-    existing_mapping = bq_mod.fetch_existing_mapping(client, target_table)
-    logger.info("bigquery corporation_ids=%s existing_rows=%s", len(corporation_ids), len(existing_mapping))
+    logger.info("bigquery corporation_ids=%s", len(corporation_ids))
 
-    resolver = esi_mod.EsiResolver(logger=logger)
+    resolver = esi_mod.EsiResolver(
+        logger=logger,
+        user_agent=esi_user_agent,
+    )
     resolved_mapping, unresolved_ids = resolver.resolve(corporation_ids)
+
     logger.info(
         "esi resolved=%s unresolved=%s batches=%s transient_retries=%s split_retries=%s min_error_limit_remain=%s",
         len(resolved_mapping),
@@ -73,12 +79,18 @@ def main() -> int:
         resolver.stats["batches_attempted"],
         resolver.stats["transient_retries"],
         resolver.stats["split_retries"],
-        resolver.stats["max_error_limit_seen"],
+        resolver.stats["min_error_limit_remain"],
     )
+
+    existing_mapping: dict[int, str] = {}
+    if unresolved_ids:
+        existing_mapping = bq_mod.fetch_existing_mapping(client, target_table)
+        logger.info("bigquery existing_rows=%s", len(existing_mapping))
 
     fallback_hits = 0
     missing_ids: list[int] = []
     final_rows: list[dict[str, object]] = []
+
     for corporation_id in corporation_ids:
         if corporation_id in resolved_mapping:
             final_rows.append(
@@ -88,6 +100,7 @@ def main() -> int:
                 }
             )
             continue
+
         if corporation_id in existing_mapping:
             fallback_hits += 1
             final_rows.append(
@@ -97,6 +110,7 @@ def main() -> int:
                 }
             )
             continue
+
         missing_ids.append(corporation_id)
 
     logger.info("fallback_hits=%s missing_ids=%s", fallback_hits, len(missing_ids))
@@ -112,9 +126,7 @@ def main() -> int:
     should_write = False
     reason = "skip_same_hash"
 
-    if not canonical_rows:
-        reason = "skip_empty_result"
-    elif force_refresh:
+    if force_refresh:
         should_write = True
         reason = "force_refresh"
     elif missing_ids:
@@ -142,6 +154,7 @@ def main() -> int:
 
     table_written = False
     state_changed = False
+
     if should_write:
         row_count = bq_mod.replace_target_table(
             client=client,
@@ -152,7 +165,12 @@ def main() -> int:
             rows=canonical_rows,
         )
         logger.info("bigquery write complete rows=%s", row_count)
-        state_mod.write_state(state_path, hash_value=new_hash, last_modified=now_utc)
+
+        state_mod.write_state(
+            state_path,
+            hash_value=new_hash,
+            last_modified=now_utc,
+        )
         table_written = True
         state_changed = True
 
