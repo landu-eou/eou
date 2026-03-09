@@ -41,6 +41,13 @@ jobs:
       FORCE_REFRESH: ${{ inputs.force_refresh && 'true' || 'false' }}
       SOURCE_RUN_ID: ${{ inputs.source_run_id }}
       SOURCE_WORKFLOW: ${{ inputs.source_workflow }}
+
+      SHEETS_SPREADSHEET_ID: "1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8"
+      SHEETS_WORKFLOWS_TAB: "workflows"
+      SHEETS_WORKFLOWS_SUCCESS_ROW: "9"
+      # Ajusta esta columna si el diseño real del tab workflows usa otra.
+      SHEETS_WORKFLOWS_SUCCESS_COL: "B"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -90,3 +97,57 @@ jobs:
           git add "$STATE_FILE"
           git commit -m "chore(states): update corporation_kills state"
           git push
+
+      - name: Update workflows sheet success timestamp
+        if: success()
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timezone
+          import os
+
+          from google.auth import default
+          from googleapiclient.discovery import build
+
+          spreadsheet_id = os.environ["SHEETS_SPREADSHEET_ID"]
+          sheet_tab = os.environ["SHEETS_WORKFLOWS_TAB"]
+          row = os.environ["SHEETS_WORKFLOWS_SUCCESS_ROW"]
+          col = os.environ["SHEETS_WORKFLOWS_SUCCESS_COL"]
+          target_range = f"{sheet_tab}!{col}{row}"
+
+          now_utc = datetime.now(timezone.utc)
+          serial_epoch = datetime(1899, 12, 30, tzinfo=timezone.utc)
+          serial_value = (now_utc - serial_epoch).total_seconds() / 86400.0
+
+          credentials, _ = default(
+              scopes=["https://www.googleapis.com/auth/spreadsheets"]
+          )
+          service = build(
+              "sheets",
+              "v4",
+              credentials=credentials,
+              cache_discovery=False,
+          )
+
+          # Esta escritura solo ocurre al final cuando el workflow sigue en estado success.
+          body = {
+              "valueInputOption": "RAW",
+              "data": [
+                  {
+                      "range": target_range,
+                      "majorDimension": "ROWS",
+                      "values": [[serial_value]],
+                  }
+              ],
+              "includeValuesInResponse": False,
+          }
+
+          service.spreadsheets().values().batchUpdate(
+              spreadsheetId=spreadsheet_id,
+              body=body,
+          ).execute()
+
+          print(
+              f"Updated {target_range} with UTC serial {serial_value:.10f} "
+              f"({now_utc.isoformat().replace('+00:00', 'Z')})"
+          )
+          PY
