@@ -46,7 +46,7 @@ jobs:
       SHEETS_WORKFLOWS_TAB: "workflows"
       SHEETS_WORKFLOWS_SUCCESS_ROW: "9"
       # Ajusta esta columna si el diseño real del tab workflows usa otra.
-      SHEETS_WORKFLOWS_SUCCESS_COL: "B"
+      SHEETS_WORKFLOWS_SUCCESS_COL: "I"
 
     steps:
       - name: Checkout
