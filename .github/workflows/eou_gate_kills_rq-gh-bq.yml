@@ -6,19 +6,20 @@
 # │
 # ├── scripts/
 # │   └── rq/
-# │       ├── eou_gate_kills_poll.py         # RedisQ poller → filtra + flush a raw_kills.jsonl
-# │       ├── eou_gate_kills_enrich.py       # ESI enrich 1x1 → NDJSON batch + requeue RAW
-# │       ├── eou_gate_kills_load.py         # Dedupe + bq load (1 job)
-# │       ├── eou_gate_kills_sheets_write.py # Sheets status/next_run/last_modified
-# │       └── eou_gate_kills_ship_class.py   # Mapeo category/group → ship_class
+# │       ├── eou_gate_kills_poll.py                 # RedisQ poller → filtra + flush a raw_kills.jsonl
+# │       ├── eou_gate_kills_enrich.py               # ESI enrich 1x1 → NDJSON batch + requeue RAW
+# │       ├── eou_gate_kills_load.py                 # Dedupe + bq load (1 job)
+# │       ├── eou_gate_kills_sheets_write.py         # Sheets status/next_run/last_modified
+# │       ├── eou_gate_kills_ship_class.py           # Mapeo category/group → ship_class
+# │       └── eou_gate_kills_verify_dispatch.py      # Verifica que el workflow_dispatch creó un run
 # │
 # ├── data/
-#     ├── rq/
-#     │   └── raw_kills.jsonl                # Cola duradera (NDJSON, append + rewrite por enrich)
-#     │
-#     └── sde/
-#         ├── stargates.jsonl.gz             # Mapa stargateID → (stargate, group, solarSystem)
-#         └── types.jsonl.gz                 # typeID → (group, category, is_gategank)
+# │   ├── rq/
+# │   │   └── raw_kills.jsonl                        # Cola duradera (NDJSON, append + rewrite por enrich)
+# │   │
+# │   └── sde/
+# │       ├── stargates.jsonl.gz                     # Mapa stargateID → (stargate, group, solarSystem)
+# │       └── types.jsonl.gz                         # typeID → (group, category, is_gategank)
 #
 
 name: RQ Gate Kills (RQ → GH → BQ)
@@ -33,7 +34,7 @@ on:
         default: ""
 
 permissions:
-  actions: read
+  actions: write
   contents: write
   id-token: write
 
@@ -49,6 +50,10 @@ jobs:
 
     env:
       WORKFLOW_FILE: eou_gate_kills_rq-gh-bq.yml
+
+      # Workflow hijo a disparar tras un load exitoso con inserciones reales.
+      CHILD_WORKFLOW_FILE: eou_corporationKills_bq-gh-esi-bq.yml
+      CHILD_WORKFLOW_REF: ${{ github.event.repository.default_branch }}
 
       # Sheets: solo escritura (status/next_run/last_modified) para orquestación externa.
       SHEETS_ID: 1fnoPr1HoO6RuQxoFY_jUVc8yTfiGa0yZ-WaxgOwWJe8
@@ -345,6 +350,91 @@ jobs:
             --dataset "${BQ_DATASET}" \
             --table "${BQ_TABLE}" \
             --batch "/tmp/gate_kills_batch.ndjson"
+
+      # ==========================================================
+      # 9.5) Dispatch workflow hijo tras load exitoso con inserciones reales
+      # ==========================================================
+      - name: Dispatch corporation kills workflow
+        if: >
+          success() &&
+          steps.guard.outputs.proceed == 'true' &&
+          steps.payload.outputs.has_payload == 'true' &&
+          steps.load_bq.outcome == 'success' &&
+          steps.load_bq.outputs.inserted_rows != '0'
+        id: dispatch_corpkills
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CHILD_WORKFLOW_FILE: ${{ env.CHILD_WORKFLOW_FILE }}
+          CHILD_WORKFLOW_REF: ${{ env.CHILD_WORKFLOW_REF }}
+          SOURCE_RUN_ID: ${{ github.run_id }}
+          SOURCE_WORKFLOW: ${{ env.WORKFLOW_FILE }}
+        run: |
+          set -euo pipefail
+
+          api="https://api.github.com/repos/${REPO}/actions/workflows/${CHILD_WORKFLOW_FILE}/dispatches"
+
+          body="$(jq -n \
+            --arg ref "${CHILD_WORKFLOW_REF}" \
+            --arg source_run_id "${SOURCE_RUN_ID}" \
+            --arg source_workflow "${SOURCE_WORKFLOW}" \
+            '{
+              ref: $ref,
+              return_run_details: true,
+              inputs: {
+                source_run_id: $source_run_id,
+                source_workflow: $source_workflow
+              }
+            }'
+          )"
+
+          echo "[dispatch] POST ${api}"
+          response="$(curl -fsSL -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api}" \
+            -d "${body}")"
+
+          echo "${response}" > /tmp/corpkills_dispatch_response.json
+
+          run_id="$(jq -r '.workflow_run_id // empty' /tmp/corpkills_dispatch_response.json)"
+          run_url="$(jq -r '.run_url // empty' /tmp/corpkills_dispatch_response.json)"
+          html_url="$(jq -r '.html_url // empty' /tmp/corpkills_dispatch_response.json)"
+
+          if [ -z "${run_id}" ]; then
+            echo "Dispatch succeeded but workflow_run_id was not returned" >&2
+            cat /tmp/corpkills_dispatch_response.json >&2
+            exit 1
+          fi
+
+          echo "workflow_run_id=${run_id}" >> "$GITHUB_OUTPUT"
+          echo "run_url=${run_url}" >> "$GITHUB_OUTPUT"
+          echo "html_url=${html_url}" >> "$GITHUB_OUTPUT"
+
+          echo "[dispatch] workflow_run_id=${run_id}"
+          echo "[dispatch] html_url=${html_url}"
+
+      - name: Verify corporation kills dispatch
+        if: >
+          success() &&
+          steps.guard.outputs.proceed == 'true' &&
+          steps.payload.outputs.has_payload == 'true' &&
+          steps.load_bq.outcome == 'success' &&
+          steps.load_bq.outputs.inserted_rows != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          python scripts/rq/eou_gate_kills_verify_dispatch.py \
+            --repo "${REPO}" \
+            --workflow-file "${CHILD_WORKFLOW_FILE}" \
+            --run-id "${{ steps.dispatch_corpkills.outputs.workflow_run_id }}" \
+            --expect-event "workflow_dispatch" \
+            --max-wait-seconds 60 \
+            --poll-seconds 3
 
       # ==========================================================
       # 10) FINAL — status + next_run + last_modified
