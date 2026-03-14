@@ -383,3 +383,5 @@
 {"killID":134012513,"zkb":{"hash":"31b453b9d80b4cbe2680543424a469d6f2b5b561","locationID":50006871,"labels":["tz:au","cat:6","solo","pvp","loc:lowsec"]},"rearm":0}
 {"killID":134012518,"zkb":{"hash":"39a0d9685a123d57fd3d8ad258ae000fb42eb0cd","locationID":50006871,"labels":["tz:au","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
 {"killID":134012593,"zkb":{"hash":"7775228dc6cc9e91877bedc73b6e914a552f14c0","locationID":50002205,"labels":["tz:au","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134012592,"zkb":{"hash":"f154eb74d0b8b809e888ad1267a5a49d90d63710","locationID":50010423,"labels":["tz:au","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":134012634,"zkb":{"hash":"726ee9cd23a45f636c8b391b6d3e57f5765903fc","locationID":50002205,"labels":["tz:au","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
