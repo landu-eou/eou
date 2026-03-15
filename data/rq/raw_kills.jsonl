@@ -1596,3 +1596,12 @@
 {"killID":134052563,"zkb":{"hash":"cc83c6c3e15f9b45891e89fe763789e5d06eeb44","locationID":50005621,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
 {"killID":134052650,"zkb":{"hash":"17fe0fba5bf3670dee7917e9e65dc72f8510e982","locationID":50016510,"labels":["tz:eu","cat:6","#:5+","pvp"]},"rearm":0}
 {"killID":134052597,"zkb":{"hash":"89fcc56324c8bc6453222dff634c7f44b489367f","locationID":50003065,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134052603,"zkb":{"hash":"d0b460353c6d4c03ed94b448e128080e255b3b82","locationID":50003065,"labels":["tz:eu","cat:6","#:10+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134052663,"zkb":{"hash":"383954933a41cc9041db99327f2faa6ef301cb0b","locationID":50013120,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134052739,"zkb":{"hash":"79216ef18a8d00022fe55aafd74f02f45940ac5c","locationID":50014047,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134052655,"zkb":{"hash":"35a909e66fdc4cfebcccd908ea4f935d61193eca","locationID":50008069,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134052715,"zkb":{"hash":"2062a691d7470403f65d6d554ffaef64051d2017","locationID":50006786,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134052753,"zkb":{"hash":"5535e1e3c67465cdca2d2b104e34a08f0a37dbce","locationID":50008691,"labels":["tz:eu","cat:6","solo","pvp","loc:lowsec","fw:caldari","fw:calgal"]},"rearm":0}
+{"killID":134052419,"zkb":{"hash":"17bda8e1323327b881dbbc57d9f8800297c8a010","locationID":50001715,"labels":["tz:eu","cat:6","#:10+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":134052698,"zkb":{"hash":"35abd6e8966ff61112988dd270207674ebaf15bc","locationID":50001715,"labels":["tz:eu","cat:6","#:10+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":134052751,"zkb":{"hash":"330d651f1b07da261427ea6fa8ef30c2d07c7b7f","locationID":50014000,"labels":["tz:eu","cat:6","#:2+","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
