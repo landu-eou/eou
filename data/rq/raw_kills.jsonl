@@ -217,3 +217,13 @@
 {"killID":134042253,"zkb":{"hash":"f19cca1e9cc9c015368160179a3ccf5a8dc087db","locationID":50013914,"labels":["tz:au","cat:6","#:2+","pvp","loc:highsec"]},"rearm":0}
 {"killID":134042347,"zkb":{"hash":"c38951251037ad7806b9e3dfe0ae4179d6ea6029","locationID":50010304,"labels":["tz:au","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
 {"killID":134042248,"zkb":{"hash":"8329e5f22c752a6e1f266839a69b232e5cac981c","locationID":50016271,"labels":["tz:au","cat:6","#:2+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":134042299,"zkb":{"hash":"09340be65f829b37e3c861992449f4a7b75ff673","locationID":50001453,"labels":["tz:au","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134042304,"zkb":{"hash":"d559e317f178ee7ececd50e62137bca21e50ca19","locationID":50001453,"labels":["tz:au","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134042305,"zkb":{"hash":"1f00ecb597e85b7a997acd043760e6dae2c318fd","locationID":50001453,"labels":["tz:au","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134042307,"zkb":{"hash":"a11968071201d4f0374b8dbf9862ea10692bd1fa","locationID":50001453,"labels":["tz:au","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134042310,"zkb":{"hash":"22d59fcf2882c20d3e985b9e0fe7d36ea8bd6362","locationID":50001453,"labels":["tz:au","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134042314,"zkb":{"hash":"9861b6a82d495883e24a6c1d07f6f78427bebc2c","locationID":50007833,"labels":["tz:au","cat:6","#:2+","pvp","loc:highsec"]},"rearm":0}
+{"killID":134042337,"zkb":{"hash":"9ac90c0da41bc7937121ea2fe22722acb690ddc4","locationID":50007833,"labels":["tz:au","cat:6","#:2+","pvp","loc:highsec","isk:1b+"]},"rearm":0}
+{"killID":134042399,"zkb":{"hash":"d29a1bdbd49c88e2831a66154ea7523777e4cdd9","locationID":50007833,"labels":["tz:au","cat:6","#:10+","pvp","loc:highsec","isk:1b+"]},"rearm":0}
+{"killID":134042192,"zkb":{"hash":"27f4a01ddef99996744e002730c99c4257677ef1","locationID":50005991,"labels":["tz:au","cat:6","solo","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134042207,"zkb":{"hash":"fd2533714b129c0c80b12ab51f52eacd047e2174","locationID":50005991,"labels":["tz:au","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
