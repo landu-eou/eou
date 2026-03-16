@@ -109,3 +109,12 @@
 {"killID":134060694,"zkb":{"hash":"f244d26361b0ead7c5cb7639bb73a5d01d20d3f7","locationID":50010630,"labels":["tz:use","cat:6","#:10+","pvp","loc:nullsec"]},"rearm":0}
 {"killID":134060708,"zkb":{"hash":"43331370cb7df49bdc1e4762ece3a24cb4874177","locationID":50010630,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
 {"killID":134060747,"zkb":{"hash":"d3bded13aa4f4c4398325d1e86b1bf370f5d35a3","locationID":50010630,"labels":["tz:use","cat:6","#:10+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134060724,"zkb":{"hash":"75bd9af5ee5c485592ebf4602ff885ba77142610","locationID":50016489,"labels":["tz:use","cat:6","#:2+","pvp","loc:lowsec","fw:minmatar","fw:amamin"]},"rearm":0}
+{"killID":134060746,"zkb":{"hash":"4bbb65f727405aa6f92442b7596f43d7db22a9c3","locationID":50014000,"labels":["tz:use","cat:6","#:2+","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":134060755,"zkb":{"hash":"801fabd57bce2acdf737e46be22eb8e0e09722ed","locationID":50014000,"labels":["tz:use","cat:6","#:2+","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":134060727,"zkb":{"hash":"281e1fe9232a67cb269373b08190f18b53c5d7f4","locationID":50000378,"labels":["tz:use","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134060753,"zkb":{"hash":"fa851d1d69424327ea342e8973ed6051702f412d","locationID":50000378,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134060731,"zkb":{"hash":"b484d8b1112bcad3779e66cb85ac52695d733218","locationID":50000378,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134060783,"zkb":{"hash":"dd1e5db538f1180b2902c9d781abe6fae6439016","locationID":50012092,"labels":["tz:use","cat:6","solo","pvp","loc:lowsec","fw:amarr","fw:amamin"]},"rearm":0}
+{"killID":134060618,"zkb":{"hash":"8b5c2fea40bd9edbd31f55b6fd47dcf78b3d49cb","locationID":50010630,"labels":["tz:use","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134060775,"zkb":{"hash":"14c28aad04c390ca43667b020fc451f13512cbf5","locationID":50002573,"labels":["tz:use","cat:6","solo","pvp","loc:lowsec"]},"rearm":0}
