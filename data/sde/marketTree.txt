@@ -98,6 +98,8 @@ Market
 │   │       ├── 📁 Extra Large
 │   │       │   ├── 📦 Baryon Exotic Plasma XL
 │   │       │   ├── 📦 Meson Exotic Plasma XL
+│   │       │   ├── 📦 Mystic XL
+│   │       │   ├── 📦 Occult XL
 │   │       │   └── 📦 Tetryon Exotic Plasma XL
 │   │       ├── 📁 Large
 │   │       │   ├── 📦 Baryon Exotic Plasma L
@@ -1585,6 +1587,7 @@ Market
 │   │   │   ├── 📦 Men's Rubedo Richesse Jacket
 │   │   │   ├── 📦 Men's SARO 'Black Troop' Combat Suit
 │   │   │   ├── 📦 Men's Scope Network Special Correspondent Suit
+│   │   │   ├── 📦 Men's Select Freedom Combat Suit
 │   │   │   ├── 📦 Men's Sisters of EVE Advanced Combat Suit
 │   │   │   ├── 📦 Men's SOE Expeditionary Suit
 │   │   │   ├── 📦 Men's State Commander's Dress Jacket
@@ -1987,6 +1990,7 @@ Market
 │       │   ├── 📦 Women's Rubedo Richesse Jacket
 │       │   ├── 📦 Women's SARO 'Black Troop' Combat Suit
 │       │   ├── 📦 Women's Scope Network Special Correspondent Suit
+│       │   ├── 📦 Women's Select Freedom Combat Suit
 │       │   ├── 📦 Women's Sisters of EVE Advanced Combat Suit
 │       │   ├── 📦 Women's SOE Expeditionary Suit
 │       │   ├── 📦 Women's State Commander's Dress Jacket
@@ -4243,7 +4247,8 @@ Market
 │       │   └── 📦 Keepstar Blueprint
 │       ├── 📁 Deployable Structures
 │       │   ├── 📁 Analysis Beacons
-│       │   │   └── 📦 CONCORD Rogue Analysis Beacon Blueprint
+│       │   │   ├── 📦 CONCORD Rogue Analysis Beacon Blueprint
+│       │   │   └── 📦 CONCORD-Carrier Rogue Analysis Beacon Blueprint
 │       │   ├── 📁 Cargo Containers
 │       │   │   ├── 📦 Enormous Freight Container Blueprint
 │       │   │   ├── 📦 Giant Freight Container Blueprint
@@ -12190,7 +12195,8 @@ Market
 │       ├── 📁 Precursor Turrets
 │       │   └── 📁 Entropic Disintegrators
 │       │       ├── 📁 Extra Large
-│       │       │   └── 📦 Ultratidal Entropic Disintegrator I
+│       │       │   ├── 📦 Ultratidal Entropic Disintegrator I
+│       │       │   └── 📦 Ultratidal Entropic Disintegrator II
 │       │       ├── 📁 Large
 │       │       │   ├── 📦 Supratidal Compact Entropic Disintegrator
 │       │       │   ├── 📦 Supratidal Entropic Disintegrator I
@@ -12765,6 +12771,7 @@ Market
 │   │   │   │   ├── 📦 Myrmidon Navy Issue Arkombine Arisen SKIN
 │   │   │   │   ├── 📦 Myrmidon Navy Issue Inner Zone Vanguard SKIN
 │   │   │   │   ├── 📦 Myrmidon Navy Issue Media Miasma SKIN
+│   │   │   │   ├── 📦 Myrmidon Navy Issue Pride of the Federation SKIN
 │   │   │   │   ├── 📦 Myrmidon Navy Issue Versus Redforce SKIN
 │   │   │   │   ├── 📦 Prophecy Navy Issue Arkombine Arisen SKIN
 │   │   │   │   ├── 📦 Prophecy Navy Issue Crown and Swords SKIN
@@ -13356,6 +13363,7 @@ Market
 │   │   │   │   ├── 📦 Megathron Navy Issue Intaki Syndicate SKIN
 │   │   │   │   ├── 📦 Megathron Navy Issue Kopis Edge SKIN
 │   │   │   │   ├── 📦 Megathron Navy Issue Luminaire Rising SKIN
+│   │   │   │   ├── 📦 Megathron Navy Issue Pride of the Federation SKIN
 │   │   │   │   ├── 📦 Megathron Navy Issue Sapphire Sungrazer SKIN
 │   │   │   │   ├── 📦 Megathron Navy Issue Spirit SKIN
 │   │   │   │   ├── 📦 Raven Navy Issue Biosecurity Responders SKIN
@@ -13992,6 +14000,7 @@ Market
 │   │   │       │   ├── 📦 Thanatos Kopis Edge SKIN
 │   │   │       │   ├── 📦 Thanatos Luminaire Rising SKIN
 │   │   │       │   ├── 📦 Thanatos Malagrin Marshlight SKIN
+│   │   │       │   ├── 📦 Thanatos Pride of the Federation SKIN
 │   │   │       │   ├── 📦 Thanatos Quafe SKIN
 │   │   │       │   ├── 📦 Thanatos Roden SKIN
 │   │   │       │   ├── 📦 Thanatos Ruby Sungrazer SKIN
@@ -14786,6 +14795,7 @@ Market
 │   │   │   │   │   ├── 📦 Oneiros Inner Zone Vanguard SKIN
 │   │   │   │   │   ├── 📦 Oneiros Intaki Syndicate SKIN
 │   │   │   │   │   ├── 📦 Oneiros Kopis Edge SKIN
+│   │   │   │   │   ├── 📦 Oneiros Pride of the Federation SKIN
 │   │   │   │   │   ├── 📦 Oneiros Serpentis SKIN
 │   │   │   │   │   ├── 📦 Oneiros Spirit SKIN
 │   │   │   │   │   └── 📦 Oneiros Valimor Legacy SKIN
@@ -14883,6 +14893,7 @@ Market
 │   │   │   │   │   ├── 📦 Lachesis Inner Zone Vanguard SKIN
 │   │   │   │   │   ├── 📦 Lachesis Intaki Syndicate SKIN
 │   │   │   │   │   ├── 📦 Lachesis Kopis Edge SKIN
+│   │   │   │   │   ├── 📦 Lachesis Pride of the Federation SKIN
 │   │   │   │   │   ├── 📦 Lachesis Serpentis SKIN
 │   │   │   │   │   ├── 📦 Lachesis Spirit SKIN
 │   │   │   │   │   └── 📦 Lachesis Valimor Legacy SKIN
@@ -15658,6 +15669,7 @@ Market
 │   │   │   │   │   ├── 📦 Eris Intaki Syndicate SKIN
 │   │   │   │   │   ├── 📦 Eris Kopis Edge SKIN
 │   │   │   │   │   ├── 📦 Eris Luminaire Rising SKIN
+│   │   │   │   │   ├── 📦 Eris Pride of the Federation SKIN
 │   │   │   │   │   ├── 📦 Eris Serpentis SKIN
 │   │   │   │   │   ├── 📦 Eris Spirit SKIN
 │   │   │   │   │   └── 📦 Eris Valimor Legacy SKIN
@@ -16082,6 +16094,7 @@ Market
 │   │   │   │   │   ├── 📦 Enyo Inner Zone Vanguard SKIN
 │   │   │   │   │   ├── 📦 Enyo Intaki Syndicate SKIN
 │   │   │   │   │   ├── 📦 Enyo Kopis Edge SKIN
+│   │   │   │   │   ├── 📦 Enyo Pride of the Federation SKIN
 │   │   │   │   │   ├── 📦 Enyo Serpentis SKIN
 │   │   │   │   │   ├── 📦 Enyo Spirit SKIN
 │   │   │   │   │   ├── 📦 Enyo Valimor Legacy SKIN
@@ -17016,6 +17029,7 @@ Market
 │   │       │   ├── 📦 Tristan Kopis Edge SKIN
 │   │       │   ├── 📦 Tristan Luminaire Rising SKIN
 │   │       │   ├── 📦 Tristan Luminaire Zenith SKIN
+│   │       │   ├── 📦 Tristan Pride of the Federation SKIN
 │   │       │   ├── 📦 Tristan Quafe SKIN
 │   │       │   ├── 📦 Tristan Ruby Sungrazer SKIN
 │   │       │   ├── 📦 Tristan Sapphire Sungrazer SKIN
@@ -17231,6 +17245,7 @@ Market
 │   │   │       │   ├── 📦 Viator Intaki Syndicate SKIN
 │   │   │       │   ├── 📦 Viator Kopis Edge SKIN
 │   │   │       │   ├── 📦 Viator Lodestrike SKIN
+│   │   │       │   ├── 📦 Viator Pride of the Federation SKIN
 │   │   │       │   ├── 📦 Viator Ruby Sungrazer SKIN
 │   │   │       │   ├── 📦 Viator Serpentis SKIN
 │   │   │       │   ├── 📦 Viator Spirit SKIN
@@ -17375,6 +17390,7 @@ Market
 │   │       │   ├── 📦 Epithal Kopis Edge SKIN
 │   │       │   ├── 📦 Epithal Mabebu Exchange SKIN
 │   │       │   ├── 📦 Epithal Planetary Extraction
+│   │       │   ├── 📦 Epithal Pride of the Federation SKIN
 │   │       │   ├── 📦 Epithal Ruby Sungrazer SKIN
 │   │       │   ├── 📦 Epithal Serpentis SKIN
 │   │       │   ├── 📦 Epithal Spirit SKIN
@@ -18367,7 +18383,9 @@ Market
 │   ├── 📁 Drones
 │   │   ├── 📦 Advanced Drone Avionics
 │   │   ├── 📦 Amarr Drone Specialization
+│   │   ├── 📦 Amarr Fighter Specialization
 │   │   ├── 📦 Caldari Drone Specialization
+│   │   ├── 📦 Caldari Fighter Specialization
 │   │   ├── 📦 Drone Avionics
 │   │   ├── 📦 Drone Durability
 │   │   ├── 📦 Drone Interfacing
@@ -18377,6 +18395,7 @@ Market
 │   │   ├── 📦 Fighter Hangar Management
 │   │   ├── 📦 Fighters
 │   │   ├── 📦 Gallente Drone Specialization
+│   │   ├── 📦 Gallente Fighter Specialization
 │   │   ├── 📦 Heavy Drone Operation
 │   │   ├── 📦 Heavy Fighters
 │   │   ├── 📦 Ice Harvesting Drone Operation
@@ -18387,6 +18406,7 @@ Market
 │   │   ├── 📦 Mining Drone Operation
 │   │   ├── 📦 Mining Drone Specialization
 │   │   ├── 📦 Minmatar Drone Specialization
+│   │   ├── 📦 Minmatar Fighter Specialization
 │   │   ├── 📦 Mutated Drone Specialization
 │   │   ├── 📦 Repair Drone Operation
 │   │   ├── 📦 Salvage Drone Operation
@@ -18451,6 +18471,7 @@ Market
 │   │   ├── 📦 Capital Autocannon Specialization
 │   │   ├── 📦 Capital Beam Laser Specialization
 │   │   ├── 📦 Capital Blaster Specialization
+│   │   ├── 📦 Capital Disintegrator Specialization
 │   │   ├── 📦 Capital Energy Turret
 │   │   ├── 📦 Capital Hybrid Turret
 │   │   ├── 📦 Capital Precursor Weapon
@@ -19837,7 +19858,8 @@ Market
 │   │       └── 📦 Keepstar
 │   ├── 📁 Deployable Structures
 │   │   ├── 📁 Analysis Beacons
-│   │   │   └── 📦 CONCORD Rogue Analysis Beacon
+│   │   │   ├── 📦 CONCORD Rogue Analysis Beacon
+│   │   │   └── 📦 CONCORD-Carrier Rogue Analysis Beacon
 │   │   ├── 📁 Cargo Containers
 │   │   │   ├── 📁 Audit Log Containers
 │   │   │   │   ├── 📦 Large Audit Log Secure Container
@@ -20874,6 +20896,7 @@ Market
     │   ├── 📦 True Creations Strong Box
     │   └── 📦 Vherokior Tribe Strong Box
     ├── 📁 Triglavian Data
+    │   ├── 📦 Hyper-Vigilance Core
     │   ├── 📦 Stability Telemetry
     │   ├── 📦 Stellar Surveillance Data
     │   ├── 📦 Triglavian Encrypted Conduit Data
