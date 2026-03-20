@@ -17,3 +17,12 @@
 {"killID":134154593,"zkb":{"hash":"e9ccfedbc7c7b8785c7d15023e3f9e507e0a40d8","locationID":50001952,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
 {"killID":134154542,"zkb":{"hash":"1c6e09cc646c1bc639842d0affebdcd1383b34f6","locationID":50009556,"labels":["tz:eu","cat:6","#:10+","pvp","loc:lowsec"]},"rearm":0}
 {"killID":134154559,"zkb":{"hash":"6e62795ad166de9f2d973be28b97ff2f4159ac4c","locationID":50014000,"labels":["tz:eu","cat:6","#:2+","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":134154608,"zkb":{"hash":"1bc014df3b36b76ec6237252c5a7c6f00e8e1254","locationID":50014000,"labels":["tz:eu","cat:6","#:2+","pvp","loc:highsec","fw:gallente","fw:calgal"]},"rearm":0}
+{"killID":134154470,"zkb":{"hash":"11e370fc21de74a020c48bd3941c0d0b58d20ccc","locationID":50013812,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134154602,"zkb":{"hash":"67dd1dcc0ff5060fc73e2314fd02be78ab4a68d3","locationID":50007739,"labels":["tz:eu","cat:6","#:10+","pvp","loc:lowsec"]},"rearm":0}
+{"killID":134152109,"zkb":{"hash":"8b09a1d34192b4e505f33e3d3ca1b040dfda3509","locationID":50000297,"labels":["tz:eu","cat:6","#:1","pvp","loc:lowsec"]},"rearm":0}
+{"killID":134134534,"zkb":{"hash":"cfd9876a67d2b33a176b3a09c8c0404ed48763a8","locationID":50008625,"labels":["tz:eu","cat:6","#:1","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134154582,"zkb":{"hash":"fcf6fce5c73d1b9a9c09efd6523e46f4b29ae0ea","locationID":50001952,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134154526,"zkb":{"hash":"c46b2d409570443b43be52ce7f5d5d90a111a096","locationID":50000890,"labels":["tz:eu","cat:6","#:5+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134154584,"zkb":{"hash":"4c006eeb57820d3b69ed00d4bfcf90c7d7498a65","locationID":50001952,"labels":["tz:eu","cat:6","#:2+","pvp","loc:nullsec"]},"rearm":0}
+{"killID":134154595,"zkb":{"hash":"18b17e09791083e03f726e032e3c9eae54d80787","locationID":50010967,"labels":["tz:eu","cat:6","#:1","pvp","loc:lowsec"]},"rearm":0}
