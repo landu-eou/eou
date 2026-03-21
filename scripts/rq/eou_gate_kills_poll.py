@@ -20,7 +20,7 @@ BODY_HEAD_MAX = 300
 
 
 def _ua(repo: str) -> str:
-    return f"EOU-RQ-Gate-Kills/1.2 (+{repo}; GitHub Actions)"
+    return f"EOU-RQ-Gate-Kills/1.3 (+{repo}; GitHub Actions)"
 
 
 def _truncate_text(text: str, limit: int = BODY_HEAD_MAX) -> str:
@@ -213,6 +213,23 @@ def _log_anomaly(
     )
 
 
+def is_redisq_shutdown_denied(status: int, data: Optional[dict], body_head: str) -> bool:
+    if status != 403:
+        return False
+
+    # Caso más fiable: JSON estructurado como el que ya te devolvió RedisQ.
+    if isinstance(data, dict):
+        access = str(data.get("access", "")).strip().lower()
+        message = str(data.get("message", "")).strip().lower()
+        if access == "denied!":
+            if "redisq is shutting down" in message or "use r2z2 instead" in message:
+                return True
+
+    # Fallback defensivo por si cambia levemente el shape del JSON.
+    bh = (body_head or "").lower()
+    return ("redisq is shutting down" in bh) or ("use r2z2 instead" in bh)
+
+
 def main() -> int:
     args = parse_args()
 
@@ -246,7 +263,7 @@ def main() -> int:
     http_429_streak = 0
     http_429_streak_max = 0
 
-    # Instrumentación nueva
+    # Instrumentación
     http_4xx_other = 0
     http_200_invalid_json = 0
     http_200_non_dict_json = 0
@@ -254,6 +271,8 @@ def main() -> int:
     http_network_error = 0
     http_empty_body = 0
     http_redirect_like = 0
+    http_redisq_shutdown_403 = 0
+
     debug_logs_emitted = 0
     last_error_status = 0
     last_error_parse_state = ""
@@ -499,6 +518,31 @@ def main() -> int:
                 time.sleep(sleep_s)
 
             elif 400 <= status < 500:
+                if is_redisq_shutdown_denied(status, data, body_head):
+                    http_redisq_shutdown_403 += 1
+                    http_429_streak = 0
+                    last_error_status = status
+                    last_error_parse_state = parse_state
+                    last_error_category = "redisq_shutdown_denied"
+                    last_error_body_head = body_head
+                    last_error_content_type = content_type
+
+                    if debug_logs_emitted < args.debug_limit:
+                        _log_anomaly(
+                            idx=debug_logs_emitted + 1,
+                            status=status,
+                            parse_state=parse_state,
+                            content_type=content_type,
+                            body_head=body_head,
+                            headers=headers,
+                            category="redisq_shutdown_denied",
+                        )
+                        debug_logs_emitted += 1
+
+                    print("[poll][shutdown] RedisQ denied access due to shutdown migration notice; stopping poll early.")
+                    poll_reason = "redisq_shutdown"
+                    break
+
                 http_4xx_other += 1
                 http_429_streak = 0
                 mark_anomaly("4xx_other", status, parse_state, body_head, content_type, headers)
@@ -538,6 +582,7 @@ def main() -> int:
         f"http_network_error={http_network_error} "
         f"http_empty_body={http_empty_body} "
         f"http_redirect_like={http_redirect_like} "
+        f"http_redisq_shutdown_403={http_redisq_shutdown_403} "
         f"last_error_category={last_error_category or '-'} "
         f"last_error_status={last_error_status} "
         f"last_error_parse_state={last_error_parse_state or '-'} "
@@ -566,6 +611,7 @@ def main() -> int:
             "http_network_error": http_network_error,
             "http_empty_body": http_empty_body,
             "http_redirect_like": http_redirect_like,
+            "http_redisq_shutdown_403": http_redisq_shutdown_403,
             "last_error_category": last_error_category,
             "last_error_status": last_error_status,
             "last_error_parse_state": last_error_parse_state,
@@ -574,6 +620,8 @@ def main() -> int:
         }
     )
 
+    # Solo se considera fallo duro el "error" genérico.
+    # redisq_shutdown corta limpio para evitar malgastar minutos cuando el servicio ya está denegando acceso.
     return 1 if poll_reason == "error" else 0
 
 
