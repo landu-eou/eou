@@ -451,6 +451,7 @@ jobs:
           if [ "$reason" = "timeout" ]; then cooldown=300; fi
           if [ "$reason" = "null_streak" ]; then cooldown=1800; fi
           if [ "$reason" = "redisq_busy" ]; then cooldown=1800; fi
+          if [ "$reason" = "redisq_shutdown" ]; then cooldown=1800; fi
 
           max_iso=""
           iso1="${{ steps.enrich_1.outputs.max_killmail_time_iso }}"
