@@ -6720,10 +6720,12 @@ Market
 │   │   │   │   │   ├── 📦 Batch Compressed Scordite III-Grade
 │   │   │   │   │   ├── 📦 Batch Compressed Scordite IV-Grade
 │   │   │   │   │   ├── 📦 Compressed Scordite
+│   │   │   │   │   ├── 📦 Compressed Scordite 0-Grade
 │   │   │   │   │   ├── 📦 Compressed Scordite II-Grade
 │   │   │   │   │   ├── 📦 Compressed Scordite III-Grade
 │   │   │   │   │   ├── 📦 Compressed Scordite IV-Grade
 │   │   │   │   │   ├── 📦 Scordite
+│   │   │   │   │   ├── 📦 Scordite 0-Grade
 │   │   │   │   │   ├── 📦 Scordite II-Grade
 │   │   │   │   │   ├── 📦 Scordite III-Grade
 │   │   │   │   │   └── 📦 Scordite IV-Grade
@@ -6764,12 +6766,14 @@ Market
 │   │   │   │   │   ├── 📦 Batch Compressed Veldspar III-Grade
 │   │   │   │   │   ├── 📦 Batch Compressed Veldspar IV-Grade
 │   │   │   │   │   ├── 📦 Compressed Veldspar
+│   │   │   │   │   ├── 📦 Compressed Veldspar 0-Grade
 │   │   │   │   │   ├── 📦 Compressed Veldspar II-Grade
 │   │   │   │   │   ├── 📦 Compressed Veldspar III-Grade
 │   │   │   │   │   ├── 📦 Compressed Veldspar IV-Grade
 │   │   │   │   │   ├── 📦 Hiemal Tricarboxyl Vapor
 │   │   │   │   │   ├── 📦 Nephrite
 │   │   │   │   │   ├── 📦 Veldspar
+│   │   │   │   │   ├── 📦 Veldspar 0-Grade
 │   │   │   │   │   ├── 📦 Veldspar II-Grade
 │   │   │   │   │   ├── 📦 Veldspar III-Grade
 │   │   │   │   │   └── 📦 Veldspar IV-Grade
@@ -7808,6 +7812,7 @@ Market
 │   │       ├── 📦 Quantic Fade - Unlimited
 │   │       ├── 📦 Quantum Curls - Limited
 │   │       ├── 📦 Quantum Curls - Unlimited
+│   │       ├── 📦 Rage of the 7 - Limited
 │   │       ├── 📦 Rank and File - Limited
 │   │       ├── 📦 Rank and File - Unlimited
 │   │       ├── 📦 Rich Vein - Limited
@@ -12860,6 +12865,7 @@ Market
 │   │   │   └── 📁 Pirate Faction
 │   │   │       ├── 📦 Alligator Arkombine Arisen SKIN
 │   │   │       ├── 📦 Alligator Capsuleer Day XXI SKIN
+│   │   │       ├── 📦 Alligator Cryptic Ecdysis SKIN
 │   │   │       ├── 📦 Alligator Empyrean Outlaws SKIN
 │   │   │       ├── 📦 Alligator Luminae Polaris SKIN
 │   │   │       ├── 📦 Cenotaph Empyrean Outlaws SKIN
@@ -13563,6 +13569,7 @@ Market
 │   │   │       ├── 📦 Rattlesnake Ace of Podhunters SKIN
 │   │   │       ├── 📦 Rattlesnake Aetheric Raiders SKIN
 │   │   │       ├── 📦 Rattlesnake Aurora Universalis SKIN
+│   │   │       ├── 📦 Rattlesnake Cryptic Ecdysis SKIN
 │   │   │       ├── 📦 Rattlesnake Empyrean Outlaws SKIN
 │   │   │       ├── 📦 Rattlesnake GalNet StreamCast Unit SKIN
 │   │   │       ├── 📦 Rattlesnake Glacial Drift SKIN
@@ -13949,6 +13956,7 @@ Market
 │   │   │   │   └── 📁 Pirate Faction
 │   │   │   │       ├── 📦 Dagon Glacial Drift SKIN
 │   │   │   │       ├── 📦 Dagon Sanguinary Savant SKIN
+│   │   │   │       ├── 📦 Loggerhead Cryptic Ecdysis SKIN
 │   │   │   │       ├── 📦 Loggerhead Glacial Drift SKIN
 │   │   │   │       ├── 📦 Revenant Glacial Drift SKIN
 │   │   │   │       ├── 📦 Revenant Luminae Polaris SKIN
@@ -14170,6 +14178,7 @@ Market
 │   │   │   │   │   └── 📦 Revelation Navy Issue Unbridled Glory SKIN
 │   │   │   │   └── 📁 Pirate Faction
 │   │   │   │       ├── 📦 Caiman Arkombine Arisen SKIN
+│   │   │   │       ├── 📦 Caiman Cryptic Ecdysis SKIN
 │   │   │   │       ├── 📦 Caiman Glacial Drift SKIN
 │   │   │   │       ├── 📦 Chemosh Glacial Drift SKIN
 │   │   │   │       ├── 📦 Chemosh Sanguinary Savant SKIN
@@ -14465,6 +14474,7 @@ Market
 │   │       ├── 📁 Faction Titans
 │   │       │   └── 📁 Pirate Faction
 │   │       │       ├── 📦 Azariel Empyrean Outlaws SKIN
+│   │       │       ├── 📦 Komodo Cryptic Ecdysis SKIN
 │   │       │       ├── 📦 Komodo Glacial Drift SKIN
 │   │       │       ├── 📦 Molok Glacial Drift SKIN
 │   │       │       ├── 📦 Molok Sanguinary Savant SKIN
@@ -14603,6 +14613,7 @@ Market
 │   │   ├── 📁 Advanced Cruisers
 │   │   │   ├── 📁 Flag Cruisers
 │   │   │   │   └── 📁 CONCORD
+│   │   │   │       ├── 📦 Monitor Discovery Bound SKIN
 │   │   │   │       ├── 📦 Monitor Empyrean Outlaws SKIN
 │   │   │   │       ├── 📦 Monitor Firewatch SKIN
 │   │   │   │       └── 📦 Monitor SARO 'Black Troop' SKIN
@@ -15217,6 +15228,7 @@ Market
 │   │   │       ├── 📦 Gila Aetheric Raiders SKIN
 │   │   │       ├── 📦 Gila Arkombine Arisen SKIN
 │   │   │       ├── 📦 Gila Aurora Universalis SKIN
+│   │   │       ├── 📦 Gila Cryptic Ecdysis SKIN
 │   │   │       ├── 📦 Gila Deathglow Hunters SKIN
 │   │   │       ├── 📦 Gila Dragon Phoenix SKIN
 │   │   │       ├── 📦 Gila Emperor Bear SKIN
@@ -15869,6 +15881,7 @@ Market
 │   │   │   └── 📁 Pirate Faction
 │   │   │       ├── 📦 Mamba Arkombine Arisen SKIN
 │   │   │       ├── 📦 Mamba Capsuleer Day XXI SKIN
+│   │   │       ├── 📦 Mamba Cryptic Ecdysis SKIN
 │   │   │       ├── 📦 Mamba Empyrean Outlaws SKIN
 │   │   │       ├── 📦 Mamba Luminae Polaris SKIN
 │   │   │       ├── 📦 Mekubal Arkombine Arisen SKIN
@@ -16789,6 +16802,7 @@ Market
 │   │   │       ├── 📦 Worm Ace of Podhunters SKIN
 │   │   │       ├── 📦 Worm Aetheric Raiders SKIN
 │   │   │       ├── 📦 Worm Aurora Universalis SKIN
+│   │   │       ├── 📦 Worm Cryptic Ecdysis SKIN
 │   │   │       ├── 📦 Worm Empyrean Outlaws SKIN
 │   │   │       ├── 📦 Worm Glacial Drift SKIN
 │   │   │       ├── 📦 Worm Helmatt's Harriers SKIN
@@ -19153,6 +19167,7 @@ Market
 │   │   │   ├── 📦 Flow Cytometry Rewards Crate
 │   │   │   ├── 📦 Galaxy Pack - Crystal
 │   │   │   ├── 📦 Galaxy Pack - Spectral
+│   │   │   ├── 📦 Historic Carrier SKINs Crate
 │   │   │   ├── 📦 Historic Gallente SKINs Crate
 │   │   │   ├── 📦 Historic SOE SKINs Crate
 │   │   │   ├── 📦 IGC Garment Keeper
