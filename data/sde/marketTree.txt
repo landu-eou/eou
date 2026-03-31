@@ -85,6 +85,9 @@ Market
 │   │           └── 📦 SlamBolt Condenser Pack S
 │   ├── 📁 Exotic Plasma Charges
 │   │   ├── 📁 Advanced Exotic Plasma Charges
+│   │   │   ├── 📁 Extra Large
+│   │   │   │   ├── 📦 Mystic XL
+│   │   │   │   └── 📦 Occult XL
 │   │   │   ├── 📁 Large
 │   │   │   │   ├── 📦 Mystic L
 │   │   │   │   └── 📦 Occult L
@@ -98,8 +101,6 @@ Market
 │   │       ├── 📁 Extra Large
 │   │       │   ├── 📦 Baryon Exotic Plasma XL
 │   │       │   ├── 📦 Meson Exotic Plasma XL
-│   │       │   ├── 📦 Mystic XL
-│   │       │   ├── 📦 Occult XL
 │   │       │   └── 📦 Tetryon Exotic Plasma XL
 │   │       ├── 📁 Large
 │   │       │   ├── 📦 Baryon Exotic Plasma L
@@ -4454,7 +4455,7 @@ Market
 │   │   │   ├── 📦 'Integrated' Praetor
 │   │   │   ├── 📦 'Integrated' Wasp
 │   │   │   ├── 📦 Arabellata SW-900-I
-│   │   │   ├── 📦 Atlas SD-900
+│   │   │   ├── 📦 Atlas SD-900-I
 │   │   │   ├── 📦 Berserker I
 │   │   │   ├── 📦 Berserker II
 │   │   │   ├── 📦 Caldari Navy Wasp
@@ -4469,7 +4470,7 @@ Market
 │   │   │   ├── 📦 Praetor II
 │   │   │   ├── 📦 Republic Fleet Berserker
 │   │   │   ├── 📦 Tabanida EV-900-I
-│   │   │   ├── 📦 Torafugu TD-900
+│   │   │   ├── 📦 Torafugu TD-900-I
 │   │   │   ├── 📦 Wasp I
 │   │   │   └── 📦 Wasp II
 │   │   ├── 📁 Light Scout Drones
@@ -4494,8 +4495,8 @@ Market
 │   │   │   ├── 📦 Orbweaver SW-300-I
 │   │   │   ├── 📦 Republic Fleet Warrior
 │   │   │   ├── 📦 Skimmer TP-300-I
-│   │   │   ├── 📦 Stellate TD-300
-│   │   │   ├── 📦 Stigmella SD-300
+│   │   │   ├── 📦 Stellate TD-300-I
+│   │   │   ├── 📦 Stigmella SD-300-I
 │   │   │   ├── 📦 Tick EV-300-I
 │   │   │   ├── 📦 Warrior I
 │   │   │   └── 📦 Warrior II
@@ -4516,11 +4517,11 @@ Market
 │   │   │   ├── 📦 Hammerhead I
 │   │   │   ├── 📦 Hammerhead II
 │   │   │   ├── 📦 Huntsman SW-600-I
-│   │   │   ├── 📦 Immaculate TD-600
+│   │   │   ├── 📦 Immaculate TD-600-I
 │   │   │   ├── 📦 Imperial Navy Infiltrator
 │   │   │   ├── 📦 Infiltrator I
 │   │   │   ├── 📦 Infiltrator II
-│   │   │   ├── 📦 Luna SD-600
+│   │   │   ├── 📦 Luna SD-600-I
 │   │   │   ├── 📦 Mosquito EV-600-I
 │   │   │   ├── 📦 Nertic EC-600-I
 │   │   │   ├── 📦 Republic Fleet Valkyrie
