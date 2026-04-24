@@ -4779,47 +4779,20 @@ Market
 │   │   │       └── 📦 Agency 'Pyrolancea' DB9 Dose IV
 │   │   ├── 📁 Booster Slot 12
 │   │   ├── 📁 Booster Slot 14
-│   │   │   ├── 📦 Federation Electronics Booster I
-│   │   │   ├── 📦 Federation Electronics Booster II
-│   │   │   ├── 📦 Federation Electronics Booster III
-│   │   │   ├── 📦 Federation Electronics Booster IV
 │   │   │   └── 📦 Strong Veilguard Booster
 │   │   ├── 📁 Booster Slot 15
-│   │   │   ├── 📦 Federation Defense Booster I
-│   │   │   ├── 📦 Federation Defense Booster II
-│   │   │   ├── 📦 Federation Defense Booster III
-│   │   │   ├── 📦 Federation Defense Booster IV
-│   │   │   ├── 📦 Federation Projection Booster I
-│   │   │   ├── 📦 Federation Projection Booster II
-│   │   │   ├── 📦 Federation Projection Booster III
-│   │   │   └── 📦 Federation Projection Booster IV
 │   │   ├── 📁 Booster Slot 16
-│   │   │   ├── 📦 Federation Mobility Booster I
-│   │   │   ├── 📦 Federation Mobility Booster II
-│   │   │   ├── 📦 Federation Mobility Booster III
-│   │   │   └── 📦 Federation Mobility Booster IV
 │   │   ├── 📁 Booster Slot 17
 │   │   │   ├── 📦 Expired Aegytica Volatile Booster
 │   │   │   ├── 📦 Expired Balneum Volatile Booster
 │   │   │   ├── 📦 Expired Mithridate Volatile Booster
 │   │   │   ├── 📦 Expired Theriac Volatile Booster
-│   │   │   ├── 📦 Expired Vis Vitalis Volatile Booster
-│   │   │   ├── 📦 Federation Application Booster I
-│   │   │   ├── 📦 Federation Application Booster II
-│   │   │   ├── 📦 Federation Application Booster III
-│   │   │   ├── 📦 Federation Application Booster IV
-│   │   │   ├── 📦 Federation Damage Booster I
-│   │   │   ├── 📦 Federation Damage Booster II
-│   │   │   ├── 📦 Federation Damage Booster III
-│   │   │   └── 📦 Federation Damage Booster IV
+│   │   │   └── 📦 Expired Vis Vitalis Volatile Booster
 │   │   └── 📁 Clone Mappers
 │   │       └── 📦 Nanoheuristic Clone Mapper
 │   ├── 📁 Cerebral Accelerators
-│   │   ├── 📦 Basic 'Demos' Cerebral Accelerator
 │   │   ├── 📦 Expert Cerebral Accelerator
-│   │   ├── 📦 Extended 'Demos' Cerebral Accelerator
-│   │   ├── 📦 Master-at-Arms Cerebral Accelerator
-│   │   └── 📦 Potent 'Demos' Cerebral Accelerator
+│   │   └── 📦 Master-at-Arms Cerebral Accelerator
 │   └── 📁 Implants
 │       ├── 📁 Attribute Enhancers
 │       │   ├── 📁 Implant Slot 01
@@ -19080,8 +19053,6 @@ Market
 │   │   │   │   └── 📦 Republic Justice Department Silver Reward
 │   │   │   ├── 📁 Gallente Election Assets
 │   │   │   │   ├── 📦 Federal Defender Apparel Crate
-│   │   │   │   ├── 📦 Gallente Election Booster Crate
-│   │   │   │   ├── 📦 Gallente Election Cerebral Accelerator Crate
 │   │   │   │   ├── 📦 Gallente Election SKINr Crate
 │   │   │   │   ├── 📦 Gallente Election Y128 SKINs Crate
 │   │   │   │   ├── 📦 Political Favor
