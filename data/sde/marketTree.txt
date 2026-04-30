@@ -3361,11 +3361,14 @@ Market
 │   │       └── 📁 Weapon Upgrades
 │   │           ├── 📦 Ballistic Control System I Blueprint
 │   │           ├── 📦 Bastion Module I Blueprint
+│   │           ├── 📦 Caldari Navy Bastion Module Blueprint
 │   │           ├── 📦 Capital Industrial Core I Blueprint
 │   │           ├── 📦 Consortium Vorton Tuning System Blueprint
 │   │           ├── 📦 Entropic Radiation Sink I Blueprint
+│   │           ├── 📦 Federation Navy Bastion Module Blueprint
 │   │           ├── 📦 Gyrostabilizer I Blueprint
 │   │           ├── 📦 Heat Sink I Blueprint
+│   │           ├── 📦 Imperial Navy Bastion Module Blueprint
 │   │           ├── 📦 Kasiha's Modified Vorton Tuning System Blueprint
 │   │           ├── 📦 Large Industrial Core I Blueprint
 │   │           ├── 📦 Magnetic Field Stabilizer I Blueprint
@@ -3374,6 +3377,7 @@ Market
 │   │           ├── 📦 Missile Guidance Enhancer I Blueprint
 │   │           ├── 📦 ML-EKP 'Polybolos' Ballistic Control System Blueprint
 │   │           ├── 📦 Remote Tracking Computer I Blueprint
+│   │           ├── 📦 Republic Fleet Bastion Module Blueprint
 │   │           ├── 📦 Siege Module I Blueprint
 │   │           ├── 📦 Tracking Computer I Blueprint
 │   │           ├── 📦 Tracking Enhancer I Blueprint
@@ -4779,20 +4783,119 @@ Market
 │   │   │       └── 📦 Agency 'Pyrolancea' DB9 Dose IV
 │   │   ├── 📁 Booster Slot 12
 │   │   ├── 📁 Booster Slot 14
+│   │   │   ├── 📦 Federation Electronics Booster I
+│   │   │   ├── 📦 Federation Electronics Booster II
+│   │   │   ├── 📦 Federation Electronics Booster IV
+│   │   │   ├── 📦 Imperial Electronics Booster I
+│   │   │   ├── 📦 Imperial Electronics Booster II
+│   │   │   ├── 📦 Imperial Electronics Booster III
+│   │   │   ├── 📦 Imperial Electronics Booster IV
+│   │   │   ├── 📦 Republic Electronics Booster I
+│   │   │   ├── 📦 Republic Electronics Booster II
+│   │   │   ├── 📦 Republic Electronics Booster III
+│   │   │   ├── 📦 Republic Electronics Booster IV
+│   │   │   ├── 📦 State Electronics Booster I
+│   │   │   ├── 📦 State Electronics Booster II
+│   │   │   ├── 📦 State Electronics Booster III
+│   │   │   ├── 📦 State Electronics Booster IV
 │   │   │   └── 📦 Strong Veilguard Booster
 │   │   ├── 📁 Booster Slot 15
+│   │   │   ├── 📦 Federation Defense Booster I
+│   │   │   ├── 📦 Federation Defense Booster II
+│   │   │   ├── 📦 Federation Defense Booster III
+│   │   │   ├── 📦 Federation Defense Booster IV
+│   │   │   ├── 📦 Federation Projection Booster I
+│   │   │   ├── 📦 Federation Projection Booster II
+│   │   │   ├── 📦 Federation Projection Booster III
+│   │   │   ├── 📦 Federation Projection Booster IV
+│   │   │   ├── 📦 Imperial Defense Booster I
+│   │   │   ├── 📦 Imperial Defense Booster II
+│   │   │   ├── 📦 Imperial Defense Booster III
+│   │   │   ├── 📦 Imperial Defense Booster IV
+│   │   │   ├── 📦 Imperial Projection Booster I
+│   │   │   ├── 📦 Imperial Projection Booster II
+│   │   │   ├── 📦 Imperial Projection Booster III
+│   │   │   ├── 📦 Imperial Projection Booster IV
+│   │   │   ├── 📦 Republic Defense Booster I
+│   │   │   ├── 📦 Republic Defense Booster II
+│   │   │   ├── 📦 Republic Defense Booster III
+│   │   │   ├── 📦 Republic Defense Booster IV
+│   │   │   ├── 📦 Republic Projection Booster I
+│   │   │   ├── 📦 Republic Projection Booster II
+│   │   │   ├── 📦 Republic Projection Booster III
+│   │   │   ├── 📦 Republic Projection Booster IV
+│   │   │   ├── 📦 State Defense Booster I
+│   │   │   ├── 📦 State Defense Booster II
+│   │   │   ├── 📦 State Defense Booster III
+│   │   │   ├── 📦 State Defense Booster IV
+│   │   │   ├── 📦 State Projection Booster I
+│   │   │   ├── 📦 State Projection Booster II
+│   │   │   ├── 📦 State Projection Booster III
+│   │   │   └── 📦 State Projection Booster IV
 │   │   ├── 📁 Booster Slot 16
+│   │   │   ├── 📦 Federation Mobility Booster I
+│   │   │   ├── 📦 Federation Mobility Booster II
+│   │   │   ├── 📦 Federation Mobility Booster III
+│   │   │   ├── 📦 Federation Mobility Booster IV
+│   │   │   ├── 📦 Imperial Mobility Booster I
+│   │   │   ├── 📦 Imperial Mobility Booster II
+│   │   │   ├── 📦 Imperial Mobility Booster III
+│   │   │   ├── 📦 Imperial Mobility Booster IV
+│   │   │   ├── 📦 Republic Mobility Booster I
+│   │   │   ├── 📦 Republic Mobility Booster II
+│   │   │   ├── 📦 Republic Mobility Booster III
+│   │   │   ├── 📦 Republic Mobility Booster IV
+│   │   │   ├── 📦 State Mobility Booster I
+│   │   │   ├── 📦 State Mobility Booster II
+│   │   │   ├── 📦 State Mobility Booster III
+│   │   │   └── 📦 State Mobility Booster IV
 │   │   ├── 📁 Booster Slot 17
 │   │   │   ├── 📦 Expired Aegytica Volatile Booster
 │   │   │   ├── 📦 Expired Balneum Volatile Booster
 │   │   │   ├── 📦 Expired Mithridate Volatile Booster
 │   │   │   ├── 📦 Expired Theriac Volatile Booster
-│   │   │   └── 📦 Expired Vis Vitalis Volatile Booster
+│   │   │   ├── 📦 Expired Vis Vitalis Volatile Booster
+│   │   │   ├── 📦 Federation Application Booster I
+│   │   │   ├── 📦 Federation Application Booster II
+│   │   │   ├── 📦 Federation Application Booster III
+│   │   │   ├── 📦 Federation Application Booster IV
+│   │   │   ├── 📦 Federation Damage Booster I
+│   │   │   ├── 📦 Federation Damage Booster II
+│   │   │   ├── 📦 Federation Damage Booster III
+│   │   │   ├── 📦 Federation Damage Booster IV
+│   │   │   ├── 📦 Imperial Application Booster I
+│   │   │   ├── 📦 Imperial Application Booster II
+│   │   │   ├── 📦 Imperial Application Booster III
+│   │   │   ├── 📦 Imperial Application Booster IV
+│   │   │   ├── 📦 Imperial Damage Booster I
+│   │   │   ├── 📦 Imperial Damage Booster II
+│   │   │   ├── 📦 Imperial Damage Booster III
+│   │   │   ├── 📦 Imperial Damage Booster IV
+│   │   │   ├── 📦 Republic Application Booster I
+│   │   │   ├── 📦 Republic Application Booster II
+│   │   │   ├── 📦 Republic Application Booster III
+│   │   │   ├── 📦 Republic Application Booster IV
+│   │   │   ├── 📦 Republic Damage Booster I
+│   │   │   ├── 📦 Republic Damage Booster II
+│   │   │   ├── 📦 Republic Damage Booster III
+│   │   │   ├── 📦 Republic Damage Booster IV
+│   │   │   ├── 📦 State Application Booster I
+│   │   │   ├── 📦 State Application Booster II
+│   │   │   ├── 📦 State Application Booster III
+│   │   │   ├── 📦 State Application Booster IV
+│   │   │   ├── 📦 State Damage Booster I
+│   │   │   ├── 📦 State Damage Booster II
+│   │   │   ├── 📦 State Damage Booster III
+│   │   │   └── 📦 State Damage Booster IV
 │   │   └── 📁 Clone Mappers
 │   │       └── 📦 Nanoheuristic Clone Mapper
 │   ├── 📁 Cerebral Accelerators
+│   │   ├── 📦 Basic Capsuleer Day XXIII Cerebral Accelerator
 │   │   ├── 📦 Expert Cerebral Accelerator
-│   │   └── 📦 Master-at-Arms Cerebral Accelerator
+│   │   ├── 📦 Extended Capsuleer Day XXIII Cerebral Accelerator
+│   │   ├── 📦 Extended Capsuleer Day XXIII Glamourex Booster
+│   │   ├── 📦 Master-at-Arms Cerebral Accelerator
+│   │   └── 📦 Potent Capsuleer Day XXIII Cerebral Accelerator
 │   └── 📁 Implants
 │       ├── 📁 Attribute Enhancers
 │       │   ├── 📁 Implant Slot 01
@@ -7597,6 +7700,8 @@ Market
 │   │   └── 📁 Patterns
 │   │       ├── 📦 Abyssal Corruption - Limited
 │   │       ├── 📦 Abyssal Corruption - Unlimited
+│   │       ├── 📦 Advancing Lines - Limited
+│   │       ├── 📦 Advancing Lines - Unlimited
 │   │       ├── 📦 Angular Deployment - Limited
 │   │       ├── 📦 Angular Deployment - Unlimited
 │   │       ├── 📦 Annointed Dead Pattern - Limited
@@ -7623,6 +7728,8 @@ Market
 │   │       ├── 📦 Celestial Crest - Unlimited
 │   │       ├── 📦 Center Grade - Limited
 │   │       ├── 📦 Center Grade - Unlimited
+│   │       ├── 📦 Chaotic Skies - Limited
+│   │       ├── 📦 Chaotic Skies - Unlimited
 │   │       ├── 📦 Checkerboard - Limited
 │   │       ├── 📦 Checkerboard - Unlimited
 │   │       ├── 📦 Checkered Divide - Limited
@@ -7630,6 +7737,8 @@ Market
 │   │       ├── 📦 Checkmate - Limited
 │   │       ├── 📦 Checkmate - Unlimited
 │   │       ├── 📦 Clustered Horde - Limited
+│   │       ├── 📦 Combined Forces - Limited
+│   │       ├── 📦 Combined Forces - Unlimited
 │   │       ├── 📦 Complex Hex - Limited
 │   │       ├── 📦 Complex Hex - Unlimited
 │   │       ├── 📦 Consensus Drift - Limited
@@ -7673,6 +7782,8 @@ Market
 │   │       ├── 📦 Doppler Approach - Limited
 │   │       ├── 📦 Doppler Approach - Unlimited
 │   │       ├── 📦 Drifter Sweeps - Limited
+│   │       ├── 📦 Echoes of Action - Limited
+│   │       ├── 📦 Echoes of Action - Unlimited
 │   │       ├── 📦 Embossed Turns - Limited
 │   │       ├── 📦 Embossed Turns - Unlimited
 │   │       ├── 📦 Emergent Stripes - Limited
@@ -7695,10 +7806,14 @@ Market
 │   │       ├── 📦 Failing Fifth - Unlimited
 │   │       ├── 📦 Federation Ascent - Limited
 │   │       ├── 📦 Federation Ascent - Unlimited
+│   │       ├── 📦 Federation Charge - Limited
+│   │       ├── 📦 Federation Charge - Unlimited
 │   │       ├── 📦 Federation Field - Limited
 │   │       ├── 📦 Federation Field - Unlimited
 │   │       ├── 📦 Folded Path - Limited
 │   │       ├── 📦 Folded Path - Unlimited
+│   │       ├── 📦 Fortified State - Limited
+│   │       ├── 📦 Fortified State - Unlimited
 │   │       ├── 📦 Four from One - Limited
 │   │       ├── 📦 Four from One - Unlimited
 │   │       ├── 📦 Fragmented Warp - Limited
@@ -7709,6 +7824,8 @@ Market
 │   │       ├── 📦 Glacial Cross - Limited
 │   │       ├── 📦 Gliding Mix - Limited
 │   │       ├── 📦 Gliding Mix - Unlimited
+│   │       ├── 📦 Guerilla Republic - Limited
+│   │       ├── 📦 Guerilla Republic - Unlimited
 │   │       ├── 📦 Hacked Virtuality - Unlimited
 │   │       ├── 📦 Half Measure - Limited
 │   │       ├── 📦 Half Measure - Unlimited
@@ -7734,6 +7851,8 @@ Market
 │   │       ├── 📦 Icelink Reflection - Unlimited
 │   │       ├── 📦 Illusionary Tiger - Limited
 │   │       ├── 📦 Illusionary Tiger - Unlimited
+│   │       ├── 📦 Imperial Supremacy - Limited
+│   │       ├── 📦 Imperial Supremacy - Unlimited
 │   │       ├── 📦 Impressionist Camo - Limited
 │   │       ├── 📦 Impressionist Camo - Unlimited
 │   │       ├── 📦 Infinite Cyclones - Limited
@@ -7854,6 +7973,8 @@ Market
 │   │       ├── 📦 Vital Pulse - Unlimited
 │   │       ├── 📦 Volatile Vector - Limited
 │   │       ├── 📦 Volatile Vector - Unlimited
+│   │       ├── 📦 War Fatigue - Limited
+│   │       ├── 📦 War Fatigue - Unlimited
 │   │       ├── 📦 Wheel of the Awoken - Limited
 │   │       ├── 📦 Wild Warren - Limited
 │   │       ├── 📦 Wing Circuit - Limited
@@ -9624,6 +9745,7 @@ Market
 │   │   │   ├── 📦 Capacitor Flux Coil I
 │   │   │   ├── 📦 Capacitor Flux Coil II
 │   │   │   ├── 📦 Mark I Compact Capacitor Flux Coil
+│   │   │   ├── 📦 Torigo’s Modified Capacitor Flux Coil
 │   │   │   └── 📦 Type-D Restrained Capacitor Flux Coil
 │   │   ├── 📁 Capacitor Power Relays
 │   │   │   ├── 📦 'Basic' Capacitor Power Relay
@@ -9941,6 +10063,7 @@ Market
 │   │   │   ├── 📦 'Carpo' Mining Laser Upgrade
 │   │   │   ├── 📦 'Ingenii' Ice Harvester Upgrade
 │   │   │   ├── 📦 Elara Restrained Mining Laser Upgrade
+│   │   │   ├── 📦 Filmir’s Modified Mining Laser Upgrade
 │   │   │   ├── 📦 Frigoris Restrained Ice Harvester Upgrade
 │   │   │   ├── 📦 Frostline 'Omnivore' Harvester Upgrade
 │   │   │   ├── 📦 Ice Harvester Upgrade I
@@ -10711,7 +10834,8 @@ Market
 │   │   │   │   ├── 📦 Expanded Cargohold II
 │   │   │   │   ├── 📦 Limited Expanded 'Archiver' Cargo
 │   │   │   │   ├── 📦 ORE Expanded Cargohold
-│   │   │   │   └── 📦 Type-D Restrained Expanded Cargo
+│   │   │   │   ├── 📦 Type-D Restrained Expanded Cargo
+│   │   │   │   └── 📦 xer Qosh’s Modified Expanded Cargohold
 │   │   │   ├── 📁 Nanofiber Internal Structures
 │   │   │   │   ├── 📦 'Basic' Nanofiber Internal Structure
 │   │   │   │   ├── 📦 Domination Nanofiber Structure
@@ -11014,6 +11138,7 @@ Market
 │   │   │   ├── 📦 Purloined Sansha Data Analyzer
 │   │   │   ├── 📦 Relic Analyzer I
 │   │   │   ├── 📦 Relic Analyzer II
+│   │   │   ├── 📦 Revelli’s Modified Integrated Analyzer
 │   │   │   └── 📦 Zeugma Integrated Analyzer
 │   │   ├── 📁 Cargo Scanners
 │   │   │   ├── 📦 Cargo Scanner I
@@ -12598,12 +12723,16 @@ Market
 │           │   └── 📦 Shadow Serpentis Remote Tracking Computer
 │           ├── 📁 Siege Modules
 │           │   ├── 📦 Bastion Module I
+│           │   ├── 📦 Caldari Navy Bastion Module
 │           │   ├── 📦 Capital Industrial Core I
 │           │   ├── 📦 Capital Industrial Core II
+│           │   ├── 📦 Federation Navy Bastion Module
+│           │   ├── 📦 Imperial Navy Bastion Module
 │           │   ├── 📦 Large Industrial Core I
 │           │   ├── 📦 Large Industrial Core II
 │           │   ├── 📦 Medium Industrial Core I
 │           │   ├── 📦 Medium Industrial Core II
+│           │   ├── 📦 Republic Fleet Bastion Module
 │           │   ├── 📦 Siege Module I
 │           │   ├── 📦 Siege Module II
 │           │   ├── 📦 Strategos' Modified Siege Module
@@ -13374,6 +13503,7 @@ Market
 │   │   │   ├── 📁 Navy Faction
 │   │   │   │   ├── 📦 Apocalypse Navy Issue Ardishapur SKIN
 │   │   │   │   ├── 📦 Apocalypse Navy Issue Biosecurity Responders SKIN
+│   │   │   │   ├── 📦 Apocalypse Navy Issue Capsuleer Day XXIII SKIN
 │   │   │   │   ├── 📦 Apocalypse Navy Issue Capsuleer Elite XX SKIN
 │   │   │   │   ├── 📦 Apocalypse Navy Issue Cold Iron SKIN
 │   │   │   │   ├── 📦 Apocalypse Navy Issue Crown and Swords SKIN
@@ -13416,6 +13546,7 @@ Market
 │   │   │   │   ├── 📦 Dominix Navy Issue Spirit SKIN
 │   │   │   │   ├── 📦 Dominix Navy Issue Zydrine Burn SKIN
 │   │   │   │   ├── 📦 Megathron Navy Issue Biosecurity Responders SKIN
+│   │   │   │   ├── 📦 Megathron Navy Issue Capsuleer Day XXIII SKIN
 │   │   │   │   ├── 📦 Megathron Navy Issue Capsuleer Elite XX SKIN
 │   │   │   │   ├── 📦 Megathron Navy Issue Exoplanets Hunter SKIN
 │   │   │   │   ├── 📦 Megathron Navy Issue Glacial Drift SKIN
@@ -13427,6 +13558,7 @@ Market
 │   │   │   │   ├── 📦 Megathron Navy Issue Sapphire Sungrazer SKIN
 │   │   │   │   ├── 📦 Megathron Navy Issue Spirit SKIN
 │   │   │   │   ├── 📦 Raven Navy Issue Biosecurity Responders SKIN
+│   │   │   │   ├── 📦 Raven Navy Issue Capsuleer Day XXIII SKIN
 │   │   │   │   ├── 📦 Raven Navy Issue Cryptic Mimesis SKIN
 │   │   │   │   ├── 📦 Raven Navy Issue Exoplanets Hunter SKIN
 │   │   │   │   ├── 📦 Raven Navy Issue Forward 4-4 SKIN
@@ -13452,6 +13584,7 @@ Market
 │   │   │   │   ├── 📦 Tempest Fleet Issue Biosecurity Responders SKIN
 │   │   │   │   ├── 📦 Tempest Fleet Issue Bloody Hands SKIN
 │   │   │   │   ├── 📦 Tempest Fleet Issue Brutor SKIN
+│   │   │   │   ├── 📦 Tempest Fleet Issue Capsuleer Day XXIII SKIN
 │   │   │   │   ├── 📦 Tempest Fleet Issue Chainbreaker Khumaak SKIN
 │   │   │   │   ├── 📦 Tempest Fleet Issue Dawn of Liberation SKIN
 │   │   │   │   ├── 📦 Tempest Fleet Issue Exoplanets Hunter SKIN
@@ -15067,6 +15200,7 @@ Market
 │   │   │   │   ├── 📦 Augoror Navy Issue Ardishapur SKIN
 │   │   │   │   ├── 📦 Augoror Navy Issue Arkombine Arisen SKIN
 │   │   │   │   ├── 📦 Augoror Navy Issue Biosecurity Responders SKIN
+│   │   │   │   ├── 📦 Augoror Navy Issue Capsuleer Day XXIII SKIN
 │   │   │   │   ├── 📦 Augoror Navy Issue Cold Iron SKIN
 │   │   │   │   ├── 📦 Augoror Navy Issue EoM SKIN
 │   │   │   │   ├── 📦 Augoror Navy Issue Exoplanets Hunter SKIN
@@ -16606,6 +16740,7 @@ Market
 │   │   │   │   └── 📦 Skybreaker Tyrantbreaker SKIN
 │   │   │   ├── 📁 Navy Faction
 │   │   │   │   ├── 📦 Caldari Navy Hookbill Biosecurity Responders SKIN
+│   │   │   │   ├── 📦 Caldari Navy Hookbill Capsuleer Day XXIII SKIN
 │   │   │   │   ├── 📦 Caldari Navy Hookbill Exoplanets Hunter SKIN
 │   │   │   │   ├── 📦 Caldari Navy Hookbill Ghostbird SKIN
 │   │   │   │   ├── 📦 Caldari Navy Hookbill Glacial Drift SKIN
@@ -16623,6 +16758,7 @@ Market
 │   │   │   │   ├── 📦 Crucifier Navy Issue Sarum SKIN
 │   │   │   │   ├── 📦 Crucifier Navy Issue Spirit SKIN
 │   │   │   │   ├── 📦 Federation Navy Comet Biosecurity Responders SKIN
+│   │   │   │   ├── 📦 Federation Navy Comet Capsuleer Day XXIII SKIN
 │   │   │   │   ├── 📦 Federation Navy Comet Exoplanets Hunter SKIN
 │   │   │   │   ├── 📦 Federation Navy Comet Glacial Drift SKIN
 │   │   │   │   ├── 📦 Federation Navy Comet Inner Zone Vanguard SKIN
@@ -16680,6 +16816,7 @@ Market
 │   │   │   │   ├── 📦 Republic Fleet Firetail AIR Laboratories SKIN
 │   │   │   │   ├── 📦 Republic Fleet Firetail Biosecurity Responders SKIN
 │   │   │   │   ├── 📦 Republic Fleet Firetail Brutor SKIN
+│   │   │   │   ├── 📦 Republic Fleet Firetail Capsuleer Day XXIII SKIN
 │   │   │   │   ├── 📦 Republic Fleet Firetail Dawn of Liberation SKIN
 │   │   │   │   ├── 📦 Republic Fleet Firetail Exoplanets Hunter SKIN
 │   │   │   │   ├── 📦 Republic Fleet Firetail Freedom's Revolution SKIN
@@ -19004,18 +19141,43 @@ Market
 │   │   ├── 📁 Event Assets
 │   │   │   ├── 📁 Capsuleer Day Assets
 │   │   │   │   ├── 📦 Basic 'Ardour' Cerebral Accelerator Blueprint Crate
+│   │   │   │   ├── 📦 Basic Capsuleer Day XXIII Glamourex Booster
+│   │   │   │   ├── 📦 Caldari Navy Bastion Module Blueprint Crate
+│   │   │   │   ├── 📦 Capsuleer Day Amarr SKINR Crate
+│   │   │   │   ├── 📦 Capsuleer Day Caldari SKINR Crate
+│   │   │   │   ├── 📦 Capsuleer Day Empire SKINR Crate
+│   │   │   │   ├── 📦 Capsuleer Day Gallente SKINR Crate
 │   │   │   │   ├── 📦 Capsuleer Day Glamourex Crate
+│   │   │   │   ├── 📦 Capsuleer Day Minmatar SKINR Crate
 │   │   │   │   ├── 📦 Capsuleer Day XVI Apotheosis & SKIN Crate
 │   │   │   │   ├── 📦 Capsuleer Day XVI Cap Crate
 │   │   │   │   ├── 📦 Capsuleer Day XVI Gnosis & SKIN Crate
 │   │   │   │   ├── 📦 Capsuleer Day XVI Praxis & SKIN Crate
 │   │   │   │   ├── 📦 Capsuleer Day XVI Sunesis & SKIN Crate
 │   │   │   │   ├── 📦 Capsuleer Day XVI T-Shirt Crate
+│   │   │   │   ├── 📦 Capsuleer Day XXIII Accelerator Crate
+│   │   │   │   ├── 📦 Capsuleer Day XXIII Amarr Booster Crate
+│   │   │   │   ├── 📦 Capsuleer Day XXIII Caldari Booster Crate
+│   │   │   │   ├── 📦 Capsuleer Day XXIII Fireworks Package
+│   │   │   │   ├── 📦 Capsuleer Day XXIII Gallente Booster Crate
+│   │   │   │   ├── 📦 Capsuleer Day XXIII Glamourex Crate
+│   │   │   │   ├── 📦 Capsuleer Day XXIII Minmatar Booster Crate
 │   │   │   │   ├── 📦 Drake & Oracle Argyros SKIN Crate
+│   │   │   │   ├── 📦 Federation Navy Bastion Module Blueprint Crate
 │   │   │   │   ├── 📦 Genolution CA-X
+│   │   │   │   ├── 📦 Historic Capsuleer Day Apparel Crate
+│   │   │   │   ├── 📦 Imperial Navy Bastion Module Blueprint Crate
 │   │   │   │   ├── 📦 Myrmidon & Tornado Argyros SKIN Crate
+│   │   │   │   ├── 📦 Officer Capacitor Flux Coil Blueprint Crate
+│   │   │   │   ├── 📦 Officer Expanded Cargohold Blueprint Crate
+│   │   │   │   ├── 📦 Officer Integrated Analyzer Blueprint Crate
+│   │   │   │   ├── 📦 Officer Mining Laser Upgrade Blueprint Crate
+│   │   │   │   ├── 📦 Potent Capsuleer Day XXIII Glamourex Booster
+│   │   │   │   ├── 📦 Republic Fleet Bastion Module Blueprint Crate
 │   │   │   │   ├── 📦 Standard 'Ardour' Cerebral Accelerator Blueprint Crate
 │   │   │   │   ├── 📦 Vorton Projector Booster Gift Box
+│   │   │   │   ├── 📦 Warpath Command Intel
+│   │   │   │   ├── 📦 Warpath Operational Intel
 │   │   │   │   ├── 📦 XV Anniversary Gift Box (Alpha)
 │   │   │   │   └── 📦 XV Anniversary Gift Box (Omega)
 │   │   │   ├── 📁 Crimson Harvest Assets
@@ -19544,7 +19706,6 @@ Market
 │   │   ├── 📦 Forever 4-4 Firework
 │   │   ├── 📦 Four Freedoms Firework
 │   │   ├── 📦 Halloween Horrors Firework
-│   │   ├── 📦 Historic Capsuleer Day Apparel Crate
 │   │   ├── 📦 Historic Capsuleer Day Clothing Crate
 │   │   ├── 📦 Historic Capsuleer Day SKIN Crate
 │   │   ├── 📦 Infinite Celebrations Firework
@@ -20849,7 +21010,9 @@ Market
     │   ├── 📦 Cybernetic Neural Lattice
     │   ├── 📦 Drone Iteration Data
     │   ├── 📦 Nation Stormhive Shard
-    │   └── 📦 Sleeper Protocol Subverter
+    │   ├── 📦 Sleeper Protocol Subverter
+    │   ├── 📦 Warpath Strategic Data
+    │   └── 📦 Warpath Supply Cache
     ├── 📁 Narcotics
     │   ├── 📦 Blue Pill
     │   ├── 📦 Crash
