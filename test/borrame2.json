@@ -1,0 +1,2121 @@
+{
+  "id": "https://openalex.org/S195663288",
+  "issn_l": "0035-8711",
+  "issn": [
+    "0035-8711",
+    "1365-2966",
+    "1365-8711"
+  ],
+  "display_name": "Monthly Notices of the Royal Astronomical Society",
+  "host_organization": "https://openalex.org/P4310311648",
+  "host_organization_name": "Oxford University Press",
+  "host_organization_lineage": [
+    "https://openalex.org/P4310311648",
+    "https://openalex.org/P4310311647"
+  ],
+  "works_count": 94595,
+  "oa_works_count": 85382,
+  "cited_by_count": 3659802,
+  "summary_stats": {
+    "2yr_mean_citedness": 5.0911733210953,
+    "h_index": 501,
+    "i10_index": 56904
+  },
+  "is_oa": true,
+  "is_in_doaj": true,
+  "is_in_doaj_since_year": 2024,
+  "is_high_oa_rate": false,
+  "is_high_oa_rate_since_year": null,
+  "is_in_scielo": false,
+  "is_ojs": false,
+  "is_preprint_repository": false,
+  "is_core": true,
+  "oa_flip_year": 2023,
+  "first_publication_year": 1827,
+  "last_publication_year": 2026,
+  "ids": {
+    "openalex": "https://openalex.org/S195663288",
+    "issn_l": "0035-8711",
+    "issn": [
+      "0035-8711",
+      "1365-2966",
+      "1365-8711"
+    ],
+    "mag": "195663288",
+    "wikidata": "https://www.wikidata.org/entity/Q1536490"
+  },
+  "homepage_url": "http://mnras.oxfordjournals.org/",
+  "apc_prices": [
+    {
+      "price": 2310,
+      "currency": "GBP"
+    }
+  ],
+  "apc_usd": 2833,
+  "apc_usd_by_year": null,
+  "country_code": "GB",
+  "societies": [],
+  "alternate_titles": [
+    "Monthly notices"
+  ],
+  "type": "journal",
+  "topics": [
+    {
+      "id": "https://openalex.org/T10039",
+      "display_name": "Stellar, planetary, and galactic studies",
+      "count": 32984,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10026",
+      "display_name": "Galaxies: Formation, Evolution, Phenomena",
+      "count": 29792,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10477",
+      "display_name": "Astrophysics and Star Formation Studies",
+      "count": 23871,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T12917",
+      "display_name": "Astronomy and Astrophysical Research",
+      "count": 22490,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3105",
+        "display_name": "Instrumentation"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10744",
+      "display_name": "Astrophysical Phenomena and Observations",
+      "count": 16110,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10325",
+      "display_name": "Astro and Planetary Science",
+      "count": 14122,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T11323",
+      "display_name": "Gamma-ray bursts and supernovae",
+      "count": 13220,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10818",
+      "display_name": "Astrophysics and Cosmic Phenomena",
+      "count": 10472,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3106",
+        "display_name": "Nuclear and High Energy Physics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10463",
+      "display_name": "Pulsars and Gravitational Waves Research",
+      "count": 8889,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10095",
+      "display_name": "Cosmology and Gravitation Theories",
+      "count": 6771,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10251",
+      "display_name": "Solar and Space Plasma Dynamics",
+      "count": 5693,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T12450",
+      "display_name": "Radio Astronomy Observations and Technology",
+      "count": 5646,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T12836",
+      "display_name": "History and Developments in Astronomy",
+      "count": 5498,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T14163",
+      "display_name": "Astronomical Observations and Instrumentation",
+      "count": 4247,
+      "subfield": {
+        "id": "https://openalex.org/subfields/2206",
+        "display_name": "Computational Mechanics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/22",
+        "display_name": "Engineering"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T11405",
+      "display_name": "Geophysics and Gravity Measurements",
+      "count": 2838,
+      "subfield": {
+        "id": "https://openalex.org/subfields/1910",
+        "display_name": "Oceanography"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/19",
+        "display_name": "Earth and Planetary Sciences"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10406",
+      "display_name": "Planetary Science and Exploration",
+      "count": 2473,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T13126",
+      "display_name": "Scientific Research and Discoveries",
+      "count": 2441,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3109",
+        "display_name": "Statistical and Nonlinear Physics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T11484",
+      "display_name": "Adaptive optics and wavefront sensing",
+      "count": 2423,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3107",
+        "display_name": "Atomic and Molecular Physics, and Optics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T13175",
+      "display_name": "Historical Astronomy and Related Studies",
+      "count": 2397,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10413",
+      "display_name": "High-pressure geophysics and materials",
+      "count": 2352,
+      "subfield": {
+        "id": "https://openalex.org/subfields/1908",
+        "display_name": "Geophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/19",
+        "display_name": "Earth and Planetary Sciences"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T11320",
+      "display_name": "Atmospheric Ozone and Climate",
+      "count": 2012,
+      "subfield": {
+        "id": "https://openalex.org/subfields/1902",
+        "display_name": "Atmospheric Science"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/19",
+        "display_name": "Earth and Planetary Sciences"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T11090",
+      "display_name": "Dark Matter and Cosmic Phenomena",
+      "count": 1974,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3106",
+        "display_name": "Nuclear and High Energy Physics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T12967",
+      "display_name": "Molecular Spectroscopy and Structure",
+      "count": 1457,
+      "subfield": {
+        "id": "https://openalex.org/subfields/1607",
+        "display_name": "Spectroscopy"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/16",
+        "display_name": "Chemistry"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10159",
+      "display_name": "Ionosphere and magnetosphere dynamics",
+      "count": 1321,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T11111",
+      "display_name": "Spectroscopy and Laser Applications",
+      "count": 1302,
+      "subfield": {
+        "id": "https://openalex.org/subfields/1607",
+        "display_name": "Spectroscopy"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/16",
+        "display_name": "Chemistry"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    }
+  ],
+  "topic_share": [
+    {
+      "id": "https://openalex.org/T10026",
+      "display_name": "Galaxies: Formation, Evolution, Phenomena",
+      "value": 0.0728739,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10039",
+      "display_name": "Stellar, planetary, and galactic studies",
+      "value": 0.0578644,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10477",
+      "display_name": "Astrophysics and Star Formation Studies",
+      "value": 0.0541996,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T11323",
+      "display_name": "Gamma-ray bursts and supernovae",
+      "value": 0.0456484,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T12450",
+      "display_name": "Radio Astronomy Observations and Technology",
+      "value": 0.0387985,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10744",
+      "display_name": "Astrophysical Phenomena and Observations",
+      "value": 0.0255779,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10463",
+      "display_name": "Pulsars and Gravitational Waves Research",
+      "value": 0.0247966,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10325",
+      "display_name": "Astro and Planetary Science",
+      "value": 0.0227351,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T12917",
+      "display_name": "Astronomy and Astrophysical Research",
+      "value": 0.0199596,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3105",
+        "display_name": "Instrumentation"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10818",
+      "display_name": "Astrophysics and Cosmic Phenomena",
+      "value": 0.0193524,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3106",
+        "display_name": "Nuclear and High Energy Physics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10095",
+      "display_name": "Cosmology and Gravitation Theories",
+      "value": 0.0123956,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T12967",
+      "display_name": "Molecular Spectroscopy and Structure",
+      "value": 0.010182,
+      "subfield": {
+        "id": "https://openalex.org/subfields/1607",
+        "display_name": "Spectroscopy"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/16",
+        "display_name": "Chemistry"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T12836",
+      "display_name": "History and Developments in Astronomy",
+      "value": 0.0101361,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T14163",
+      "display_name": "Astronomical Observations and Instrumentation",
+      "value": 0.0083947,
+      "subfield": {
+        "id": "https://openalex.org/subfields/2206",
+        "display_name": "Computational Mechanics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/22",
+        "display_name": "Engineering"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T11484",
+      "display_name": "Adaptive optics and wavefront sensing",
+      "value": 0.0081549,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3107",
+        "display_name": "Atomic and Molecular Physics, and Optics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T11090",
+      "display_name": "Dark Matter and Cosmic Phenomena",
+      "value": 0.0079544,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3106",
+        "display_name": "Nuclear and High Energy Physics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T13175",
+      "display_name": "Historical Astronomy and Related Studies",
+      "value": 0.0078905,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10406",
+      "display_name": "Planetary Science and Exploration",
+      "value": 0.0066279,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3103",
+        "display_name": "Astronomy and Astrophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T13752",
+      "display_name": "Mechanics and Biomechanics Studies",
+      "value": 0.0063821,
+      "subfield": {
+        "id": "https://openalex.org/subfields/2204",
+        "display_name": "Biomedical Engineering"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/22",
+        "display_name": "Engineering"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T13126",
+      "display_name": "Scientific Research and Discoveries",
+      "value": 0.0063705,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3109",
+        "display_name": "Statistical and Nonlinear Physics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T13458",
+      "display_name": "Astronomical and nuclear sciences",
+      "value": 0.0059981,
+      "subfield": {
+        "id": "https://openalex.org/subfields/3106",
+        "display_name": "Nuclear and High Energy Physics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/31",
+        "display_name": "Physics and Astronomy"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T11320",
+      "display_name": "Atmospheric Ozone and Climate",
+      "value": 0.0058299,
+      "subfield": {
+        "id": "https://openalex.org/subfields/1902",
+        "display_name": "Atmospheric Science"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/19",
+        "display_name": "Earth and Planetary Sciences"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T11405",
+      "display_name": "Geophysics and Gravity Measurements",
+      "value": 0.0051649,
+      "subfield": {
+        "id": "https://openalex.org/subfields/1910",
+        "display_name": "Oceanography"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/19",
+        "display_name": "Earth and Planetary Sciences"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T13487",
+      "display_name": "Statistical and numerical algorithms",
+      "value": 0.0047108,
+      "subfield": {
+        "id": "https://openalex.org/subfields/2604",
+        "display_name": "Applied Mathematics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/26",
+        "display_name": "Mathematics"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    },
+    {
+      "id": "https://openalex.org/T10413",
+      "display_name": "High-pressure geophysics and materials",
+      "value": 0.0043932,
+      "subfield": {
+        "id": "https://openalex.org/subfields/1908",
+        "display_name": "Geophysics"
+      },
+      "field": {
+        "id": "https://openalex.org/fields/19",
+        "display_name": "Earth and Planetary Sciences"
+      },
+      "domain": {
+        "id": "https://openalex.org/domains/3",
+        "display_name": "Physical Sciences"
+      }
+    }
+  ],
+  "counts_by_year": [
+    {
+      "year": 2026,
+      "works_count": 1429,
+      "oa_works_count": 1429,
+      "cited_by_count": 721
+    },
+    {
+      "year": 2025,
+      "works_count": 2285,
+      "oa_works_count": 2285,
+      "cited_by_count": 8036
+    },
+    {
+      "year": 2024,
+      "works_count": 2823,
+      "oa_works_count": 2823,
+      "cited_by_count": 24524
+    },
+    {
+      "year": 2023,
+      "works_count": 4025,
+      "oa_works_count": 3445,
+      "cited_by_count": 56033
+    },
+    {
+      "year": 2022,
+      "works_count": 3818,
+      "oa_works_count": 3133,
+      "cited_by_count": 59090
+    },
+    {
+      "year": 2021,
+      "works_count": 3808,
+      "oa_works_count": 3550,
+      "cited_by_count": 85304
+    },
+    {
+      "year": 2020,
+      "works_count": 4034,
+      "oa_works_count": 3843,
+      "cited_by_count": 119335
+    },
+    {
+      "year": 2019,
+      "works_count": 3632,
+      "oa_works_count": 3475,
+      "cited_by_count": 133329
+    },
+    {
+      "year": 2018,
+      "works_count": 3525,
+      "oa_works_count": 3366,
+      "cited_by_count": 147118
+    },
+    {
+      "year": 2017,
+      "works_count": 3366,
+      "oa_works_count": 3219,
+      "cited_by_count": 150365
+    },
+    {
+      "year": 2016,
+      "works_count": 3550,
+      "oa_works_count": 3477,
+      "cited_by_count": 178699
+    },
+    {
+      "year": 2015,
+      "works_count": 3063,
+      "oa_works_count": 3020,
+      "cited_by_count": 169525
+    },
+    {
+      "year": 2014,
+      "works_count": 2717,
+      "oa_works_count": 2671,
+      "cited_by_count": 159000
+    },
+    {
+      "year": 2013,
+      "works_count": 2541,
+      "oa_works_count": 2495,
+      "cited_by_count": 152985
+    },
+    {
+      "year": 2012,
+      "works_count": 2510,
+      "oa_works_count": 2435,
+      "cited_by_count": 165293
+    },
+    {
+      "year": 2011,
+      "works_count": 2230,
+      "oa_works_count": 2151,
+      "cited_by_count": 142036
+    },
+    {
+      "year": 2010,
+      "works_count": 1926,
+      "oa_works_count": 1866,
+      "cited_by_count": 119862
+    },
+    {
+      "year": 2009,
+      "works_count": 1901,
+      "oa_works_count": 1827,
+      "cited_by_count": 133334
+    },
+    {
+      "year": 2008,
+      "works_count": 1532,
+      "oa_works_count": 1476,
+      "cited_by_count": 105974
+    },
+    {
+      "year": 2007,
+      "works_count": 1386,
+      "oa_works_count": 1318,
+      "cited_by_count": 99826
+    },
+    {
+      "year": 2006,
+      "works_count": 1506,
+      "oa_works_count": 1438,
+      "cited_by_count": 126294
+    },
+    {
+      "year": 2005,
+      "works_count": 1288,
+      "oa_works_count": 1214,
+      "cited_by_count": 102976
+    },
+    {
+      "year": 2004,
+      "works_count": 1276,
+      "oa_works_count": 1204,
+      "cited_by_count": 101966
+    },
+    {
+      "year": 2003,
+      "works_count": 1225,
+      "oa_works_count": 1172,
+      "cited_by_count": 118892
+    },
+    {
+      "year": 2002,
+      "works_count": 1120,
+      "oa_works_count": 1062,
+      "cited_by_count": 82327
+    },
+    {
+      "year": 2001,
+      "works_count": 1061,
+      "oa_works_count": 993,
+      "cited_by_count": 87554
+    },
+    {
+      "year": 2000,
+      "works_count": 936,
+      "oa_works_count": 855,
+      "cited_by_count": 57780
+    },
+    {
+      "year": 1999,
+      "works_count": 944,
+      "oa_works_count": 864,
+      "cited_by_count": 67420
+    },
+    {
+      "year": 1998,
+      "works_count": 1195,
+      "oa_works_count": 939,
+      "cited_by_count": 65645
+    },
+    {
+      "year": 1997,
+      "works_count": 822,
+      "oa_works_count": 719,
+      "cited_by_count": 50054
+    },
+    {
+      "year": 1996,
+      "works_count": 765,
+      "oa_works_count": 631,
+      "cited_by_count": 48326
+    },
+    {
+      "year": 1995,
+      "works_count": 752,
+      "oa_works_count": 651,
+      "cited_by_count": 38698
+    },
+    {
+      "year": 1994,
+      "works_count": 656,
+      "oa_works_count": 548,
+      "cited_by_count": 33615
+    },
+    {
+      "year": 1993,
+      "works_count": 640,
+      "oa_works_count": 504,
+      "cited_by_count": 34947
+    },
+    {
+      "year": 1992,
+      "works_count": 511,
+      "oa_works_count": 420,
+      "cited_by_count": 25327
+    },
+    {
+      "year": 1991,
+      "works_count": 548,
+      "oa_works_count": 442,
+      "cited_by_count": 22590
+    },
+    {
+      "year": 1990,
+      "works_count": 452,
+      "oa_works_count": 122,
+      "cited_by_count": 11432
+    },
+    {
+      "year": 1989,
+      "works_count": 466,
+      "oa_works_count": 366,
+      "cited_by_count": 18287
+    },
+    {
+      "year": 1988,
+      "works_count": 468,
+      "oa_works_count": 341,
+      "cited_by_count": 17340
+    },
+    {
+      "year": 1987,
+      "works_count": 467,
+      "oa_works_count": 380,
+      "cited_by_count": 20076
+    },
+    {
+      "year": 1986,
+      "works_count": 448,
+      "oa_works_count": 337,
+      "cited_by_count": 16427
+    },
+    {
+      "year": 1985,
+      "works_count": 468,
+      "oa_works_count": 354,
+      "cited_by_count": 17358
+    },
+    {
+      "year": 1984,
+      "works_count": 492,
+      "oa_works_count": 372,
+      "cited_by_count": 14626
+    },
+    {
+      "year": 1983,
+      "works_count": 467,
+      "oa_works_count": 381,
+      "cited_by_count": 15693
+    },
+    {
+      "year": 1982,
+      "works_count": 408,
+      "oa_works_count": 332,
+      "cited_by_count": 17954
+    },
+    {
+      "year": 1981,
+      "works_count": 406,
+      "oa_works_count": 288,
+      "cited_by_count": 14758
+    },
+    {
+      "year": 1980,
+      "works_count": 393,
+      "oa_works_count": 288,
+      "cited_by_count": 11567
+    },
+    {
+      "year": 1979,
+      "works_count": 386,
+      "oa_works_count": 291,
+      "cited_by_count": 11390
+    },
+    {
+      "year": 1978,
+      "works_count": 369,
+      "oa_works_count": 282,
+      "cited_by_count": 17821
+    },
+    {
+      "year": 1977,
+      "works_count": 359,
+      "oa_works_count": 281,
+      "cited_by_count": 23384
+    },
+    {
+      "year": 1976,
+      "works_count": 314,
+      "oa_works_count": 229,
+      "cited_by_count": 10603
+    },
+    {
+      "year": 1975,
+      "works_count": 301,
+      "oa_works_count": 238,
+      "cited_by_count": 9279
+    },
+    {
+      "year": 1974,
+      "works_count": 250,
+      "oa_works_count": 191,
+      "cited_by_count": 15887
+    },
+    {
+      "year": 1973,
+      "works_count": 214,
+      "oa_works_count": 179,
+      "cited_by_count": 5693
+    },
+    {
+      "year": 1972,
+      "works_count": 214,
+      "oa_works_count": 172,
+      "cited_by_count": 7246
+    },
+    {
+      "year": 1971,
+      "works_count": 178,
+      "oa_works_count": 142,
+      "cited_by_count": 6937
+    },
+    {
+      "year": 1970,
+      "works_count": 150,
+      "oa_works_count": 111,
+      "cited_by_count": 4983
+    },
+    {
+      "year": 1969,
+      "works_count": 172,
+      "oa_works_count": 139,
+      "cited_by_count": 6825
+    },
+    {
+      "year": 1968,
+      "works_count": 141,
+      "oa_works_count": 114,
+      "cited_by_count": 4831
+    },
+    {
+      "year": 1967,
+      "works_count": 114,
+      "oa_works_count": 91,
+      "cited_by_count": 4177
+    },
+    {
+      "year": 1966,
+      "works_count": 139,
+      "oa_works_count": 120,
+      "cited_by_count": 5253
+    },
+    {
+      "year": 1965,
+      "works_count": 79,
+      "oa_works_count": 70,
+      "cited_by_count": 3538
+    },
+    {
+      "year": 1964,
+      "works_count": 75,
+      "oa_works_count": 58,
+      "cited_by_count": 3294
+    },
+    {
+      "year": 1963,
+      "works_count": 58,
+      "oa_works_count": 54,
+      "cited_by_count": 1592
+    },
+    {
+      "year": 1962,
+      "works_count": 71,
+      "oa_works_count": 55,
+      "cited_by_count": 2986
+    },
+    {
+      "year": 1961,
+      "works_count": 97,
+      "oa_works_count": 72,
+      "cited_by_count": 1615
+    },
+    {
+      "year": 1960,
+      "works_count": 102,
+      "oa_works_count": 82,
+      "cited_by_count": 3462
+    },
+    {
+      "year": 1959,
+      "works_count": 83,
+      "oa_works_count": 59,
+      "cited_by_count": 1215
+    },
+    {
+      "year": 1958,
+      "works_count": 68,
+      "oa_works_count": 51,
+      "cited_by_count": 1788
+    },
+    {
+      "year": 1957,
+      "works_count": 75,
+      "oa_works_count": 55,
+      "cited_by_count": 1174
+    },
+    {
+      "year": 1956,
+      "works_count": 94,
+      "oa_works_count": 70,
+      "cited_by_count": 2616
+    },
+    {
+      "year": 1955,
+      "works_count": 79,
+      "oa_works_count": 58,
+      "cited_by_count": 1003
+    },
+    {
+      "year": 1954,
+      "works_count": 74,
+      "oa_works_count": 59,
+      "cited_by_count": 837
+    },
+    {
+      "year": 1953,
+      "works_count": 82,
+      "oa_works_count": 68,
+      "cited_by_count": 1561
+    },
+    {
+      "year": 1952,
+      "works_count": 81,
+      "oa_works_count": 60,
+      "cited_by_count": 3722
+    },
+    {
+      "year": 1951,
+      "works_count": 83,
+      "oa_works_count": 64,
+      "cited_by_count": 1248
+    },
+    {
+      "year": 1950,
+      "works_count": 88,
+      "oa_works_count": 70,
+      "cited_by_count": 1500
+    },
+    {
+      "year": 1949,
+      "works_count": 82,
+      "oa_works_count": 68,
+      "cited_by_count": 903
+    },
+    {
+      "year": 1948,
+      "works_count": 65,
+      "oa_works_count": 53,
+      "cited_by_count": 1931
+    },
+    {
+      "year": 1947,
+      "works_count": 63,
+      "oa_works_count": 55,
+      "cited_by_count": 1954
+    },
+    {
+      "year": 1946,
+      "works_count": 90,
+      "oa_works_count": 69,
+      "cited_by_count": 823
+    },
+    {
+      "year": 1945,
+      "works_count": 68,
+      "oa_works_count": 56,
+      "cited_by_count": 363
+    },
+    {
+      "year": 1944,
+      "works_count": 69,
+      "oa_works_count": 58,
+      "cited_by_count": 1923
+    },
+    {
+      "year": 1943,
+      "works_count": 55,
+      "oa_works_count": 48,
+      "cited_by_count": 234
+    },
+    {
+      "year": 1942,
+      "works_count": 66,
+      "oa_works_count": 54,
+      "cited_by_count": 194
+    },
+    {
+      "year": 1941,
+      "works_count": 61,
+      "oa_works_count": 55,
+      "cited_by_count": 866
+    },
+    {
+      "year": 1940,
+      "works_count": 81,
+      "oa_works_count": 76,
+      "cited_by_count": 454
+    },
+    {
+      "year": 1939,
+      "works_count": 119,
+      "oa_works_count": 103,
+      "cited_by_count": 904
+    },
+    {
+      "year": 1938,
+      "works_count": 116,
+      "oa_works_count": 100,
+      "cited_by_count": 296
+    },
+    {
+      "year": 1937,
+      "works_count": 119,
+      "oa_works_count": 103,
+      "cited_by_count": 1003
+    },
+    {
+      "year": 1936,
+      "works_count": 139,
+      "oa_works_count": 115,
+      "cited_by_count": 543
+    },
+    {
+      "year": 1935,
+      "works_count": 134,
+      "oa_works_count": 117,
+      "cited_by_count": 992
+    },
+    {
+      "year": 1934,
+      "works_count": 127,
+      "oa_works_count": 109,
+      "cited_by_count": 805
+    },
+    {
+      "year": 1933,
+      "works_count": 133,
+      "oa_works_count": 114,
+      "cited_by_count": 2169
+    },
+    {
+      "year": 1932,
+      "works_count": 146,
+      "oa_works_count": 129,
+      "cited_by_count": 455
+    },
+    {
+      "year": 1931,
+      "works_count": 139,
+      "oa_works_count": 114,
+      "cited_by_count": 1277
+    },
+    {
+      "year": 1930,
+      "works_count": 145,
+      "oa_works_count": 128,
+      "cited_by_count": 832
+    },
+    {
+      "year": 1929,
+      "works_count": 136,
+      "oa_works_count": 116,
+      "cited_by_count": 652
+    },
+    {
+      "year": 1928,
+      "works_count": 143,
+      "oa_works_count": 124,
+      "cited_by_count": 322
+    },
+    {
+      "year": 1927,
+      "works_count": 131,
+      "oa_works_count": 113,
+      "cited_by_count": 141
+    },
+    {
+      "year": 1926,
+      "works_count": 126,
+      "oa_works_count": 115,
+      "cited_by_count": 659
+    },
+    {
+      "year": 1925,
+      "works_count": 146,
+      "oa_works_count": 123,
+      "cited_by_count": 479
+    },
+    {
+      "year": 1924,
+      "works_count": 126,
+      "oa_works_count": 107,
+      "cited_by_count": 2404
+    },
+    {
+      "year": 1923,
+      "works_count": 104,
+      "oa_works_count": 91,
+      "cited_by_count": 271
+    },
+    {
+      "year": 1922,
+      "works_count": 127,
+      "oa_works_count": 103,
+      "cited_by_count": 525
+    },
+    {
+      "year": 1921,
+      "works_count": 122,
+      "oa_works_count": 102,
+      "cited_by_count": 242
+    },
+    {
+      "year": 1920,
+      "works_count": 130,
+      "oa_works_count": 113,
+      "cited_by_count": 543
+    },
+    {
+      "year": 1919,
+      "works_count": 121,
+      "oa_works_count": 102,
+      "cited_by_count": 520
+    },
+    {
+      "year": 1918,
+      "works_count": 126,
+      "oa_works_count": 109,
+      "cited_by_count": 223
+    },
+    {
+      "year": 1917,
+      "works_count": 125,
+      "oa_works_count": 103,
+      "cited_by_count": 818
+    },
+    {
+      "year": 1916,
+      "works_count": 118,
+      "oa_works_count": 101,
+      "cited_by_count": 1489
+    },
+    {
+      "year": 1915,
+      "works_count": 129,
+      "oa_works_count": 115,
+      "cited_by_count": 630
+    },
+    {
+      "year": 1914,
+      "works_count": 104,
+      "oa_works_count": 88,
+      "cited_by_count": 89
+    },
+    {
+      "year": 1913,
+      "works_count": 107,
+      "oa_works_count": 95,
+      "cited_by_count": 895
+    },
+    {
+      "year": 1912,
+      "works_count": 120,
+      "oa_works_count": 108,
+      "cited_by_count": 344
+    },
+    {
+      "year": 1911,
+      "works_count": 123,
+      "oa_works_count": 96,
+      "cited_by_count": 1912
+    },
+    {
+      "year": 1910,
+      "works_count": 137,
+      "oa_works_count": 112,
+      "cited_by_count": 307
+    },
+    {
+      "year": 1909,
+      "works_count": 153,
+      "oa_works_count": 129,
+      "cited_by_count": 438
+    },
+    {
+      "year": 1908,
+      "works_count": 147,
+      "oa_works_count": 118,
+      "cited_by_count": 156
+    },
+    {
+      "year": 1907,
+      "works_count": 120,
+      "oa_works_count": 103,
+      "cited_by_count": 115
+    },
+    {
+      "year": 1906,
+      "works_count": 123,
+      "oa_works_count": 107,
+      "cited_by_count": 93
+    },
+    {
+      "year": 1905,
+      "works_count": 140,
+      "oa_works_count": 117,
+      "cited_by_count": 165
+    },
+    {
+      "year": 1904,
+      "works_count": 144,
+      "oa_works_count": 116,
+      "cited_by_count": 462
+    },
+    {
+      "year": 1903,
+      "works_count": 136,
+      "oa_works_count": 106,
+      "cited_by_count": 189
+    },
+    {
+      "year": 1902,
+      "works_count": 110,
+      "oa_works_count": 93,
+      "cited_by_count": 60
+    },
+    {
+      "year": 1901,
+      "works_count": 142,
+      "oa_works_count": 126,
+      "cited_by_count": 88
+    },
+    {
+      "year": 1900,
+      "works_count": 132,
+      "oa_works_count": 105,
+      "cited_by_count": 92
+    },
+    {
+      "year": 1899,
+      "works_count": 132,
+      "oa_works_count": 105,
+      "cited_by_count": 154
+    },
+    {
+      "year": 1898,
+      "works_count": 145,
+      "oa_works_count": 125,
+      "cited_by_count": 29
+    },
+    {
+      "year": 1897,
+      "works_count": 144,
+      "oa_works_count": 123,
+      "cited_by_count": 426
+    },
+    {
+      "year": 1896,
+      "works_count": 147,
+      "oa_works_count": 108,
+      "cited_by_count": 45
+    },
+    {
+      "year": 1895,
+      "works_count": 148,
+      "oa_works_count": 127,
+      "cited_by_count": 272
+    },
+    {
+      "year": 1894,
+      "works_count": 161,
+      "oa_works_count": 137,
+      "cited_by_count": 46
+    },
+    {
+      "year": 1893,
+      "works_count": 134,
+      "oa_works_count": 117,
+      "cited_by_count": 221
+    },
+    {
+      "year": 1892,
+      "works_count": 161,
+      "oa_works_count": 145,
+      "cited_by_count": 116
+    },
+    {
+      "year": 1891,
+      "works_count": 145,
+      "oa_works_count": 121,
+      "cited_by_count": 256
+    },
+    {
+      "year": 1890,
+      "works_count": 136,
+      "oa_works_count": 115,
+      "cited_by_count": 474
+    },
+    {
+      "year": 1889,
+      "works_count": 138,
+      "oa_works_count": 118,
+      "cited_by_count": 68
+    },
+    {
+      "year": 1888,
+      "works_count": 139,
+      "oa_works_count": 120,
+      "cited_by_count": 118
+    },
+    {
+      "year": 1887,
+      "works_count": 145,
+      "oa_works_count": 114,
+      "cited_by_count": 38
+    },
+    {
+      "year": 1886,
+      "works_count": 142,
+      "oa_works_count": 127,
+      "cited_by_count": 44
+    },
+    {
+      "year": 1885,
+      "works_count": 127,
+      "oa_works_count": 109,
+      "cited_by_count": 23
+    },
+    {
+      "year": 1884,
+      "works_count": 144,
+      "oa_works_count": 126,
+      "cited_by_count": 24
+    },
+    {
+      "year": 1883,
+      "works_count": 147,
+      "oa_works_count": 129,
+      "cited_by_count": 57
+    },
+    {
+      "year": 1882,
+      "works_count": 145,
+      "oa_works_count": 129,
+      "cited_by_count": 40
+    },
+    {
+      "year": 1881,
+      "works_count": 120,
+      "oa_works_count": 106,
+      "cited_by_count": 26
+    },
+    {
+      "year": 1880,
+      "works_count": 174,
+      "oa_works_count": 149,
+      "cited_by_count": 226
+    },
+    {
+      "year": 1879,
+      "works_count": 157,
+      "oa_works_count": 133,
+      "cited_by_count": 64
+    },
+    {
+      "year": 1878,
+      "works_count": 137,
+      "oa_works_count": 117,
+      "cited_by_count": 268
+    },
+    {
+      "year": 1877,
+      "works_count": 137,
+      "oa_works_count": 119,
+      "cited_by_count": 128
+    },
+    {
+      "year": 1876,
+      "works_count": 108,
+      "oa_works_count": 93,
+      "cited_by_count": 55
+    },
+    {
+      "year": 1875,
+      "works_count": 145,
+      "oa_works_count": 118,
+      "cited_by_count": 52
+    },
+    {
+      "year": 1874,
+      "works_count": 152,
+      "oa_works_count": 133,
+      "cited_by_count": 65
+    },
+    {
+      "year": 1873,
+      "works_count": 192,
+      "oa_works_count": 169,
+      "cited_by_count": 115
+    },
+    {
+      "year": 1872,
+      "works_count": 170,
+      "oa_works_count": 143,
+      "cited_by_count": 111
+    },
+    {
+      "year": 1871,
+      "works_count": 129,
+      "oa_works_count": 105,
+      "cited_by_count": 52
+    },
+    {
+      "year": 1870,
+      "works_count": 72,
+      "oa_works_count": 64,
+      "cited_by_count": 31
+    },
+    {
+      "year": 1869,
+      "works_count": 76,
+      "oa_works_count": 24,
+      "cited_by_count": 39
+    },
+    {
+      "year": 1868,
+      "works_count": 71,
+      "oa_works_count": 0,
+      "cited_by_count": 26
+    },
+    {
+      "year": 1867,
+      "works_count": 123,
+      "oa_works_count": 99,
+      "cited_by_count": 117
+    },
+    {
+      "year": 1866,
+      "works_count": 69,
+      "oa_works_count": 24,
+      "cited_by_count": 37
+    },
+    {
+      "year": 1865,
+      "works_count": 66,
+      "oa_works_count": 0,
+      "cited_by_count": 18
+    },
+    {
+      "year": 1864,
+      "works_count": 55,
+      "oa_works_count": 0,
+      "cited_by_count": 21
+    },
+    {
+      "year": 1863,
+      "works_count": 105,
+      "oa_works_count": 64,
+      "cited_by_count": 28
+    },
+    {
+      "year": 1862,
+      "works_count": 140,
+      "oa_works_count": 121,
+      "cited_by_count": 79
+    },
+    {
+      "year": 1861,
+      "works_count": 137,
+      "oa_works_count": 119,
+      "cited_by_count": 128
+    },
+    {
+      "year": 1860,
+      "works_count": 151,
+      "oa_works_count": 132,
+      "cited_by_count": 139
+    },
+    {
+      "year": 1859,
+      "works_count": 144,
+      "oa_works_count": 127,
+      "cited_by_count": 1416
+    },
+    {
+      "year": 1858,
+      "works_count": 150,
+      "oa_works_count": 129,
+      "cited_by_count": 225
+    },
+    {
+      "year": 1857,
+      "works_count": 143,
+      "oa_works_count": 121,
+      "cited_by_count": 280
+    },
+    {
+      "year": 1856,
+      "works_count": 118,
+      "oa_works_count": 105,
+      "cited_by_count": 349
+    },
+    {
+      "year": 1855,
+      "works_count": 105,
+      "oa_works_count": 93,
+      "cited_by_count": 183
+    },
+    {
+      "year": 1854,
+      "works_count": 118,
+      "oa_works_count": 99,
+      "cited_by_count": 33
+    },
+    {
+      "year": 1853,
+      "works_count": 112,
+      "oa_works_count": 94,
+      "cited_by_count": 58
+    },
+    {
+      "year": 1852,
+      "works_count": 119,
+      "oa_works_count": 96,
+      "cited_by_count": 48
+    },
+    {
+      "year": 1851,
+      "works_count": 125,
+      "oa_works_count": 103,
+      "cited_by_count": 235
+    },
+    {
+      "year": 1850,
+      "works_count": 151,
+      "oa_works_count": 114,
+      "cited_by_count": 37
+    },
+    {
+      "year": 1849,
+      "works_count": 124,
+      "oa_works_count": 93,
+      "cited_by_count": 48
+    },
+    {
+      "year": 1848,
+      "works_count": 141,
+      "oa_works_count": 103,
+      "cited_by_count": 37
+    },
+    {
+      "year": 1847,
+      "works_count": 122,
+      "oa_works_count": 95,
+      "cited_by_count": 44
+    },
+    {
+      "year": 1846,
+      "works_count": 90,
+      "oa_works_count": 74,
+      "cited_by_count": 153
+    },
+    {
+      "year": 1845,
+      "works_count": 89,
+      "oa_works_count": 69,
+      "cited_by_count": 46
+    },
+    {
+      "year": 1844,
+      "works_count": 52,
+      "oa_works_count": 40,
+      "cited_by_count": 48
+    },
+    {
+      "year": 1843,
+      "works_count": 43,
+      "oa_works_count": 39,
+      "cited_by_count": 25
+    },
+    {
+      "year": 1842,
+      "works_count": 41,
+      "oa_works_count": 33,
+      "cited_by_count": 32
+    },
+    {
+      "year": 1841,
+      "works_count": 31,
+      "oa_works_count": 25,
+      "cited_by_count": 6
+    },
+    {
+      "year": 1840,
+      "works_count": 45,
+      "oa_works_count": 39,
+      "cited_by_count": 47
+    },
+    {
+      "year": 1839,
+      "works_count": 32,
+      "oa_works_count": 27,
+      "cited_by_count": 20
+    },
+    {
+      "year": 1838,
+      "works_count": 38,
+      "oa_works_count": 30,
+      "cited_by_count": 52
+    },
+    {
+      "year": 1837,
+      "works_count": 58,
+      "oa_works_count": 46,
+      "cited_by_count": 10
+    },
+    {
+      "year": 1836,
+      "works_count": 50,
+      "oa_works_count": 40,
+      "cited_by_count": 26
+    },
+    {
+      "year": 1835,
+      "works_count": 68,
+      "oa_works_count": 49,
+      "cited_by_count": 1
+    },
+    {
+      "year": 1834,
+      "works_count": 46,
+      "oa_works_count": 40,
+      "cited_by_count": 8
+    },
+    {
+      "year": 1833,
+      "works_count": 46,
+      "oa_works_count": 37,
+      "cited_by_count": 3
+    },
+    {
+      "year": 1832,
+      "works_count": 63,
+      "oa_works_count": 53,
+      "cited_by_count": 7
+    },
+    {
+      "year": 1831,
+      "works_count": 39,
+      "oa_works_count": 30,
+      "cited_by_count": 1
+    },
+    {
+      "year": 1830,
+      "works_count": 27,
+      "oa_works_count": 7,
+      "cited_by_count": 8
+    },
+    {
+      "year": 1829,
+      "works_count": 25,
+      "oa_works_count": 4,
+      "cited_by_count": 3
+    },
+    {
+      "year": 1828,
+      "works_count": 17,
+      "oa_works_count": 9,
+      "cited_by_count": 7
+    },
+    {
+      "year": 1827,
+      "works_count": 21,
+      "oa_works_count": 6,
+      "cited_by_count": 8
+    }
+  ],
+  "works_api_url": "https://api.openalex.org/works?filter=primary_location.source.id:S195663288",
+  "updated_date": "2026-07-31T10:01:50",
+  "created_date": "2016-06-24T00:00:00"
+}
