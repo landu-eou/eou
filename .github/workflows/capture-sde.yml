@@ -1,6 +1,8 @@
 name: Capture EVE SDE
 
 on:
+  schedule:
+    - cron: "0 */12 * * *"
   workflow_dispatch:
     inputs:
       force:
@@ -45,7 +47,7 @@ jobs:
           fi
         env:
           PYTHONUNBUFFERED: "1"
-          FORCE_SDE: ${{ inputs.force }}
+          FORCE_SDE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
 
       - name: Commit and push database and metadata
         run: |
