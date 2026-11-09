@@ -194,6 +194,22 @@ def convert(database: Path, destination: Path, stem: str) -> tuple[Path, Path, P
         raise
 
 
+def convert_source(source: Path, destination: Path | None = None) -> tuple[Path, Path, Path]:
+    source = source.expanduser().resolve()
+    if not source.is_file():
+        raise ConversionError(f"No existe el archivo: {source}")
+    stem = output_stem(source)
+    output_dir = destination.expanduser().resolve() if destination else source.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    decompressed = None
+    try:
+        database, decompressed = open_database(source, output_dir)
+        return convert(database, output_dir, stem)
+    finally:
+        if decompressed is not None:
+            decompressed.unlink(missing_ok=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Convierte una base SQLite .db o .db.zst a JSON, YAML y Excel (.xlsx)"
@@ -202,26 +218,14 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, help="Carpeta de salida (por defecto, junto al archivo de entrada)")
     args = parser.parse_args()
 
-    source = args.database.expanduser().resolve()
-    if not source.is_file():
-        print(f"No existe el archivo: {source}", file=sys.stderr)
-        return 2
-    destination = (args.output_dir.expanduser().resolve() if args.output_dir else source.parent)
-    stem = output_stem(source)
-    decompressed = None
     try:
-        destination.mkdir(parents=True, exist_ok=True)
-        database, decompressed = open_database(source, destination)
-        outputs = convert(database, destination, stem)
+        outputs = convert_source(args.database, args.output_dir)
         for output in outputs:
             print(f"Creado: {output}")
         return 0
     except (ConversionError, OSError, sqlite3.Error, ValueError) as exc:
         print(f"Conversión fallida: {exc}", file=sys.stderr)
         return 1
-    finally:
-        if decompressed is not None:
-            decompressed.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

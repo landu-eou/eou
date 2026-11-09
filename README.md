@@ -59,3 +59,5 @@ python scripts/convert_db.py data/sde/mapMoons.db.zst --output-dir salida
 ```
 
 Cada tabla SQLite se exporta por separado; las columnas `document` con JSON se convierten a objetos en JSON/YAML y a texto JSON en Excel. Tablas que excedan el máximo de filas de Excel se reparten en hojas consecutivas.
+
+En Windows, el ejecutable `tools/EVE-SQLite-Converter.exe` permite arrastrar uno o varios `.db`/`.db.zst` encima; crea los tres formatos junto a cada archivo. También se puede abrir sin argumentos para elegir archivos. Para reconstruirlo desde el código, instala `pyinstaller`, `openpyxl` y `zstandard` y ejecuta `python -m PyInstaller --onefile --windowed --name EVE-SQLite-Converter --collect-all openpyxl --collect-all zstandard scripts/convert_db_gui.py`.
