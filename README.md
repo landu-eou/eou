@@ -33,3 +33,7 @@ python scripts/capture_esi_regions.py
 ```
 
 La base contiene `regions(region_id, name, description)` y `region_constellations(region_id, constellation_id)`. La captura se construye en un archivo temporal y reemplaza la base anterior solo después de completar y validar todas las regiones.
+
+## Recuento de páginas del mercado
+
+El workflow manual **Capture market page counts** consulta la primera página de cada región con órdenes `all`, toma el encabezado `X-Pages` y descarta el cuerpo de órdenes. Guarda solo el recuento y la expiración de caché por región en `data/esi/mkt/pages.yml`. Usa como fuente los IDs de `data/esi/uni/regions.db`, limita la concurrencia a seis peticiones y no vuelve a consultar regiones cuya caché ESI siga vigente.
