@@ -1,0 +1,72 @@
+name: Capture ESI market prices
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Fetch the full response even when ESI returns an unchanged ETag
+        required: false
+        default: false
+        type: boolean
+  repository_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: capture-market-prices
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Capture ESI market prices
+        run: |
+          if [ "$FORCE_CAPTURE" = "true" ]; then
+            python scripts/capture_market_prices.py --force
+          else
+            python scripts/capture_market_prices.py
+          fi
+        env:
+          PYTHONUNBUFFERED: "1"
+          FORCE_CAPTURE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+
+      - name: Commit and push the snapshot when it changed
+        run: |
+          git add data/esi/market/marketPrices.db
+          if git diff --cached --quiet; then
+            echo "The market price snapshot is unchanged."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update ESI market prices snapshot"
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git rebase origin/main
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "Failed to push after multiple attempts."
+          exit 1

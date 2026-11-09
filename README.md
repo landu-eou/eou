@@ -43,3 +43,7 @@ El workflow manual **Capture EVE SDE** descarga el último ZIP JSONL oficial y c
 ## Recuento de páginas del mercado
 
 El workflow manual **Capture market page counts** consulta la primera página de cada región con órdenes `all`, toma el encabezado `X-Pages` y descarta el cuerpo de órdenes. Guarda solo el recuento y la expiración de caché por región en `data/esi/mkt/pages.yml`. Usa como fuente los IDs de `data/esi/uni/regions.db`, limita la concurrencia a seis peticiones y no vuelve a consultar regiones cuya caché ESI siga vigente.
+
+## Precios de mercado de ESI
+
+El workflow **Capture ESI market prices** consulta `GET /markets/prices/` cada hora y también se puede ejecutar manualmente o mediante `repository_dispatch`. Guarda el snapshot en `data/esi/market/marketPrices.db`, con una fila por `type_id` y las columnas `adjusted_price` y `average_price`, más los metadatos de captura y caché de ESI. Usa `ETag` para conservar la base sin cambios cuando ESI responde `304 Not Modified`; el formulario manual permite forzar una descarga completa.
