@@ -25,7 +25,6 @@ USER_AGENT = "EVE-Route-Intel-SDE-Snapshot/1.0 (+https://github.com/landu-eou/eo
 REQUEST_TIMEOUT_SECONDS = 120
 GITHUB_FILE_LIMIT_BYTES = 100_000_000
 INSERT_BATCH_SIZE = 2_000
-SPLIT_DATASETS = {"mapMoons.jsonl": 3}
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "data" / "sde"
 PRIORITY_FILES = {
     "mapConstellations.jsonl",
@@ -202,75 +201,10 @@ def compress_database(database_path: Path, compressed_path: Path) -> int:
     return compressed_path.stat().st_size
 
 
-def split_database(database_path: Path, parts: int, staged: Path) -> list[tuple[str, int, int]]:
-    source = sqlite3.connect(database_path)
-    try:
-        total = int(source.execute("SELECT COUNT(*) FROM records").fetchone()[0])
-        if total < parts:
-            raise CaptureError(f"No se puede dividir {database_path.name}: solo tiene {total} registros")
-
-        outputs = []
-        for part_index in range(parts):
-            start = part_index * total // parts + 1
-            end = (part_index + 1) * total // parts
-            filename = f"{database_path.stem}-{part_index + 1}-of-{parts}.db"
-            target = staged / filename
-            connection = sqlite3.connect(target)
-            try:
-                connection.execute("PRAGMA page_size = 4096")
-                connection.execute("PRAGMA journal_mode = OFF")
-                connection.execute("PRAGMA synchronous = OFF")
-                connection.execute("PRAGMA application_id = 1163281747")
-                connection.execute("PRAGMA user_version = 1")
-                connection.execute(
-                    "CREATE TABLE records (ordinal INTEGER PRIMARY KEY, document JSON NOT NULL)"
-                )
-                connection.execute("ATTACH DATABASE ? AS source", (str(database_path),))
-                connection.execute(
-                    "INSERT INTO records(ordinal, document) "
-                    "SELECT ordinal, document FROM source.records WHERE ordinal BETWEEN ? AND ? "
-                    "ORDER BY ordinal",
-                    (start, end),
-                )
-                connection.commit()
-                count = int(connection.execute("SELECT COUNT(*) FROM records").fetchone()[0])
-                if count != end - start + 1:
-                    raise CaptureError(
-                        f"Recuento incorrecto en {filename}: {count} frente a {end - start + 1}"
-                    )
-                result = connection.execute("PRAGMA integrity_check").fetchone()
-                if not result or result[0] != "ok":
-                    raise CaptureError(f"Falló integrity_check para {filename}: {result}")
-                connection.execute("DETACH DATABASE source")
-                connection.execute("VACUUM")
-            except Exception:
-                connection.rollback()
-                raise
-            finally:
-                connection.close()
-
-            size = target.stat().st_size
-            if size >= GITHUB_FILE_LIMIT_BYTES:
-                raise CaptureError(
-                    f"{filename} ocupa {size:,} bytes y supera el límite de 100 MB de GitHub"
-                )
-            outputs.append((filename, count, size))
-            print(f"Preparada {filename}: {count:,} registros, {size:,} bytes", flush=True)
-        return outputs
-    finally:
-        source.close()
-
-
-def convert_member(archive_path: Path, member_name: str, staged: Path) -> list[tuple[str, int, int]]:
+def convert_member(archive_path: Path, member_name: str, staged: Path) -> tuple[str, int, int]:
     filename = database_filename(member_name)
     target = staged / filename
     count = build_one_database(archive_path, member_name, target)
-    parts = SPLIT_DATASETS.get(PurePosixPath(member_name).name)
-    if parts:
-        outputs = split_database(target, parts, staged)
-        target.unlink()
-        return outputs
-
     size = target.stat().st_size
     if size >= GITHUB_FILE_LIMIT_BYTES:
         compressed_name = f"{filename}.zst"
@@ -285,7 +219,7 @@ def convert_member(archive_path: Path, member_name: str, staged: Path) -> list[t
         filename = compressed_name
         size = compressed_size
     print(f"Preparada {filename}: {count:,} registros, {size:,} bytes", flush=True)
-    return [(filename, count, size)]
+    return filename, count, size
 
 
 def write_metadata(path: Path, metadata: dict[str, object]) -> None:
@@ -364,11 +298,7 @@ def main() -> int:
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="sde-priority") as priority_pool, \
                     ThreadPoolExecutor(max_workers=3, thread_name_prefix="sde-secondary") as secondary_pool:
                 priority_future = priority_pool.submit(
-                    lambda: [
-                        output
-                        for name in priority_members
-                        for output in convert_member(archive_path, name, staged)
-                    ]
+                    lambda: [convert_member(archive_path, name, staged) for name in priority_members]
                 )
                 secondary_futures = [
                     secondary_pool.submit(convert_member, archive_path, name, staged)
@@ -378,11 +308,7 @@ def main() -> int:
                 priority_outputs = priority_future.result()
                 publish_group(staged, output_dir, priority_outputs, "prioritario")
 
-                secondary_outputs = [
-                    output
-                    for future in as_completed(secondary_futures)
-                    for output in future.result()
-                ]
+                secondary_outputs = [future.result() for future in as_completed(secondary_futures)]
                 if secondary_outputs:
                     publish_group(staged, output_dir, secondary_outputs, "secundario")
 
