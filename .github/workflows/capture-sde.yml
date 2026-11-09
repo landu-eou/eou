@@ -2,6 +2,12 @@ name: Capture EVE SDE
 
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild the snapshot even when the ETag is unchanged
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -12,7 +18,7 @@ concurrency:
 
 jobs:
   capture:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: write
@@ -31,9 +37,15 @@ jobs:
         run: python -m pip install --disable-pip-version-check zstandard
 
       - name: Download SDE and build one SQLite database per JSONL
-        run: python scripts/capture_sde.py
+        run: |
+          if [ "$FORCE_SDE" = "true" ]; then
+            python scripts/capture_sde.py --force
+          else
+            python scripts/capture_sde.py
+          fi
         env:
           PYTHONUNBUFFERED: "1"
+          FORCE_SDE: ${{ inputs.force }}
 
       - name: Commit and push database and metadata
         run: |

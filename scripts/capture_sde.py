@@ -1,4 +1,4 @@
-"""Download CCP's latest JSONL SDE and create one SQLite database per JSONL."""
+"""Download CCP's SDE JSONL ZIP and create SQLite databases with four workers."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import tempfile
 import urllib.error
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
 
 import zstandard
@@ -25,6 +26,15 @@ REQUEST_TIMEOUT_SECONDS = 120
 GITHUB_FILE_LIMIT_BYTES = 100_000_000
 INSERT_BATCH_SIZE = 2_000
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "data" / "sde"
+PRIORITY_FILES = {
+    "mapConstellations.jsonl",
+    "mapRegions.jsonl",
+    "mapSolarSystems.jsonl",
+    "mapStargates.jsonl",
+    "npcCorporations.jsonl",
+    "npcStations.jsonl",
+    "types.jsonl",
+}
 
 
 class CaptureError(RuntimeError):
@@ -100,13 +110,8 @@ def database_filename(member_name: str) -> str:
 
 
 def import_jsonl(connection: sqlite3.Connection, archive: zipfile.ZipFile, member: zipfile.ZipInfo) -> int:
-    connection.executescript(
-        """
-        CREATE TABLE records (
-            ordinal INTEGER PRIMARY KEY,
-            document JSON NOT NULL
-        );
-        """
+    connection.execute(
+        "CREATE TABLE records (ordinal INTEGER PRIMARY KEY, document JSON NOT NULL)"
     )
     count = 0
     batch: list[tuple[int, str]] = []
@@ -132,30 +137,60 @@ def import_jsonl(connection: sqlite3.Connection, archive: zipfile.ZipFile, membe
     return count
 
 
-def build_one_database(archive: zipfile.ZipFile, member: zipfile.ZipInfo, target: Path) -> int:
-    connection = sqlite3.connect(target)
-    try:
-        connection.execute("PRAGMA page_size = 4096")
-        connection.execute("PRAGMA journal_mode = OFF")
-        connection.execute("PRAGMA synchronous = OFF")
-        connection.execute("PRAGMA temp_store = MEMORY")
-        connection.execute("PRAGMA application_id = 1163281747")
-        connection.execute("PRAGMA user_version = 1")
-        count = import_jsonl(connection, archive, member)
-        connection.commit()
-        result = connection.execute("PRAGMA integrity_check").fetchone()
-        if not result or result[0] != "ok":
-            raise CaptureError(f"Falló integrity_check para {member.filename}: {result}")
-        actual_count = int(connection.execute("SELECT COUNT(*) FROM records").fetchone()[0])
-        if actual_count != count:
-            raise CaptureError(f"Recuento incorrecto en {member.filename}: {actual_count} frente a {count}")
-        connection.execute("VACUUM")
-        return count
-    except Exception:
-        connection.rollback()
-        raise
-    finally:
-        connection.close()
+def build_one_database(archive_path: Path, member_name: str, target: Path) -> int:
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        member = archive.getinfo(member_name)
+        connection = sqlite3.connect(target)
+        try:
+            connection.execute("PRAGMA page_size = 4096")
+            connection.execute("PRAGMA journal_mode = OFF")
+            connection.execute("PRAGMA synchronous = OFF")
+            connection.execute("PRAGMA temp_store = MEMORY")
+            connection.execute("PRAGMA application_id = 1163281747")
+            connection.execute("PRAGMA user_version = 1")
+            count = import_jsonl(connection, archive, member)
+            connection.commit()
+            result = connection.execute("PRAGMA integrity_check").fetchone()
+            if not result or result[0] != "ok":
+                raise CaptureError(f"Falló integrity_check para {member.filename}: {result}")
+            actual_count = int(connection.execute("SELECT COUNT(*) FROM records").fetchone()[0])
+            if actual_count != count:
+                raise CaptureError(f"Recuento incorrecto en {member.filename}: {actual_count} frente a {count}")
+            connection.execute("VACUUM")
+            return count
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+
+def compress_database(database_path: Path, compressed_path: Path) -> int:
+    compressor = zstandard.ZstdCompressor(level=22, write_checksum=True, write_content_size=False)
+    with database_path.open("rb") as source, compressed_path.open("wb") as output:
+        compressor.copy_stream(source, output)
+    return compressed_path.stat().st_size
+
+
+def convert_member(archive_path: Path, member_name: str, staged: Path) -> tuple[str, int, int]:
+    filename = database_filename(member_name)
+    target = staged / filename
+    count = build_one_database(archive_path, member_name, target)
+    size = target.stat().st_size
+    if size >= GITHUB_FILE_LIMIT_BYTES:
+        compressed_name = f"{filename}.zst"
+        compressed_target = staged / compressed_name
+        compressed_size = compress_database(target, compressed_target)
+        if compressed_size >= GITHUB_FILE_LIMIT_BYTES:
+            raise CaptureError(
+                f"{filename} ocupa {size:,} bytes y comprimida {compressed_size:,}; "
+                "ambas superan el límite de 100 MB por archivo de GitHub"
+            )
+        target.unlink()
+        filename = compressed_name
+        size = compressed_size
+    print(f"Preparada {filename}: {count:,} registros, {size:,} bytes", flush=True)
+    return filename, count, size
 
 
 def write_metadata(path: Path, metadata: dict[str, object]) -> None:
@@ -166,16 +201,16 @@ def write_metadata(path: Path, metadata: dict[str, object]) -> None:
         os.fsync(stream.fileno())
 
 
-def compress_database(database_path: Path, compressed_path: Path) -> int:
-    compressor = zstandard.ZstdCompressor(level=22, write_checksum=True, write_content_size=False)
-    with database_path.open("rb") as source, compressed_path.open("wb") as output:
-        compressor.copy_stream(source, output)
-    return compressed_path.stat().st_size
+def publish_group(staged: Path, output_dir: Path, outputs: list[tuple[str, int, int]], label: str) -> None:
+    for filename, _count, _size in outputs:
+        os.replace(staged / filename, output_dir / filename)
+    print(f"Lote {label} publicado: {len(outputs)} bases", flush=True)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Convierte el último SDE JSONL de CCP a bases SQLite")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--force", action="store_true", help="Descarga aunque el ETag coincida con el snapshot local")
     return parser.parse_args()
 
 
@@ -191,10 +226,16 @@ def main() -> int:
             metadata = read_response_metadata(response.headers)
             expected_size = response.headers.get("Content-Length")
 
-        existing_databases = list(output_dir.glob("*.db")) + list(output_dir.glob("*.db.zst"))
-        if existing_etag(metadata_path) == metadata["etag"] and existing_databases:
-            print("El ETag SDE no ha cambiado; se conserva el snapshot existente.", flush=True)
+        current_etag = existing_etag(metadata_path)
+        if current_etag == metadata["etag"] and not args.force:
+            print(
+                f"ETag sin cambios ({metadata['etag']}); data/sde ya tiene esta versión. "
+                "Se omiten descarga y conversión. Usa force para reconstruirla.",
+                flush=True,
+            )
             return 0
+        if args.force and current_etag == metadata["etag"]:
+            print("Forzado activado: se reconstruirá el snapshot aunque el ETag coincida.", flush=True)
 
         with tempfile.TemporaryDirectory(prefix=".sde-build-", dir=output_dir) as temporary_dir:
             temp_dir = Path(temporary_dir)
@@ -204,60 +245,59 @@ def main() -> int:
                 raise CaptureError(f"HEAD/GET difieren: {expected_size} frente a {downloaded} bytes")
             print(f"ZIP descargado: {downloaded:,} bytes", flush=True)
 
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                members = sorted(
+                    (item.filename for item in archive.infolist()
+                     if not item.is_dir() and item.filename.lower().endswith(".jsonl")),
+                    key=str.casefold,
+                )
+            if not members:
+                raise CaptureError("El ZIP no contiene archivos JSONL")
+            member_by_basename = {PurePosixPath(name).name: name for name in members}
+            if len(member_by_basename) != len(members):
+                raise CaptureError("Hay nombres JSONL duplicados en distintas rutas del ZIP")
+            missing_priority = PRIORITY_FILES - set(member_by_basename)
+            if missing_priority:
+                raise CaptureError(f"Faltan archivos prioritarios en el ZIP: {', '.join(sorted(missing_priority))}")
+
+            priority_members = [member_by_basename[name] for name in sorted(PRIORITY_FILES)]
+            secondary_members = [name for name in members if PurePosixPath(name).name not in PRIORITY_FILES]
             staged = temp_dir / "databases"
             staged.mkdir()
-            try:
-                with zipfile.ZipFile(archive_path, "r") as archive:
-                    members = sorted(
-                        (item for item in archive.infolist()
-                         if not item.is_dir() and item.filename.lower().endswith(".jsonl")),
-                        key=lambda item: item.filename,
-                    )
-                    if not members:
-                        raise CaptureError("El ZIP no contiene archivos JSONL")
-                    output_names: set[str] = set()
-                    total_records = 0
-                    for member in members:
-                        filename = database_filename(member.filename)
-                        target = staged / filename
-                        count = build_one_database(archive, member, target)
-                        size = target.stat().st_size
-                        if size >= GITHUB_FILE_LIMIT_BYTES:
-                            compressed_name = f"{filename}.zst"
-                            compressed_target = staged / compressed_name
-                            compressed_size = compress_database(target, compressed_target)
-                            if compressed_size >= GITHUB_FILE_LIMIT_BYTES:
-                                raise CaptureError(
-                                    f"{filename} ocupa {size:,} bytes y comprimida {compressed_size:,}; "
-                                    "ambas superan el límite de 100 MB por archivo de GitHub"
-                                )
-                            target.unlink()
-                            filename = compressed_name
-                            size = compressed_size
-                        if filename in output_names:
-                            raise CaptureError(f"Dos JSONL generan el mismo nombre DB: {filename}")
-                        output_names.add(filename)
-                        total_records += count
-                        print(f"{filename}: {count:,} registros, {size:,} bytes", flush=True)
 
-                if total_records == 0:
-                    raise CaptureError("Los archivos JSONL no contienen registros")
+            # One dedicated priority worker plus three workers for the remaining datasets.
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="sde-priority") as priority_pool, \
+                    ThreadPoolExecutor(max_workers=3, thread_name_prefix="sde-secondary") as secondary_pool:
+                priority_future = priority_pool.submit(
+                    lambda: [convert_member(archive_path, name, staged) for name in priority_members]
+                )
+                secondary_futures = [
+                    secondary_pool.submit(convert_member, archive_path, name, staged)
+                    for name in secondary_members
+                ]
 
-                metadata_temp = temp_dir / "metadata.json"
-                write_metadata(metadata_temp, metadata)
+                priority_outputs = priority_future.result()
+                publish_group(staged, output_dir, priority_outputs, "prioritario")
 
-                # Preserve the old snapshot unless every database has been built and checked.
-                old_databases = list(output_dir.glob("*.db")) + list(output_dir.glob("*.db.zst"))
-                for old_db in old_databases:
-                    if old_db.name not in output_names:
-                        old_db.unlink()
-                for filename in sorted(output_names):
-                    os.replace(staged / filename, output_dir / filename)
-                os.replace(metadata_temp, metadata_path)
-            except (zipfile.BadZipFile, RuntimeError, OSError) as exc:
-                if isinstance(exc, CaptureError):
-                    raise
-                raise CaptureError(f"No se pudo procesar el ZIP SDE: {exc}") from exc
+                secondary_outputs = [future.result() for future in as_completed(secondary_futures)]
+                if secondary_outputs:
+                    publish_group(staged, output_dir, secondary_outputs, "secundario")
+
+            all_outputs = priority_outputs + secondary_outputs
+            output_names = {filename for filename, _count, _size in all_outputs}
+            if len(output_names) != len(all_outputs):
+                raise CaptureError("Dos JSONL generan el mismo nombre de base de datos")
+            if sum(count for _filename, count, _size in all_outputs) == 0:
+                raise CaptureError("Los archivos JSONL no contienen registros")
+
+            # Remove every stale file at data/sde root, keeping metadata until the snapshot is complete.
+            for existing in output_dir.iterdir():
+                if existing.is_file() and existing.name != metadata_path.name and existing.name not in output_names:
+                    existing.unlink()
+
+            metadata_temp = temp_dir / "metadata.json"
+            write_metadata(metadata_temp, metadata)
+            os.replace(metadata_temp, metadata_path)
     except (CaptureError, OSError, sqlite3.Error, zstandard.ZstdError, zipfile.BadZipFile) as exc:
         print(f"Captura SDE fallida: {exc}", file=sys.stderr)
         return 1
