@@ -1,0 +1,6 @@
+cloudflare.env
+.env
+.env.*
+!.env.example
+.wrangler/
+*.tmp

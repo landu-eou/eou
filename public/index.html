@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#091017">
+  <meta name="description" content="Planifica rutas de EVE Online con actividad de killmails, alertas por sistema y puerta, e histórico de seis meses.">
+  <title>EVE Route Intel · Rutas con contexto de riesgo</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="backdrop" aria-hidden="true"></div>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="EVE Route Intel, inicio"><span class="brand-mark">◈</span><span><strong>EVE</strong> ROUTE INTEL</span></a>
+    <div class="header-right"><span class="eyebrow">NEW EDEN / ROUTE OPERATIONS</span><span id="feed-status" class="feed-status">Comprobando feed…</span></div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <div class="section-kicker"><span class="pulse"></span> INTELIGENCIA DE RUTA EN VIVO</div>
+        <h1>Antes de saltar,<br><em>mira la ruta.</em></h1>
+        <p>Consulta la actividad publicada en cada sistema y puerta de tu trayecto. Compara rutas y evita las zonas marcadas en rojo.</p>
+      </div>
+      <div class="hero-stat" aria-label="Información del servicio"><span>FUENTE DE DATOS</span><strong>R2Z2</strong><small>Killmails publicados por zKillboard</small><div class="hero-stat-line"></div><span>ACTUALIZACIÓN</span><strong>~1 MIN</strong><small>La publicación de cada killmail puede tardar más.</small></div>
+    </section>
+
+    <section class="planner" aria-labelledby="planner-title">
+      <div class="panel-heading"><div><span class="section-kicker">01 / PLANIFICADOR</span><h2 id="planner-title">Traza tu viaje</h2></div><span class="subtle">Rutas por puertas estelares · ESI</span></div>
+      <form id="route-form" class="route-form">
+        <label class="field"><span>ORIGEN</span><input id="from" name="from" type="text" value="Jita" autocomplete="off" list="system-options" required placeholder="Sistema de origen"></label>
+        <span class="route-arrow" aria-hidden="true">→</span>
+        <label class="field"><span>DESTINO</span><input id="to" name="to" type="text" value="Amarr" autocomplete="off" list="system-options" required placeholder="Sistema de destino"></label>
+        <label class="field ship-field"><span>TU NAVE</span><select id="ship" name="ship"><option value="freighter">Carguero</option><option value="industrial">Industrial</option><option value="other">Otra nave</option></select></label>
+        <button class="primary-button" type="submit"><span>Analizar ruta</span><span aria-hidden="true">↗</span></button>
+        <datalist id="system-options"></datalist>
+      </form>
+      <p id="form-message" class="form-message" role="status"></p>
+    </section>
+
+    <section id="results" class="results hidden" aria-live="polite">
+      <div class="panel-heading"><div><span class="section-kicker">02 / ANÁLISIS</span><h2 id="route-title">Jita → Amarr</h2></div><div id="data-age" class="data-age"></div></div>
+      <div class="results-grid">
+        <div class="route-panel">
+          <div id="route-tabs" class="route-tabs" role="tablist" aria-label="Alternativas de ruta"></div>
+          <div id="route-summary" class="route-summary"></div>
+          <div class="route-table-head"><span>SISTEMA / PUERTA DE SALIDA</span><span>ACTIVIDAD 2 H</span><span>RIESGO</span></div>
+          <ol id="route-list" class="route-list"></ol>
+        </div>
+        <aside class="detail-panel">
+          <div class="detail-heading"><span class="section-kicker">03 / DETALLE</span><h3 id="detail-name">Selecciona un sistema</h3><p id="detail-subtitle">Pulsa cualquier salto para ver su actividad.</p></div>
+          <div id="detail-metrics" class="detail-metrics"></div>
+          <div class="history-head"><h4>Histórico de actividad</h4><label>PERIODO <select id="history-days"><option value="7">7 días</option><option value="14">14 días</option><option value="30" selected>30 días</option><option value="60">2 meses</option><option value="90">3 meses</option><option value="180">6 meses</option></select></label></div>
+          <div id="history-scope" class="history-scope"></div>
+          <div id="history-chart" class="history-chart" role="img" aria-label="Actividad diaria"></div>
+          <p id="history-note" class="history-note"></p>
+        </aside>
+      </div>
+    </section>
+
+    <section class="method"><div><span class="section-kicker">CÓMO LEER EL SEMÁFORO</span><h2>Una señal, con contexto.</h2></div><div class="method-grid"><article><span class="lamp green"></span><strong>Verde</strong><p>Sin señales recientes suficientes para elevar el riesgo. No garantiza un trayecto seguro.</p></article><article><span class="lamp yellow"></span><strong>Amarillo</strong><p>Actividad reciente o espacio de seguridad baja. Revisa la puerta y la nave.</p></article><article><span class="lamp red"></span><strong>Rojo</strong><p>Actividad alta o indicios de ganking. Considera otra ruta o espera.</p></article><article><span class="lamp unknown"></span><strong>Sin datos</strong><p>El recolector está retrasado. La web no presenta verde mientras falten datos frescos.</p></article></div></section>
+  </main>
+
+  <footer><span>◈ EVE ROUTE INTEL</span><p>Datos de <a href="https://zkillboard.com/api/docs/" target="_blank" rel="noopener noreferrer">zKillboard R2Z2</a>, rutas ESI y mapa estático de CCP. Los killmails publicados pueden llegar tarde o faltar. EVE Online es marca de CCP hf.</p></footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>

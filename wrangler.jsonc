@@ -1,0 +1,9 @@
+{
+  "name": "eve-route-intel",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-04",
+  "preview_urls": false,
+  "observability": { "enabled": true, "logs": { "enabled": true } },
+  "d1_databases": [{ "binding": "DB", "database_name": "eve-route-intel", "database_id": "f4cff690-7063-43d8-bcff-4904adc0e673" }],
+  "triggers": { "crons": ["* * * * *"] }
+}
