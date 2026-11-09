@@ -4,3 +4,4 @@ cloudflare.env
 !.env.example
 .wrangler/
 *.tmp
+/data/sde/.sde-build-*/

@@ -1,0 +1,57 @@
+name: Capture EVE SDE
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: capture-sde
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Download SDE and build one SQLite database per JSONL
+        run: python scripts/capture_sde.py
+        env:
+          PYTHONUNBUFFERED: "1"
+
+      - name: Commit and push database and metadata
+        run: |
+          git add -A data/sde
+          if git diff --cached --quiet; then
+            echo "The SDE snapshot is unchanged."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update SDE SQLite snapshot"
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git rebase origin/main
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "Failed to push after multiple attempts."
+          exit 1
