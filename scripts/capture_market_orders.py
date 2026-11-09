@@ -27,7 +27,7 @@ from typing import Any
 
 ESI = "https://esi.evetech.net/latest"
 USER_AGENT = "EVE-Route-Intel/0.3 (+https://github.com/landu-eou/eou)"
-COMPATIBILITY_DATE = "2026-11-09"
+COMPATIBILITY_DATE = "2026-11-08"
 REQUEST_TIMEOUT_SECONDS = 60
 MAX_RETRIES = 5
 MAX_WORKERS = 16

@@ -19,7 +19,7 @@ from typing import Any
 
 ESI = "https://esi.evetech.net/latest"
 USER_AGENT = "EVE-Route-Intel/0.3 (+https://github.com/landu-eou/eou)"
-COMPATIBILITY_DATE = "2026-11-09"
+COMPATIBILITY_DATE = "2026-11-08"
 MAX_RETRIES = 5
 WORKERS = 6
 ROOT = Path(__file__).resolve().parents[1]
