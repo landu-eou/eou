@@ -47,3 +47,15 @@ El workflow manual **Capture market page counts** consulta la primera página de
 ## Precios de mercado de ESI
 
 El workflow **Capture ESI market prices** consulta `GET /markets/prices/` cada hora y también se puede ejecutar manualmente o mediante `repository_dispatch`. Guarda el snapshot en `data/esi/market/marketPrices.db`, con una fila por `type_id` y las columnas `adjusted_price` y `average_price`, más los metadatos de captura y caché de ESI. Usa `ETag` para conservar la base sin cambios cuando ESI responde `304 Not Modified`; el formulario manual permite forzar una descarga completa.
+
+## Conversión local de SQLite
+
+`scripts/convert_db.py` convierte localmente cualquier base `.db` o `.db.zst` del repositorio a `.json`, `.yml` y `.xlsx`, guardando los archivos junto a la base de entrada. Requiere Python, `openpyxl` y, para `.db.zst`, `zstandard`:
+
+```powershell
+python -m pip install openpyxl zstandard
+python scripts/convert_db.py data/esi/market/marketPrices.db
+python scripts/convert_db.py data/sde/mapMoons.db.zst --output-dir salida
+```
+
+Cada tabla SQLite se exporta por separado; las columnas `document` con JSON se convierten a objetos en JSON/YAML y a texto JSON en Excel. Tablas que excedan el máximo de filas de Excel se reparten en hojas consecutivas.
