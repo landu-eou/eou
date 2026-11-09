@@ -27,6 +27,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install Zstandard support
+        run: python -m pip install --disable-pip-version-check zstandard
+
       - name: Download SDE and build one SQLite database per JSONL
         run: python scripts/capture_sde.py
         env:

@@ -36,9 +36,9 @@ La base contiene `regions(region_id, name, description)` y `region_constellation
 
 ## Snapshot completo del SDE
 
-El workflow manual **Capture EVE SDE** descarga el último ZIP JSONL oficial y crea una SQLite en `data/sde/` por cada archivo `.jsonl` que contiene, con el mismo nombre base (por ejemplo, `types.jsonl` genera `types.db`). Cada base tiene `records(ordinal, document)`: `document` guarda el JSON original como texto, conservando su estructura, campos y tipos; `ordinal` conserva el orden. La importación crea las bases en una carpeta temporal, valida su integridad y tamaño, y solo entonces reemplaza el snapshot y actualiza `metadata.json`.
+El workflow manual **Capture EVE SDE** descarga el último ZIP JSONL oficial y crea una SQLite en `data/sde/` por cada archivo `.jsonl` que contiene, con el mismo nombre base (por ejemplo, `types.jsonl` genera `types.db`). Cada base tiene `records(ordinal, document)`: `document` guarda el JSON original como texto, conservando su estructura, campos y tipos; `ordinal` conserva el orden. Si una SQLite supera 100 MB, se guarda comprimida con Zstandard como `.db.zst` (por ejemplo, `mapMoons.db.zst`); se puede abrir tras descomprimirla con `zstd -d mapMoons.db.zst -o mapMoons.db`. La importación crea las bases en una carpeta temporal, valida su integridad y tamaño, y solo entonces reemplaza el snapshot y actualiza `metadata.json`.
 
-`metadata.json` conserva `last-modified` en ISO 8601 UTC, `max-age` como entero y `etag` incluyendo sus comillas. Si el ETag no cambió, el workflow conserva el snapshot existente. Cada base se comprueba contra el límite de 100 MB por archivo de GitHub antes de publicarla.
+`metadata.json` conserva `last-modified` en ISO 8601 UTC, `max-age` como entero y `etag` incluyendo sus comillas. Si el ETag no cambió, el workflow conserva el snapshot existente. Cada archivo DB se comprueba contra el límite de 100 MB de GitHub antes de publicarlo; si una base comprimida también lo supera, la captura falla sin actualizar los metadatos.
 
 ## Recuento de páginas del mercado
 

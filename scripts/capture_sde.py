@@ -16,6 +16,8 @@ import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
 
+import zstandard
+
 
 LATEST_URL = "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip"
 USER_AGENT = "EVE-Route-Intel-SDE-Snapshot/1.0 (+https://github.com/landu-eou/eou)"
@@ -164,6 +166,13 @@ def write_metadata(path: Path, metadata: dict[str, object]) -> None:
         os.fsync(stream.fileno())
 
 
+def compress_database(database_path: Path, compressed_path: Path) -> int:
+    compressor = zstandard.ZstdCompressor(level=22, write_checksum=True, write_content_size=False)
+    with database_path.open("rb") as source, compressed_path.open("wb") as output:
+        compressor.copy_stream(source, output)
+    return compressed_path.stat().st_size
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Convierte el último SDE JSONL de CCP a bases SQLite")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
@@ -182,7 +191,7 @@ def main() -> int:
             metadata = read_response_metadata(response.headers)
             expected_size = response.headers.get("Content-Length")
 
-        existing_databases = list(output_dir.glob("*.db"))
+        existing_databases = list(output_dir.glob("*.db")) + list(output_dir.glob("*.db.zst"))
         if existing_etag(metadata_path) == metadata["etag"] and existing_databases:
             print("El ETag SDE no ha cambiado; se conserva el snapshot existente.", flush=True)
             return 0
@@ -210,16 +219,24 @@ def main() -> int:
                     total_records = 0
                     for member in members:
                         filename = database_filename(member.filename)
-                        if filename in output_names:
-                            raise CaptureError(f"Dos JSONL generan el mismo nombre DB: {filename}")
-                        output_names.add(filename)
                         target = staged / filename
                         count = build_one_database(archive, member, target)
                         size = target.stat().st_size
                         if size >= GITHUB_FILE_LIMIT_BYTES:
-                            raise CaptureError(
-                                f"{filename} ocupa {size:,} bytes y supera el límite de 100 MB por archivo de GitHub"
-                            )
+                            compressed_name = f"{filename}.zst"
+                            compressed_target = staged / compressed_name
+                            compressed_size = compress_database(target, compressed_target)
+                            if compressed_size >= GITHUB_FILE_LIMIT_BYTES:
+                                raise CaptureError(
+                                    f"{filename} ocupa {size:,} bytes y comprimida {compressed_size:,}; "
+                                    "ambas superan el límite de 100 MB por archivo de GitHub"
+                                )
+                            target.unlink()
+                            filename = compressed_name
+                            size = compressed_size
+                        if filename in output_names:
+                            raise CaptureError(f"Dos JSONL generan el mismo nombre DB: {filename}")
+                        output_names.add(filename)
                         total_records += count
                         print(f"{filename}: {count:,} registros, {size:,} bytes", flush=True)
 
@@ -230,7 +247,8 @@ def main() -> int:
                 write_metadata(metadata_temp, metadata)
 
                 # Preserve the old snapshot unless every database has been built and checked.
-                for old_db in output_dir.glob("*.db"):
+                old_databases = list(output_dir.glob("*.db")) + list(output_dir.glob("*.db.zst"))
+                for old_db in old_databases:
                     if old_db.name not in output_names:
                         old_db.unlink()
                 for filename in sorted(output_names):
@@ -240,7 +258,7 @@ def main() -> int:
                 if isinstance(exc, CaptureError):
                     raise
                 raise CaptureError(f"No se pudo procesar el ZIP SDE: {exc}") from exc
-    except (CaptureError, OSError, sqlite3.Error, zipfile.BadZipFile) as exc:
+    except (CaptureError, OSError, sqlite3.Error, zstandard.ZstdError, zipfile.BadZipFile) as exc:
         print(f"Captura SDE fallida: {exc}", file=sys.stderr)
         return 1
 
