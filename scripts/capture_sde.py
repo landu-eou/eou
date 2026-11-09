@@ -35,7 +35,6 @@ PRIORITY_FILES = {
     "npcStations.jsonl",
     "types.jsonl",
 }
-ENGLISH_ONLY_FILES = {"mapPlanets.jsonl", "missions.jsonl"}
 LANGUAGE_CODES = {"de", "en", "es", "fr", "ja", "ko", "ru", "zh"}
 
 
@@ -136,7 +135,6 @@ def import_jsonl(
     connection: sqlite3.Connection,
     archive: zipfile.ZipFile,
     member: zipfile.ZipInfo,
-    english_only: bool,
 ) -> int:
     connection.execute(
         "CREATE TABLE records (ordinal INTEGER PRIMARY KEY, document JSON NOT NULL)"
@@ -153,10 +151,9 @@ def import_jsonl(
                 parsed = json.loads(document)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise CaptureError(f"JSONL inválido en {member.filename}, línea {line_number}: {exc}") from exc
-            if english_only:
-                parsed, changed = keep_english_localizations(parsed)
-                if changed:
-                    document = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+            parsed, changed = keep_english_localizations(parsed)
+            if changed:
+                document = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
             count += 1
             batch.append((count, document))
             if len(batch) >= INSERT_BATCH_SIZE:
@@ -169,7 +166,7 @@ def import_jsonl(
     return count
 
 
-def build_one_database(archive_path: Path, member_name: str, target: Path, english_only: bool) -> int:
+def build_one_database(archive_path: Path, member_name: str, target: Path) -> int:
     with zipfile.ZipFile(archive_path, "r") as archive:
         member = archive.getinfo(member_name)
         connection = sqlite3.connect(target)
@@ -180,7 +177,7 @@ def build_one_database(archive_path: Path, member_name: str, target: Path, engli
             connection.execute("PRAGMA temp_store = MEMORY")
             connection.execute("PRAGMA application_id = 1163281747")
             connection.execute("PRAGMA user_version = 1")
-            count = import_jsonl(connection, archive, member, english_only)
+            count = import_jsonl(connection, archive, member)
             connection.commit()
             result = connection.execute("PRAGMA integrity_check").fetchone()
             if not result or result[0] != "ok":
@@ -207,10 +204,7 @@ def compress_database(database_path: Path, compressed_path: Path) -> int:
 def convert_member(archive_path: Path, member_name: str, staged: Path) -> tuple[str, int, int]:
     filename = database_filename(member_name)
     target = staged / filename
-    english_only = PurePosixPath(member_name).name in ENGLISH_ONLY_FILES
-    if english_only:
-        print(f"{PurePosixPath(member_name).name}: se conservará únicamente inglés.", flush=True)
-    count = build_one_database(archive_path, member_name, target, english_only)
+    count = build_one_database(archive_path, member_name, target)
     size = target.stat().st_size
     if size >= GITHUB_FILE_LIMIT_BYTES:
         compressed_name = f"{filename}.zst"
