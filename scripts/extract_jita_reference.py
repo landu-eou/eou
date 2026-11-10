@@ -33,6 +33,8 @@ BUY_JSONL = "jita4-4_buy_orders.jsonl"
 SELL_JSONL = "jita4-4_sell_orders.jsonl"
 PRICES_YAML = "jita4-4_market_prices.yml"
 REFERENCE_QUANTUM = Decimal("0.0001")
+EXECUTION_QUANTUM = Decimal("0.01")
+EXECUTION_PERCENTAGES = (1, 5, 10, 20, 30)
 
 
 def _valid_side_orders(orders: Iterable[dict[str, Any]], buy_side: bool) -> tuple[int, list[dict[str, Any]]]:
@@ -135,6 +137,50 @@ def calculateSellReferencePrice(orders: Iterable[dict[str, Any]]) -> dict[str, A
     return _calculate_reference(orders, buy_side=False)
 
 
+def calculate_execution_levels(
+    orders: Iterable[dict[str, Any]], buy_side: bool
+) -> dict[int, dict[str, int | Decimal | None]] | None:
+    """Simulate gross depth fills over valid orders, without outlier filtering."""
+    _total_orders, valid = _valid_side_orders(orders, buy_side)
+    if not valid:
+        return None
+
+    total_volume = sum(order["volume_remain"] for order in valid)
+    targets = {percentage: total_volume * percentage // 100 for percentage in EXECUTION_PERCENTAGES}
+    sorted_orders = sorted(
+        valid,
+        key=lambda order: (Decimal(str(order["price"])), order["order_id"]),
+        reverse=buy_side,
+    )
+
+    results: dict[int, dict[str, int | Decimal | None]] = {}
+    positive_targets = sorted((target, percentage) for percentage, target in targets.items() if target > 0)
+    for percentage, target in targets.items():
+        if target == 0:
+            results[percentage] = {"volume": 0, "price": None}
+
+    order_index = 0
+    order_remaining = sorted_orders[0]["volume_remain"]
+    executed_volume = 0
+    total_isk = Decimal(0)
+    with localcontext() as context:
+        context.prec = 50
+        for target, percentage in positive_targets:
+            while executed_volume < target:
+                if order_remaining == 0:
+                    order_index += 1
+                    order_remaining = sorted_orders[order_index]["volume_remain"]
+                order = sorted_orders[order_index]
+                quantity = min(order_remaining, target - executed_volume)
+                total_isk += Decimal(str(order["price"])) * quantity
+                executed_volume += quantity
+                order_remaining -= quantity
+            average_price = (total_isk / target).quantize(EXECUTION_QUANTUM, rounding=ROUND_HALF_UP)
+            results[percentage] = {"volume": target, "price": average_price}
+
+    return {percentage: results[percentage] for percentage in EXECUTION_PERCENTAGES}
+
+
 def _collect_once(workers: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     first_orders, first_headers = fetch_page(REGION_ID, 1)
     page_count = int(first_headers["parsed-x-pages"])
@@ -231,6 +277,8 @@ def build_prices(buy_orders: list[dict[str, Any]], sell_orders: list[dict[str, A
             "type_id": type_id,
             "buy": buy_result["final_mean"],
             "sell": sell_result["final_mean"],
+            "buy_execution": calculate_execution_levels(buy_by_type.get(type_id, []), buy_side=True),
+            "sell_execution": calculate_execution_levels(sell_by_type.get(type_id, []), buy_side=False),
         })
     return rows
 
@@ -244,6 +292,10 @@ def _yaml_decimal(value: Decimal | None) -> str:
     return format(rounded, ".4f")
 
 
+def _yaml_execution_price(value: Decimal | None) -> str:
+    return "null" if value is None else format(value, ".2f")
+
+
 def write_price_yaml(price_rows: list[dict[str, Any]], path: Path) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     try:
@@ -252,12 +304,39 @@ def write_price_yaml(price_rows: list[dict[str, Any]], path: Path) -> None:
                 stream.write(f"- type_id: {row['type_id']}\n")
                 stream.write(f"  buy: {_yaml_decimal(row['buy'])}\n")
                 stream.write(f"  sell: {_yaml_decimal(row['sell'])}\n")
+                for field in ("buy_execution", "sell_execution"):
+                    levels = row[field]
+                    if levels is None:
+                        stream.write(f"  {field}: null\n")
+                        continue
+                    stream.write(f"  {field}:\n")
+                    for percentage in EXECUTION_PERCENTAGES:
+                        level = levels[percentage]
+                        stream.write(f"    {percentage}:\n")
+                        stream.write(f"      volume: {level['volume']}\n")
+                        stream.write(f"      price: {_yaml_execution_price(level['price'])}\n")
             if not price_rows:
                 stream.write("[]\n")
         temporary.replace(path)
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def load_order_jsonl(path: Path) -> list[dict[str, Any]]:
+    orders = []
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, start=1):
+                if not line.strip():
+                    continue
+                order = json.loads(line)
+                if not isinstance(order, dict):
+                    raise CaptureError(f"{path}, línea {line_number}: se esperaba un objeto JSON")
+                orders.append(order)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CaptureError(f"No se pudo leer {path}: {exc}") from exc
+    return orders
 
 
 def write_outputs(
@@ -295,13 +374,26 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Captura órdenes de Jita 4-4 y calcula precios de referencia")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help=f"Páginas en paralelo (1-{MAX_WORKERS})")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--from-jsonl", action="store_true", help="Recalcula el YAML usando los JSONL existentes, sin consultar ESI")
     args = parser.parse_args()
+    output_dir = args.output_dir.expanduser().resolve()
+    if args.from_jsonl:
+        try:
+            buy_orders = load_order_jsonl(output_dir / BUY_JSONL)
+            sell_orders = load_order_jsonl(output_dir / SELL_JSONL)
+            price_rows = build_prices(buy_orders, sell_orders)
+            write_price_yaml(price_rows, output_dir / PRICES_YAML)
+            print(f"Recalculado {PRICES_YAML} desde los JSONL existentes; no se consultó ESI.", flush=True)
+            return 0
+        except (CaptureError, OSError, ValueError) as exc:
+            print(f"Recalculo fallido: {exc}", file=sys.stderr)
+            return 1
     if not 1 <= args.workers <= MAX_WORKERS:
         print(f"--workers debe estar entre 1 y {MAX_WORKERS}", file=sys.stderr)
         return 2
     try:
         buy_orders, sell_orders, page_count = collect_station_orders(args.workers)
-        outputs = write_outputs(buy_orders, sell_orders, args.output_dir.expanduser().resolve())
+        outputs = write_outputs(buy_orders, sell_orders, output_dir)
     except (CaptureError, OSError, sqlite3.Error, ValueError) as exc:
         print(f"Extracción fallida: {exc}", file=sys.stderr)
         return 1
