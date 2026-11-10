@@ -1,0 +1,56 @@
+name: Extract Jita 4-4 market reference prices
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extract-jita-reference
+  cancel-in-progress: false
+
+jobs:
+  extract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Capture Jita 4-4 orders and calculate references
+        run: python scripts/extract_jita_reference.py --workers 6
+        env:
+          PYTHONUNBUFFERED: "1"
+
+      - name: Commit and push YAML and source order JSONL files
+        run: |
+          git add data/test/jita4-4_market_prices.yml data/test/jita4-4_buy_orders.jsonl data/test/jita4-4_sell_orders.jsonl
+          if git diff --cached --quiet; then
+            echo "The Jita 4-4 reference snapshot is unchanged."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update Jita 4-4 market reference snapshot"
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git rebase origin/main
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "Failed to push after multiple attempts."
+          exit 1

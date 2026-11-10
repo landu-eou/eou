@@ -48,6 +48,12 @@ El workflow manual **Capture market page counts** consulta la primera página de
 
 El workflow **Capture ESI market prices** consulta `GET /markets/prices/` cada hora y también se puede ejecutar manualmente o mediante `repository_dispatch`. Guarda el snapshot en `data/esi/market/marketPrices.db`, con una fila por `type_id` y las columnas `adjusted_price` y `average_price`, más los metadatos de captura y caché de ESI. Usa `ETag` para conservar la base sin cambios cuando ESI responde `304 Not Modified`; el formulario manual permite forzar una descarga completa.
 
+## Referencias de mercado de Jita 4-4
+
+El workflow manual **Extract Jita 4-4 market reference prices** captura las páginas regionales de The Forge y conserva en `data/test/` las órdenes originales de la estación `60003760`: `jita4-4_buy_orders.jsonl` y `jita4-4_sell_orders.jsonl`. También genera `jita4-4_market_prices.yml`, con `type_id`, `buy` y `sell`. Los precios son medias aritméticas sin ponderar; BUY elimina solo outliers inferiores y SELL solo superiores según la regla de Tukey descrita en el algoritmo. No se modifican las órdenes fuente.
+
+Para calcular o generar los archivos localmente, ejecuta `python scripts/extract_jita_reference.py --workers 6`. Las funciones reutilizables `calculateBuyReferencePrice` y `calculateSellReferencePrice` están en ese script; sus pruebas unitarias están en `tests/test_jita_reference.py`.
+
 ## Conversión local de SQLite
 
 `scripts/convert_db.py` convierte localmente cualquier base `.db` o `.db.zst` del repositorio a `.json`, `.yml` y `.xlsx`, guardando los archivos junto a la base de entrada. Requiere Python, `openpyxl` y, para `.db.zst`, `zstandard`:
