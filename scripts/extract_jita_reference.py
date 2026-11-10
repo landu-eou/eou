@@ -34,7 +34,10 @@ SELL_JSONL = "jita4-4_sell_orders.jsonl"
 PRICES_YAML = "jita4-4_market_prices.yml"
 REFERENCE_QUANTUM = Decimal("0.01")
 EXECUTION_QUANTUM = Decimal("0.01")
+METRIC_QUANTUM_2 = Decimal("0.01")
+METRIC_QUANTUM_4 = Decimal("0.0001")
 EXECUTION_PERCENTAGES = (1, 5, 10, 20, 30, 100)
+DEPTH_PERCENTAGES = (1, 2, 5)
 
 
 def _valid_side_orders(orders: Iterable[dict[str, Any]], buy_side: bool) -> tuple[int, list[dict[str, Any]]]:
@@ -226,6 +229,110 @@ def _reference_depth_from_valid(
     return {"volume": volume, "price": price}
 
 
+def _quantize_metric(value: Decimal | None, quantum: Decimal) -> Decimal | None:
+    if value is None:
+        return None
+    with localcontext() as context:
+        context.prec = max(50, len(value.as_tuple().digits) + 8)
+        return value.quantize(quantum, rounding=ROUND_HALF_UP)
+
+
+def _market_depth(
+    orders: list[dict[str, Any]], best_price: Decimal | None, buy_side: bool
+) -> dict[int, dict[str, int | None]] | None:
+    if not orders or best_price is None:
+        return None
+    results = {}
+    for percentage in DEPTH_PERCENTAGES:
+        fraction = Decimal(percentage) / Decimal(100)
+        cutoff = best_price * (Decimal(1) - fraction if buy_side else Decimal(1) + fraction)
+        eligible = [
+            order for order in orders
+            if (Decimal(str(order["price"])) >= cutoff if buy_side else Decimal(str(order["price"])) <= cutoff)
+        ]
+        results[percentage] = {
+            "volume": sum(order["volume_remain"] for order in eligible),
+            "orders": len(eligible),
+        }
+    return results
+
+
+def _market_liquidity(orders: list[dict[str, Any]]) -> dict[str, int | Decimal]:
+    volume = sum(order["volume_remain"] for order in orders)
+    with localcontext() as context:
+        context.prec = 50
+        value_isk = sum(
+            (Decimal(str(order["price"])) * order["volume_remain"] for order in orders),
+            Decimal(0),
+        )
+    return {
+        "orders": len(orders),
+        "volume": volume,
+        "value_isk": _quantize_metric(value_isk, METRIC_QUANTUM_2) or Decimal("0.00"),
+    }
+
+
+def _market_distribution(orders: list[dict[str, Any]]) -> dict[str, Decimal | None]:
+    if not orders:
+        return {"median": None, "p10": None, "p90": None, "top_5_volume_pct": None}
+    prices = sorted(Decimal(str(order["price"])) for order in orders)
+    total_volume = sum(order["volume_remain"] for order in orders)
+    top_volume = sum(sorted((order["volume_remain"] for order in orders), reverse=True)[:5])
+    concentration = Decimal(top_volume) * Decimal(100) / Decimal(total_volume)
+    return {
+        "median": _quantize_metric(_quantile(prices, Decimal("0.5")), METRIC_QUANTUM_2),
+        "p10": _quantize_metric(_quantile(prices, Decimal("0.1")), METRIC_QUANTUM_2),
+        "p90": _quantize_metric(_quantile(prices, Decimal("0.9")), METRIC_QUANTUM_2),
+        "top_5_volume_pct": _quantize_metric(concentration, METRIC_QUANTUM_4),
+    }
+
+
+def calculate_market_indicators(
+    filtered_buy: list[dict[str, Any]], filtered_sell: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Calculate all secondary indicators from already-filtered order lists."""
+    buy_prices = [Decimal(str(order["price"])) for order in filtered_buy]
+    sell_prices = [Decimal(str(order["price"])) for order in filtered_sell]
+    best_bid = max(buy_prices) if buy_prices else None
+    best_ask = min(sell_prices) if sell_prices else None
+
+    if best_bid is None or best_ask is None:
+        spread = {"absolute": None, "percentage": None}
+    else:
+        absolute = best_ask - best_bid
+        mid_price = (best_ask + best_bid) / Decimal(2)
+        spread = {
+            "absolute": _quantize_metric(absolute, METRIC_QUANTUM_4),
+            "percentage": _quantize_metric(absolute / mid_price * Decimal(100), METRIC_QUANTUM_4),
+        }
+
+    buy_depth = _market_depth(filtered_buy, best_bid, buy_side=True)
+    sell_depth = _market_depth(filtered_sell, best_ask, buy_side=False)
+    if buy_depth is None or sell_depth is None:
+        imbalance = None
+    else:
+        buy_volume = buy_depth[5]["volume"]
+        sell_volume = sell_depth[5]["volume"]
+        denominator = buy_volume + sell_volume
+        imbalance = (
+            _quantize_metric(Decimal(buy_volume - sell_volume) / Decimal(denominator), METRIC_QUANTUM_4)
+            if denominator else None
+        )
+
+    return {
+        "best_bid": _quantize_metric(best_bid, METRIC_QUANTUM_2),
+        "best_ask": _quantize_metric(best_ask, METRIC_QUANTUM_2),
+        "spread": spread,
+        "buy_depth": buy_depth,
+        "sell_depth": sell_depth,
+        "buy_liquidity": _market_liquidity(filtered_buy),
+        "sell_liquidity": _market_liquidity(filtered_sell),
+        "buy_distribution": _market_distribution(filtered_buy),
+        "sell_distribution": _market_distribution(filtered_sell),
+        "market_balance": {"imbalance_5pct": imbalance},
+    }
+
+
 def _collect_once(workers: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     first_orders, first_headers = fetch_page(REGION_ID, 1)
     page_count = int(first_headers["parsed-x-pages"])
@@ -320,10 +427,14 @@ def build_prices(buy_orders: list[dict[str, Any]], sell_orders: list[dict[str, A
         filtered_sell, sell_result = filter_reference_orders(sell_by_type.get(type_id, []), buy_side=False)
         buy_cutoff = buy_result["final_mean"]
         sell_cutoff = sell_result["final_mean"]
+        indicators = calculate_market_indicators(filtered_buy, filtered_sell)
         rows.append({
             "type_id": type_id,
             "buy": buy_result["final_mean"],
             "sell": sell_result["final_mean"],
+            "best_bid": indicators["best_bid"],
+            "best_ask": indicators["best_ask"],
+            "spread": indicators["spread"],
             "buy_execution": _execution_levels_from_valid(filtered_buy, buy_side=True),
             "sell_execution": _execution_levels_from_valid(filtered_sell, buy_side=False),
             "buy_at_reference": _reference_depth_from_valid(
@@ -332,6 +443,13 @@ def build_prices(buy_orders: list[dict[str, Any]], sell_orders: list[dict[str, A
             "sell_at_reference": _reference_depth_from_valid(
                 filtered_sell, buy_side=False, reference_price=sell_cutoff
             ),
+            "buy_depth": indicators["buy_depth"],
+            "sell_depth": indicators["sell_depth"],
+            "buy_liquidity": indicators["buy_liquidity"],
+            "sell_liquidity": indicators["sell_liquidity"],
+            "buy_distribution": indicators["buy_distribution"],
+            "sell_distribution": indicators["sell_distribution"],
+            "market_balance": indicators["market_balance"],
         })
     return rows
 
@@ -353,6 +471,12 @@ def _yaml_execution_price(value: Decimal | None) -> str:
     return "null" if value is None else format(value, ".2f")
 
 
+def _yaml_metric(value: Decimal | int | None, places: int) -> str:
+    if value is None:
+        return "null"
+    return format(value, f".{places}f") if isinstance(value, Decimal) else str(value)
+
+
 def write_price_yaml(price_rows: list[dict[str, Any]], path: Path) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     try:
@@ -361,6 +485,11 @@ def write_price_yaml(price_rows: list[dict[str, Any]], path: Path) -> None:
                 stream.write(f"- type_id: {row['type_id']}\n")
                 stream.write(f"  buy: {_yaml_decimal(row['buy'])}\n")
                 stream.write(f"  sell: {_yaml_decimal(row['sell'])}\n")
+                stream.write(f"  best_bid: {_yaml_metric(row['best_bid'], 2)}\n")
+                stream.write(f"  best_ask: {_yaml_metric(row['best_ask'], 2)}\n")
+                stream.write("  spread:\n")
+                stream.write(f"    absolute: {_yaml_metric(row['spread']['absolute'], 4)}\n")
+                stream.write(f"    percentage: {_yaml_metric(row['spread']['percentage'], 4)}\n")
                 for field in ("buy_execution", "sell_execution"):
                     levels = row[field]
                     if levels is None:
@@ -380,6 +509,33 @@ def write_price_yaml(price_rows: list[dict[str, Any]], path: Path) -> None:
                         stream.write(f"  {field}:\n")
                         stream.write(f"    volume: {level['volume']}\n")
                         stream.write(f"    price: {_yaml_execution_price(level['price'])}\n")
+                for field in ("buy_depth", "sell_depth"):
+                    depth = row[field]
+                    if depth is None:
+                        stream.write(f"  {field}: null\n")
+                        continue
+                    stream.write(f"  {field}:\n")
+                    for percentage in DEPTH_PERCENTAGES:
+                        level = depth[percentage]
+                        stream.write(f"    {percentage}:\n")
+                        stream.write(f"      volume: {_yaml_metric(level['volume'], 0)}\n")
+                        stream.write(f"      orders: {_yaml_metric(level['orders'], 0)}\n")
+                for field in ("buy_liquidity", "sell_liquidity"):
+                    liquidity = row[field]
+                    stream.write(f"  {field}:\n")
+                    stream.write(f"    orders: {_yaml_metric(liquidity['orders'], 0)}\n")
+                    stream.write(f"    volume: {_yaml_metric(liquidity['volume'], 0)}\n")
+                    stream.write(f"    value_isk: {_yaml_metric(liquidity['value_isk'], 2)}\n")
+                for field in ("buy_distribution", "sell_distribution"):
+                    distribution = row[field]
+                    stream.write(f"  {field}:\n")
+                    for key in ("median", "p10", "p90"):
+                        stream.write(f"    {key}: {_yaml_metric(distribution[key], 2)}\n")
+                    stream.write(f"    top_5_volume_pct: {_yaml_metric(distribution['top_5_volume_pct'], 4)}\n")
+                stream.write("  market_balance:\n")
+                stream.write(
+                    f"    imbalance_5pct: {_yaml_metric(row['market_balance']['imbalance_5pct'], 4)}\n"
+                )
             if not price_rows:
                 stream.write("[]\n")
         temporary.replace(path)
