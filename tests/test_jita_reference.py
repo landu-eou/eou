@@ -31,9 +31,9 @@ def make_order(price: float, order_id: int, buy: bool = True, **overrides):
 
 
 class BuyReferenceTests(unittest.TestCase):
-    def test_yaml_reference_uses_four_decimal_places(self):
-        self.assertEqual(_yaml_decimal(Decimal("4.375")), "4.3750")
-        self.assertEqual(_yaml_decimal(Decimal("4.37505")), "4.3751")
+    def test_yaml_reference_uses_two_decimal_places(self):
+        self.assertEqual(_yaml_decimal(Decimal("4.375")), "4.38")
+        self.assertEqual(_yaml_decimal(Decimal("4.374")), "4.37")
 
     def test_example_distribution_keeps_all_orders(self):
         orders = [make_order(price, index) for index, price in enumerate([2, 3, 4, 5, 5.1, 5.2, 5.3, 5.4], 1)]

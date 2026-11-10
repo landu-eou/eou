@@ -125,8 +125,8 @@ class ExecutionLevelsTests(unittest.TestCase):
             {"volume": 5, "price": Decimal("8.60")},
         )
 
-    def test_reference_cutoff_uses_the_displayed_four_decimal_value(self):
-        self.assertEqual(round_reference_price(Decimal("28.761251")), Decimal("28.7613"))
+    def test_reference_cutoff_uses_the_displayed_two_decimal_value(self):
+        self.assertEqual(round_reference_price(Decimal("28.761251")), Decimal("28.76"))
 
     def test_execution_includes_statistical_outliers(self):
         buy_orders = [make_order(1, 1, 80, True)] + [make_order(i, 100, 2, True) for i in range(2, 11)]

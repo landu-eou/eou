@@ -32,7 +32,7 @@ DEFAULT_OUTPUT = ROOT / "data" / "test"
 BUY_JSONL = "jita4-4_buy_orders.jsonl"
 SELL_JSONL = "jita4-4_sell_orders.jsonl"
 PRICES_YAML = "jita4-4_market_prices.yml"
-REFERENCE_QUANTUM = Decimal("0.0001")
+REFERENCE_QUANTUM = Decimal("0.01")
 EXECUTION_QUANTUM = Decimal("0.01")
 EXECUTION_PERCENTAGES = (1, 5, 10, 20, 30, 100)
 
@@ -330,7 +330,7 @@ def round_reference_price(value: Decimal | None) -> Decimal | None:
 
 def _yaml_decimal(value: Decimal | None) -> str:
     rounded = round_reference_price(value)
-    return "null" if rounded is None else format(rounded, ".4f")
+    return "null" if rounded is None else format(rounded, ".2f")
 
 
 def _yaml_execution_price(value: Decimal | None) -> str:
