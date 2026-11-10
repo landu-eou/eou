@@ -11,7 +11,7 @@ import random
 import sqlite3
 import sys
 import time
-from decimal import Decimal, localcontext
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -32,6 +32,7 @@ DEFAULT_OUTPUT = ROOT / "data" / "test"
 BUY_JSONL = "jita4-4_buy_orders.jsonl"
 SELL_JSONL = "jita4-4_sell_orders.jsonl"
 PRICES_YAML = "jita4-4_market_prices.yml"
+REFERENCE_QUANTUM = Decimal("0.0001")
 
 
 def _valid_side_orders(orders: Iterable[dict[str, Any]], buy_side: bool) -> tuple[int, list[dict[str, Any]]]:
@@ -237,10 +238,26 @@ def build_prices(buy_orders: list[dict[str, Any]], sell_orders: list[dict[str, A
 def _yaml_decimal(value: Decimal | None) -> str:
     if value is None:
         return "null"
-    formatted = format(value, "f")
-    if "." in formatted:
-        formatted = formatted.rstrip("0").rstrip(".")
-    return formatted
+    with localcontext() as context:
+        context.prec = max(50, len(value.as_tuple().digits) + 8)
+        rounded = value.quantize(REFERENCE_QUANTUM, rounding=ROUND_HALF_UP)
+    return format(rounded, ".4f")
+
+
+def write_price_yaml(price_rows: list[dict[str, Any]], path: Path) -> None:
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+            for row in price_rows:
+                stream.write(f"- type_id: {row['type_id']}\n")
+                stream.write(f"  buy: {_yaml_decimal(row['buy'])}\n")
+                stream.write(f"  sell: {_yaml_decimal(row['sell'])}\n")
+            if not price_rows:
+                stream.write("[]\n")
+        temporary.replace(path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def write_outputs(
@@ -257,13 +274,7 @@ def write_outputs(
     temporary_paths = tuple(path.with_name(f".{path.name}.tmp") for path in outputs)
     try:
         price_rows = build_prices(buy_orders, sell_orders)
-        with temporary_paths[0].open("w", encoding="utf-8", newline="\n") as stream:
-            for row in price_rows:
-                stream.write(f"- type_id: {row['type_id']}\n")
-                stream.write(f"  buy: {_yaml_decimal(row['buy'])}\n")
-                stream.write(f"  sell: {_yaml_decimal(row['sell'])}\n")
-        if not price_rows:
-            temporary_paths[0].write_text("[]\n", encoding="utf-8", newline="\n")
+        write_price_yaml(price_rows, temporary_paths[0])
 
         for path, orders in ((temporary_paths[1], buy_orders), (temporary_paths[2], sell_orders)):
             with path.open("w", encoding="utf-8", newline="\n") as stream:

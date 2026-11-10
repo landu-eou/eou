@@ -50,7 +50,7 @@ El workflow **Capture ESI market prices** consulta `GET /markets/prices/` cada h
 
 ## Referencias de mercado de Jita 4-4
 
-El workflow manual **Extract Jita 4-4 market reference prices** captura las páginas regionales de The Forge y conserva en `data/test/` las órdenes originales de la estación `60003760`: `jita4-4_buy_orders.jsonl` y `jita4-4_sell_orders.jsonl`. También genera `jita4-4_market_prices.yml`, con `type_id`, `buy` y `sell`. Los precios son medias aritméticas sin ponderar; BUY elimina solo outliers inferiores y SELL solo superiores según la regla de Tukey descrita en el algoritmo. No se modifican las órdenes fuente.
+El workflow manual **Extract Jita 4-4 market reference prices** captura las páginas regionales de The Forge y conserva en `data/test/` las órdenes originales de la estación `60003760`: `jita4-4_buy_orders.jsonl` y `jita4-4_sell_orders.jsonl`. También genera `jita4-4_market_prices.yml`, con `type_id`, `buy` y `sell`, presentados a cuatro decimales. Los precios son medias aritméticas sin ponderar; BUY elimina solo outliers inferiores y SELL solo superiores según la regla de Tukey descrita en el algoritmo. No se modifican las órdenes fuente.
 
 Para calcular o generar los archivos localmente, ejecuta `python scripts/extract_jita_reference.py --workers 6`. Las funciones reutilizables `calculateBuyReferencePrice` y `calculateSellReferencePrice` están en ese script; sus pruebas unitarias están en `tests/test_jita_reference.py`.
 
