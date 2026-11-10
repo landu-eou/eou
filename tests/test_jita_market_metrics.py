@@ -3,8 +3,9 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -33,6 +34,15 @@ def make_order(order_id: int, type_id: int, price: str, volume: int, buy: bool) 
 
 
 class MarketMetricsTests(unittest.TestCase):
+    def test_build_filters_once_for_each_type_and_side(self):
+        buy = [make_order(1, 34, "10", 5, True), make_order(2, 34, "9", 3, True)]
+        sell = [make_order(3, 34, "11", 7, False), make_order(4, 34, "12", 2, False)]
+        with patch("extract_jita_reference.filter_reference_orders", wraps=filter_reference_orders) as filter_spy:
+            row = build_prices(buy, sell)[0]
+        self.assertEqual(filter_spy.call_count, 2)
+        self.assertEqual(row["buy_liquidity"]["orders"], 2)
+        self.assertEqual(row["sell_liquidity"]["orders"], 2)
+
     def test_all_indicators_use_filtered_orders(self):
         buy = [make_order(1, 34, "1", 80, True)] + [
             make_order(index, 34, "100", 2, True) for index in range(2, 11)
@@ -131,6 +141,30 @@ class MarketMetricsTests(unittest.TestCase):
         self.assertIsNone(empty["best_ask"])
         self.assertIsNone(empty["buy_depth"])
         self.assertIsNone(empty["sell_depth"])
+
+    def test_extreme_decimal_prices_and_integer_volumes_remain_precise(self):
+        buy_volume = 10**30
+        sell_volume = 2 * 10**30
+        metrics = calculate_market_indicators(
+            [{"price": Decimal("1e30"), "volume_remain": buy_volume}],
+            [{"price": Decimal("1.01e30"), "volume_remain": sell_volume}],
+        )
+        self.assertEqual(metrics["spread"]["absolute"], Decimal("1e28"))
+        self.assertEqual(metrics["spread"]["percentage"], Decimal("0.9950"))
+        self.assertEqual(metrics["buy_liquidity"]["value_isk"], Decimal("1e60"))
+        self.assertEqual(metrics["sell_liquidity"]["value_isk"], Decimal("2.02e60"))
+        self.assertEqual(metrics["buy_depth"][5]["volume"], buy_volume)
+        self.assertEqual(metrics["sell_depth"][5]["volume"], sell_volume)
+        self.assertEqual(metrics["market_balance"]["imbalance_5pct"], Decimal("-0.3333"))
+
+        precise_price = Decimal("123456789012345678901234567890.12345")
+        with localcontext() as context:
+            context.prec = 100
+            expected_value = (precise_price * buy_volume).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        precise = calculate_market_indicators(
+            [{"price": precise_price, "volume_remain": buy_volume}], []
+        )
+        self.assertEqual(precise["buy_liquidity"]["value_isk"], expected_value)
 
     def test_yaml_is_valid_comment_free_and_field_order_is_deterministic(self):
         rows = build_prices(

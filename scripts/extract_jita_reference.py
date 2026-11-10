@@ -233,7 +233,9 @@ def _quantize_metric(value: Decimal | None, quantum: Decimal) -> Decimal | None:
     if value is None:
         return None
     with localcontext() as context:
-        context.prec = max(50, len(value.as_tuple().digits) + 8)
+        integer_digits = max(1, value.adjusted() + 1)
+        decimal_places = max(0, -quantum.as_tuple().exponent)
+        context.prec = max(50, len(value.as_tuple().digits) + 2, integer_digits + decimal_places + 2)
         return value.quantize(quantum, rounding=ROUND_HALF_UP)
 
 
@@ -243,32 +245,44 @@ def _market_depth(
     if not orders or best_price is None:
         return None
     results = {}
-    for percentage in DEPTH_PERCENTAGES:
-        fraction = Decimal(percentage) / Decimal(100)
-        cutoff = best_price * (Decimal(1) - fraction if buy_side else Decimal(1) + fraction)
-        eligible = [
-            order for order in orders
-            if (Decimal(str(order["price"])) >= cutoff if buy_side else Decimal(str(order["price"])) <= cutoff)
-        ]
-        results[percentage] = {
-            "volume": sum(order["volume_remain"] for order in eligible),
-            "orders": len(eligible),
-        }
+    with localcontext() as context:
+        context.prec = 50
+        for percentage in DEPTH_PERCENTAGES:
+            fraction = Decimal(percentage) / Decimal(100)
+            cutoff = best_price * (Decimal(1) - fraction if buy_side else Decimal(1) + fraction)
+            eligible = [
+                order for order in orders
+                if (Decimal(str(order["price"])) >= cutoff if buy_side else Decimal(str(order["price"])) <= cutoff)
+            ]
+            results[percentage] = {
+                "volume": sum(order["volume_remain"] for order in eligible),
+                "orders": len(eligible),
+            }
     return results
 
 
 def _market_liquidity(orders: list[dict[str, Any]]) -> dict[str, int | Decimal]:
     volume = sum(order["volume_remain"] for order in orders)
+    product_precision = max(
+        (
+            len(Decimal(str(order["price"])).as_tuple().digits)
+            + len(str(order["volume_remain"]))
+            for order in orders
+        ),
+        default=1,
+    )
     with localcontext() as context:
-        context.prec = 50
+        context.prec = max(50, product_precision + len(str(max(1, len(orders)))) + 4)
         value_isk = sum(
             (Decimal(str(order["price"])) * order["volume_remain"] for order in orders),
             Decimal(0),
         )
+    rounded_value = _quantize_metric(value_isk, METRIC_QUANTUM_2)
+    assert rounded_value is not None
     return {
         "orders": len(orders),
         "volume": volume,
-        "value_isk": _quantize_metric(value_isk, METRIC_QUANTUM_2) or Decimal("0.00"),
+        "value_isk": rounded_value,
     }
 
 
@@ -278,11 +292,16 @@ def _market_distribution(orders: list[dict[str, Any]]) -> dict[str, Decimal | No
     prices = sorted(Decimal(str(order["price"])) for order in orders)
     total_volume = sum(order["volume_remain"] for order in orders)
     top_volume = sum(sorted((order["volume_remain"] for order in orders), reverse=True)[:5])
-    concentration = Decimal(top_volume) * Decimal(100) / Decimal(total_volume)
+    with localcontext() as context:
+        context.prec = 50
+        median = _quantile(prices, Decimal("0.5"))
+        p10 = _quantile(prices, Decimal("0.1"))
+        p90 = _quantile(prices, Decimal("0.9"))
+        concentration = Decimal(top_volume) * Decimal(100) / Decimal(total_volume)
     return {
-        "median": _quantize_metric(_quantile(prices, Decimal("0.5")), METRIC_QUANTUM_2),
-        "p10": _quantize_metric(_quantile(prices, Decimal("0.1")), METRIC_QUANTUM_2),
-        "p90": _quantize_metric(_quantile(prices, Decimal("0.9")), METRIC_QUANTUM_2),
+        "median": _quantize_metric(median, METRIC_QUANTUM_2),
+        "p10": _quantize_metric(p10, METRIC_QUANTUM_2),
+        "p90": _quantize_metric(p90, METRIC_QUANTUM_2),
         "top_5_volume_pct": _quantize_metric(concentration, METRIC_QUANTUM_4),
     }
 
@@ -296,15 +315,17 @@ def calculate_market_indicators(
     best_bid = max(buy_prices) if buy_prices else None
     best_ask = min(sell_prices) if sell_prices else None
 
-    if best_bid is None or best_ask is None:
-        spread = {"absolute": None, "percentage": None}
-    else:
-        absolute = best_ask - best_bid
-        mid_price = (best_ask + best_bid) / Decimal(2)
-        spread = {
-            "absolute": _quantize_metric(absolute, METRIC_QUANTUM_4),
-            "percentage": _quantize_metric(absolute / mid_price * Decimal(100), METRIC_QUANTUM_4),
-        }
+    with localcontext() as context:
+        context.prec = 50
+        if best_bid is None or best_ask is None:
+            spread = {"absolute": None, "percentage": None}
+        else:
+            absolute = best_ask - best_bid
+            mid_price = (best_ask + best_bid) / Decimal(2)
+            spread = {
+                "absolute": _quantize_metric(absolute, METRIC_QUANTUM_4),
+                "percentage": _quantize_metric(absolute / mid_price * Decimal(100), METRIC_QUANTUM_4),
+            }
 
     buy_depth = _market_depth(filtered_buy, best_bid, buy_side=True)
     sell_depth = _market_depth(filtered_sell, best_ask, buy_side=False)
@@ -314,10 +335,12 @@ def calculate_market_indicators(
         buy_volume = buy_depth[5]["volume"]
         sell_volume = sell_depth[5]["volume"]
         denominator = buy_volume + sell_volume
-        imbalance = (
-            _quantize_metric(Decimal(buy_volume - sell_volume) / Decimal(denominator), METRIC_QUANTUM_4)
-            if denominator else None
-        )
+        with localcontext() as context:
+            context.prec = 50
+            imbalance = (
+                _quantize_metric(Decimal(buy_volume - sell_volume) / Decimal(denominator), METRIC_QUANTUM_4)
+                if denominator else None
+            )
 
     return {
         "best_bid": _quantize_metric(best_bid, METRIC_QUANTUM_2),
