@@ -67,7 +67,10 @@ def _quantile(sorted_prices: list[Decimal], probability: Decimal) -> Decimal:
     return sorted_prices[lower_index] + (sorted_prices[upper_index] - sorted_prices[lower_index]) * fraction
 
 
-def _calculate_reference(orders: Iterable[dict[str, Any]], buy_side: bool) -> dict[str, Any]:
+def filter_reference_orders(
+    orders: Iterable[dict[str, Any]], buy_side: bool
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Validate orders and apply the existing one-pass Tukey filter once."""
     total_orders, valid = _valid_side_orders(orders, buy_side)
     result: dict[str, Any] = {
         "initial_mean": None,
@@ -84,7 +87,7 @@ def _calculate_reference(orders: Iterable[dict[str, Any]], buy_side: bool) -> di
         "retained_orders": 0,
     }
     if not valid:
-        return result
+        return [], result
 
     with localcontext() as context:
         context.prec = 50
@@ -96,22 +99,19 @@ def _calculate_reference(orders: Iterable[dict[str, Any]], buy_side: bool) -> di
         iqr = q3 - q1
         fence = q1 - Decimal("1.5") * iqr if buy_side else q3 + Decimal("1.5") * iqr
         if buy_side:
-            excluded = [
-                order for order in valid
-                if Decimal(str(order["price"])) < initial_mean
-                and Decimal(str(order["price"])) < fence
-            ]
+            excluded_indexes = {
+                index for index, price in enumerate(prices)
+                if price < initial_mean and price < fence
+            }
         else:
-            excluded = [
-                order for order in valid
-                if Decimal(str(order["price"])) > initial_mean
-                and Decimal(str(order["price"])) > fence
-            ]
-
+            excluded_indexes = {
+                index for index, price in enumerate(prices)
+                if price > initial_mean and price > fence
+            }
+        excluded = [order for index, order in enumerate(valid) if index in excluded_indexes]
+        retained = [order for index, order in enumerate(valid) if index not in excluded_indexes]
+        retained_prices = [Decimal(str(order["price"])) for order in retained]
         excluded_ids = {order.get("order_id") for order in excluded}
-        retained_prices = [
-            Decimal(str(order["price"])) for order in valid if order.get("order_id") not in excluded_ids
-        ]
         result.update(
             initial_mean=initial_mean,
             final_mean=sum(retained_prices, Decimal(0)) / len(retained_prices) if retained_prices else None,
@@ -124,7 +124,11 @@ def _calculate_reference(orders: Iterable[dict[str, Any]], buy_side: bool) -> di
             excluded_order_ids=sorted(item for item in excluded_ids if item is not None),
             retained_orders=len(retained_prices),
         )
-    return result
+    return retained, result
+
+
+def _calculate_reference(orders: Iterable[dict[str, Any]], buy_side: bool) -> dict[str, Any]:
+    return filter_reference_orders(orders, buy_side)[1]
 
 
 def calculateBuyReferencePrice(orders: Iterable[dict[str, Any]]) -> dict[str, Any]:
@@ -140,8 +144,14 @@ def calculateSellReferencePrice(orders: Iterable[dict[str, Any]]) -> dict[str, A
 def calculate_execution_levels(
     orders: Iterable[dict[str, Any]], buy_side: bool
 ) -> dict[int, dict[str, int | Decimal | None]] | None:
-    """Simulate gross depth fills over valid orders, without outlier filtering."""
-    _total_orders, valid = _valid_side_orders(orders, buy_side)
+    """Simulate gross depth fills over valid orders."""
+    valid, _metrics = filter_reference_orders(orders, buy_side)
+    return _execution_levels_from_valid(valid, buy_side)
+
+
+def _execution_levels_from_valid(
+    valid: list[dict[str, Any]], buy_side: bool
+) -> dict[int, dict[str, int | Decimal | None]] | None:
     if not valid:
         return None
 
@@ -185,7 +195,13 @@ def calculate_reference_depth(
     orders: Iterable[dict[str, Any]], buy_side: bool, reference_price: Decimal | None
 ) -> dict[str, int | Decimal | None] | None:
     """Return eligible station depth and VWAP at or better than a reference price."""
-    _total_orders, valid = _valid_side_orders(orders, buy_side)
+    valid, _metrics = filter_reference_orders(orders, buy_side)
+    return _reference_depth_from_valid(valid, buy_side, reference_price)
+
+
+def _reference_depth_from_valid(
+    valid: list[dict[str, Any]], buy_side: bool, reference_price: Decimal | None
+) -> dict[str, int | Decimal | None] | None:
     if not valid:
         return None
     if reference_price is None:
@@ -300,21 +316,21 @@ def build_prices(buy_orders: list[dict[str, Any]], sell_orders: list[dict[str, A
 
     rows = []
     for type_id in sorted(buy_by_type.keys() | sell_by_type.keys()):
-        buy_result = calculateBuyReferencePrice(buy_by_type.get(type_id, []))
-        sell_result = calculateSellReferencePrice(sell_by_type.get(type_id, []))
-        buy_cutoff = round_reference_price(buy_result["final_mean"])
-        sell_cutoff = round_reference_price(sell_result["final_mean"])
+        filtered_buy, buy_result = filter_reference_orders(buy_by_type.get(type_id, []), buy_side=True)
+        filtered_sell, sell_result = filter_reference_orders(sell_by_type.get(type_id, []), buy_side=False)
+        buy_cutoff = buy_result["final_mean"]
+        sell_cutoff = sell_result["final_mean"]
         rows.append({
             "type_id": type_id,
             "buy": buy_result["final_mean"],
             "sell": sell_result["final_mean"],
-            "buy_execution": calculate_execution_levels(buy_by_type.get(type_id, []), buy_side=True),
-            "sell_execution": calculate_execution_levels(sell_by_type.get(type_id, []), buy_side=False),
-            "buy_at_reference": calculate_reference_depth(
-                buy_by_type.get(type_id, []), buy_side=True, reference_price=buy_cutoff
+            "buy_execution": _execution_levels_from_valid(filtered_buy, buy_side=True),
+            "sell_execution": _execution_levels_from_valid(filtered_sell, buy_side=False),
+            "buy_at_reference": _reference_depth_from_valid(
+                filtered_buy, buy_side=True, reference_price=buy_cutoff
             ),
-            "sell_at_reference": calculate_reference_depth(
-                sell_by_type.get(type_id, []), buy_side=False, reference_price=sell_cutoff
+            "sell_at_reference": _reference_depth_from_valid(
+                filtered_sell, buy_side=False, reference_price=sell_cutoff
             ),
         })
     return rows

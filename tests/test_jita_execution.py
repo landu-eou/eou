@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 import unittest
+import copy
+import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -125,21 +127,49 @@ class ExecutionLevelsTests(unittest.TestCase):
             {"volume": 5, "price": Decimal("8.60")},
         )
 
-    def test_reference_cutoff_uses_the_displayed_two_decimal_value(self):
+    def test_reference_cutoff_uses_the_unrounded_mean(self):
         self.assertEqual(round_reference_price(Decimal("28.761251")), Decimal("28.76"))
+        orders = [make_order(1, 28.761, 1, True), make_order(2, 28.7615, 1, True)]
+        depth = calculate_reference_depth(orders, True, Decimal("28.76125"))
+        self.assertEqual(depth, {"volume": 1, "price": Decimal("28.76")})
 
-    def test_execution_includes_statistical_outliers(self):
+    def test_all_build_fields_use_only_retained_orders(self):
         buy_orders = [make_order(1, 1, 80, True)] + [make_order(i, 100, 2, True) for i in range(2, 11)]
-        buy_levels = calculate_execution_levels(buy_orders, buy_side=True)
-        buy_mean = calculateBuyReferencePrice(buy_orders)
-        self.assertIn(1, buy_mean["excluded_order_ids"])
-        self.assertEqual(buy_levels[30]["price"], Decimal("62.45"))
-
         sell_orders = [make_order(1, 1000, 80, False)] + [make_order(i, 10, 2, False) for i in range(2, 11)]
+        original_buy, original_sell = copy.deepcopy(buy_orders), copy.deepcopy(sell_orders)
+        buy_levels = calculate_execution_levels(buy_orders, buy_side=True)
         sell_levels = calculate_execution_levels(sell_orders, buy_side=False)
-        sell_mean = calculateSellReferencePrice(sell_orders)
-        self.assertIn(1, sell_mean["excluded_order_ids"])
-        self.assertEqual(sell_levels[30]["price"], Decimal("385.52"))
+        rows = build_prices(buy_orders, sell_orders)
+        row = rows[0]
+
+        self.assertEqual(buy_levels[100], {"volume": 18, "price": Decimal("100.00")})
+        self.assertEqual(sell_levels[100], {"volume": 18, "price": Decimal("10.00")})
+        self.assertEqual(row["buy"], Decimal(100))
+        self.assertEqual(row["sell"], Decimal(10))
+        self.assertEqual(row["buy_execution"][100], {"volume": 18, "price": Decimal("100.00")})
+        self.assertEqual(row["sell_execution"][100], {"volume": 18, "price": Decimal("10.00")})
+        self.assertEqual(row["buy_at_reference"], {"volume": 18, "price": Decimal("100.00")})
+        self.assertEqual(row["sell_at_reference"], {"volume": 18, "price": Decimal("10.00")})
+        self.assertEqual(buy_orders, original_buy)
+        self.assertEqual(sell_orders, original_sell)
+
+    def test_real_snapshot_outlier_regressions(self):
+        for side in ("buy", "sell"):
+            path = ROOT / "data" / "test" / f"jita4-4_{side}_orders.jsonl"
+            with path.open(encoding="utf-8") as stream:
+                snapshot = [json.loads(line) for line in stream if line.strip()]
+            is_buy = side == "buy"
+            expected = {
+                ("buy", 202): 3, ("buy", 377): 2,
+                ("sell", 202): 1, ("sell", 377): 2,
+                ("buy", 405): 0, ("buy", 444): 0,
+                ("sell", 405): 1, ("sell", 444): 1,
+            }
+            for type_id in (202, 377, 405, 444):
+                with self.subTest(side=side, type_id=type_id):
+                    orders = [order for order in snapshot if order.get("type_id") == type_id]
+                    result = (calculateBuyReferencePrice if is_buy else calculateSellReferencePrice)(orders)
+                    self.assertEqual(result["excluded_orders"], expected[(side, type_id)])
 
     def test_reference_fields_are_unchanged_by_execution_fields(self):
         buy_orders = [make_order(1, price, 10, True) for price in (1, 2, 3, 4, 5)]
