@@ -34,7 +34,7 @@ SELL_JSONL = "jita4-4_sell_orders.jsonl"
 PRICES_YAML = "jita4-4_market_prices.yml"
 REFERENCE_QUANTUM = Decimal("0.0001")
 EXECUTION_QUANTUM = Decimal("0.01")
-EXECUTION_PERCENTAGES = (1, 5, 10, 20, 30)
+EXECUTION_PERCENTAGES = (1, 5, 10, 20, 30, 100)
 
 
 def _valid_side_orders(orders: Iterable[dict[str, Any]], buy_side: bool) -> tuple[int, list[dict[str, Any]]]:
@@ -181,6 +181,35 @@ def calculate_execution_levels(
     return {percentage: results[percentage] for percentage in EXECUTION_PERCENTAGES}
 
 
+def calculate_reference_depth(
+    orders: Iterable[dict[str, Any]], buy_side: bool, reference_price: Decimal | None
+) -> dict[str, int | Decimal | None] | None:
+    """Return eligible station depth and VWAP at or better than a reference price."""
+    _total_orders, valid = _valid_side_orders(orders, buy_side)
+    if not valid:
+        return None
+    if reference_price is None:
+        return {"volume": 0, "price": None}
+
+    cutoff = Decimal(str(reference_price))
+    eligible = [
+        order
+        for order in valid
+        if (Decimal(str(order["price"])) >= cutoff if buy_side else Decimal(str(order["price"])) <= cutoff)
+    ]
+    volume = sum(order["volume_remain"] for order in eligible)
+    if volume == 0:
+        return {"volume": 0, "price": None}
+    with localcontext() as context:
+        context.prec = 50
+        gross_isk = sum(
+            (Decimal(str(order["price"])) * order["volume_remain"] for order in eligible),
+            Decimal(0),
+        )
+        price = (gross_isk / volume).quantize(EXECUTION_QUANTUM, rounding=ROUND_HALF_UP)
+    return {"volume": volume, "price": price}
+
+
 def _collect_once(workers: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     first_orders, first_headers = fetch_page(REGION_ID, 1)
     page_count = int(first_headers["parsed-x-pages"])
@@ -273,23 +302,35 @@ def build_prices(buy_orders: list[dict[str, Any]], sell_orders: list[dict[str, A
     for type_id in sorted(buy_by_type.keys() | sell_by_type.keys()):
         buy_result = calculateBuyReferencePrice(buy_by_type.get(type_id, []))
         sell_result = calculateSellReferencePrice(sell_by_type.get(type_id, []))
+        buy_cutoff = round_reference_price(buy_result["final_mean"])
+        sell_cutoff = round_reference_price(sell_result["final_mean"])
         rows.append({
             "type_id": type_id,
             "buy": buy_result["final_mean"],
             "sell": sell_result["final_mean"],
             "buy_execution": calculate_execution_levels(buy_by_type.get(type_id, []), buy_side=True),
             "sell_execution": calculate_execution_levels(sell_by_type.get(type_id, []), buy_side=False),
+            "buy_at_reference": calculate_reference_depth(
+                buy_by_type.get(type_id, []), buy_side=True, reference_price=buy_cutoff
+            ),
+            "sell_at_reference": calculate_reference_depth(
+                sell_by_type.get(type_id, []), buy_side=False, reference_price=sell_cutoff
+            ),
         })
     return rows
 
 
-def _yaml_decimal(value: Decimal | None) -> str:
+def round_reference_price(value: Decimal | None) -> Decimal | None:
     if value is None:
-        return "null"
+        return None
     with localcontext() as context:
         context.prec = max(50, len(value.as_tuple().digits) + 8)
-        rounded = value.quantize(REFERENCE_QUANTUM, rounding=ROUND_HALF_UP)
-    return format(rounded, ".4f")
+        return value.quantize(REFERENCE_QUANTUM, rounding=ROUND_HALF_UP)
+
+
+def _yaml_decimal(value: Decimal | None) -> str:
+    rounded = round_reference_price(value)
+    return "null" if rounded is None else format(rounded, ".4f")
 
 
 def _yaml_execution_price(value: Decimal | None) -> str:
@@ -315,6 +356,14 @@ def write_price_yaml(price_rows: list[dict[str, Any]], path: Path) -> None:
                         stream.write(f"    {percentage}:\n")
                         stream.write(f"      volume: {level['volume']}\n")
                         stream.write(f"      price: {_yaml_execution_price(level['price'])}\n")
+                for field in ("buy_at_reference", "sell_at_reference"):
+                    level = row[field]
+                    if level is None:
+                        stream.write(f"  {field}: null\n")
+                    else:
+                        stream.write(f"  {field}:\n")
+                        stream.write(f"    volume: {level['volume']}\n")
+                        stream.write(f"    price: {_yaml_execution_price(level['price'])}\n")
             if not price_rows:
                 stream.write("[]\n")
         temporary.replace(path)

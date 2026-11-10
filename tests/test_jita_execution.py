@@ -16,6 +16,8 @@ from extract_jita_reference import (  # noqa: E402
     calculateBuyReferencePrice,
     calculateSellReferencePrice,
     calculate_execution_levels,
+    calculate_reference_depth,
+    round_reference_price,
 )
 
 
@@ -56,7 +58,17 @@ class ExecutionLevelsTests(unittest.TestCase):
 
     def test_target_volume_uses_integer_floor(self):
         levels = calculate_execution_levels([make_order(1, 10, 99, True)], buy_side=True)
-        self.assertEqual([levels[p]["volume"] for p in EXECUTION_PERCENTAGES], [0, 4, 9, 19, 29])
+        self.assertEqual([levels[p]["volume"] for p in EXECUTION_PERCENTAGES], [0, 4, 9, 19, 29, 99])
+
+    def test_100_percent_consumes_the_entire_valid_book(self):
+        buy = calculate_execution_levels(
+            [make_order(1, 10, 5, True), make_order(2, 8, 95, True)], buy_side=True
+        )
+        sell = calculate_execution_levels(
+            [make_order(1, 5, 5, False), make_order(2, 8, 95, False)], buy_side=False
+        )
+        self.assertEqual(buy[100], {"volume": 100, "price": Decimal("8.10")})
+        self.assertEqual(sell[100], {"volume": 100, "price": Decimal("7.85")})
 
     def test_weighted_mean_uses_executed_units_not_order_count(self):
         orders = [make_order(1, 10, 2, True), make_order(2, 6, 98, True)]
@@ -85,10 +97,36 @@ class ExecutionLevelsTests(unittest.TestCase):
     def test_no_valid_orders_returns_null_block(self):
         invalid = [make_order(1, 10, 0, True)]
         self.assertIsNone(calculate_execution_levels(invalid, buy_side=True))
+        self.assertIsNone(calculate_reference_depth(invalid, True, Decimal("10.00")))
         rows = build_prices(invalid, [])
         self.assertIsNone(rows[0]["buy"])
         self.assertIsNone(rows[0]["buy_execution"])
         self.assertIsNone(rows[0]["sell_execution"])
+        self.assertIsNone(rows[0]["buy_at_reference"])
+        self.assertIsNone(rows[0]["sell_at_reference"])
+
+    def test_reference_depth_includes_orders_at_the_cutoff(self):
+        buy = [
+            make_order(1, 10, 2, True),
+            make_order(2, 9, 3, True),
+            make_order(3, 8, 5, True),
+        ]
+        sell = [
+            make_order(1, 8, 2, False),
+            make_order(2, 9, 3, False),
+            make_order(3, 10, 5, False),
+        ]
+        self.assertEqual(
+            calculate_reference_depth(buy, True, Decimal("9.00")),
+            {"volume": 5, "price": Decimal("9.40")},
+        )
+        self.assertEqual(
+            calculate_reference_depth(sell, False, Decimal("9.00")),
+            {"volume": 5, "price": Decimal("8.60")},
+        )
+
+    def test_reference_cutoff_uses_the_displayed_four_decimal_value(self):
+        self.assertEqual(round_reference_price(Decimal("28.761251")), Decimal("28.7613"))
 
     def test_execution_includes_statistical_outliers(self):
         buy_orders = [make_order(1, 1, 80, True)] + [make_order(i, 100, 2, True) for i in range(2, 11)]
