@@ -22,18 +22,6 @@ El programa respeta `Retry-After` y los encabezados de error/rate limit de ESI, 
 
 Cada archivo contiene `orders` y una fila en `capture`. La región se deduce del nombre del archivo, así que no se repite en cada orden. `issued` se guarda como segundos Unix y `is_buy_order` como `0`/`1`. `range_code` codifica `0=station`, `1=solarsystem`, `2=region` y `3+n=alcance numérico n`. La clave primaria es `order_id`; el índice secundario acelera búsquedas por tipo, lado de compra/venta y precio.
 
-## Base de datos del universo
-
-El workflow manual **Capture ESI regions** está disponible en la pestaña **Actions** de GitHub. Al ejecutarlo, descarga de ESI la lista de regiones y los detalles de cada una, guarda `data/esi/uni/regions.db` y hace push a `main` solo si la base cambió. No se ejecuta con cron ni sube artifacts.
-
-También se puede generar localmente desde la raíz del repositorio:
-
-```powershell
-python scripts/capture_esi_regions.py
-```
-
-La base contiene `regions(region_id, name, description)` y `region_constellations(region_id, constellation_id)`. La captura se construye en un archivo temporal y reemplaza la base anterior solo después de completar y validar todas las regiones.
-
 ## Snapshot completo del SDE
 
 El workflow manual **Capture EVE SDE** descarga el último ZIP JSONL oficial y crea una SQLite en `data/sde/` por cada archivo `.jsonl` que contiene, con el mismo nombre base (por ejemplo, `types.jsonl` genera `types.db`). Usa cuatro workers en un único job: uno prepara los siete datasets prioritarios y tres procesan el resto en paralelo. Publica el lote prioritario en cuanto está listo; publica todas las bases restantes juntas cuando termina su preparación. Cada base tiene `records(ordinal, document)` y `ordinal` conserva el orden. En todos los datasets, los campos multilingües conservan solo la traducción inglesa (`en`); los demás campos y tipos JSON se mantienen. Si una SQLite supera 100 MB, se guarda comprimida con Zstandard como `.db.zst` (por ejemplo, `mapMoons.db.zst`); se puede abrir tras descomprimirla con `zstd -d mapMoons.db.zst -o mapMoons.db`.
@@ -42,7 +30,7 @@ El workflow manual **Capture EVE SDE** descarga el último ZIP JSONL oficial y c
 
 ## Recuento de páginas del mercado
 
-El workflow manual **Capture market page counts** consulta la primera página de cada región con órdenes `all`, toma el encabezado `X-Pages` y descarta el cuerpo de órdenes. Guarda solo el recuento y la expiración de caché por región en `data/esi/mkt/pages.yml`. Usa como fuente los IDs de `data/esi/uni/regions.db`, limita la concurrencia a seis peticiones y no vuelve a consultar regiones cuya caché ESI siga vigente.
+El workflow manual **Capture market page counts** consulta la primera página de cada región con órdenes `all`, toma el encabezado `X-Pages` y descarta el cuerpo de órdenes. Guarda solo el recuento y la expiración de caché por región en `data/esi/mkt/pages.yml`. Usa como fuente los IDs de región de `data/sde/mapRegions.db`, limita la concurrencia a seis peticiones y no vuelve a consultar regiones cuya caché ESI siga vigente.
 
 ## Precios de mercado de ESI
 

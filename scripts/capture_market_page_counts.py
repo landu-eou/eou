@@ -25,7 +25,7 @@ MAX_RETRIES = 5
 MAX_WORKERS = 6
 FALLBACK_CACHE_SECONDS = 300
 ROOT = Path(__file__).resolve().parents[1]
-REGIONS_DB = ROOT / "data" / "esi" / "uni" / "regions.db"
+REGIONS_SDE_DB = ROOT / "data" / "sde" / "mapRegions.db"
 OUTPUT = ROOT / "data" / "esi" / "mkt" / "pages.yml"
 
 
@@ -116,16 +116,16 @@ def fetch_page_count(region_id: int) -> tuple[int, int, str]:
 
 
 def load_region_ids() -> list[int]:
-    if not REGIONS_DB.is_file():
-        raise CaptureError(f"No existe la base regional {REGIONS_DB}; ejecuta primero Capture ESI regions")
+    if not REGIONS_SDE_DB.is_file():
+        raise CaptureError(f"No existe la base de regiones de la SDE: {REGIONS_SDE_DB}")
     try:
-        with sqlite3.connect(f"{REGIONS_DB.resolve().as_uri()}?mode=ro", uri=True) as connection:
-            rows = connection.execute("SELECT region_id FROM regions ORDER BY region_id").fetchall()
-    except sqlite3.Error as exc:
-        raise CaptureError(f"No se pudo leer {REGIONS_DB}: {exc}") from exc
-    region_ids = [row[0] for row in rows]
-    if not region_ids or any(not isinstance(region_id, int) or region_id <= 0 for region_id in region_ids):
-        raise CaptureError("La base del universo no contiene IDs de región válidos")
+        with sqlite3.connect(f"{REGIONS_SDE_DB.resolve().as_uri()}?mode=ro", uri=True) as connection:
+            rows = connection.execute("SELECT document FROM records ORDER BY ordinal").fetchall()
+        region_ids = [json.loads(row[0])["_key"] for row in rows]
+    except (sqlite3.Error, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise CaptureError(f"No se pudieron leer las regiones de {REGIONS_SDE_DB}: {exc}") from exc
+    if not region_ids or any(type(region_id) is not int or region_id <= 0 for region_id in region_ids):
+        raise CaptureError("La SDE no contiene IDs de región válidos")
     return region_ids
 
 
