@@ -3,7 +3,6 @@ from __future__ import annotations
 import sys
 import unittest
 import copy
-import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -153,23 +152,26 @@ class ExecutionLevelsTests(unittest.TestCase):
         self.assertEqual(buy_orders, original_buy)
         self.assertEqual(sell_orders, original_sell)
 
-    def test_real_snapshot_outlier_regressions(self):
-        for side in ("buy", "sell"):
-            path = ROOT / "data" / "test" / f"jita4-4_{side}_orders.jsonl"
-            with path.open(encoding="utf-8") as stream:
-                snapshot = [json.loads(line) for line in stream if line.strip()]
-            is_buy = side == "buy"
-            expected = {
-                ("buy", 202): 3, ("buy", 377): 2,
-                ("sell", 202): 1, ("sell", 377): 2,
-                ("buy", 405): 0, ("buy", 444): 0,
-                ("sell", 405): 1, ("sell", 444): 1,
-            }
-            for type_id in (202, 377, 405, 444):
-                with self.subTest(side=side, type_id=type_id):
-                    orders = [order for order in snapshot if order.get("type_id") == type_id]
-                    result = (calculateBuyReferencePrice if is_buy else calculateSellReferencePrice)(orders)
-                    self.assertEqual(result["excluded_orders"], expected[(side, type_id)])
+    def test_type_id_outlier_regressions_without_saved_order_files(self):
+        scenarios = {
+            (202, True): ([make_order(1, 1, 10, True)] + [make_order(i, 100, 10, True) for i in range(2, 9)], 1),
+            (377, True): (
+                [make_order(1, 1, 10, True), make_order(2, 2, 10, True)]
+                + [make_order(i, 100, 10, True) for i in range(3, 11)],
+                2,
+            ),
+            (405, True): (
+                [make_order(i, 10, 10, True) for i in range(1, 8)] + [make_order(8, 1000, 10, True)],
+                0,
+            ),
+            (444, False): ([make_order(1, 1, 10, False)] + [make_order(i, 100, 10, False) for i in range(2, 9)], 0),
+        }
+        for (type_id, buy_side), (orders, excluded_count) in scenarios.items():
+            for order in orders:
+                order["type_id"] = type_id
+            with self.subTest(type_id=type_id, buy_side=buy_side):
+                calculator = calculateBuyReferencePrice if buy_side else calculateSellReferencePrice
+                self.assertEqual(calculator(orders)["excluded_orders"], excluded_count)
 
     def test_reference_fields_are_unchanged_by_execution_fields(self):
         buy_orders = [make_order(1, price, 10, True) for price in (1, 2, 3, 4, 5)]

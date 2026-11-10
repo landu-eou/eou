@@ -32,16 +32,16 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
 
-      - name: Commit and push YAML and source order JSONL files
+      - name: Commit and push SQLite snapshot
         run: |
-          git add data/test/jita4-4_market_prices.yml data/test/jita4-4_buy_orders.jsonl data/test/jita4-4_sell_orders.jsonl
+          git add data/esi/market/referenceMarketPrices.db
           if git diff --cached --quiet; then
-            echo "The Jita 4-4 reference snapshot is unchanged."
+            echo "The Jita 4-4 reference database is unchanged."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Update Jita 4-4 market reference snapshot"
+          git commit -m "Update Jita 4-4 reference market database"
 
           for attempt in 1 2 3 4 5; do
             git fetch origin main

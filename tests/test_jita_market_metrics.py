@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import sys
+import sqlite3
 import tempfile
 import unittest
 from decimal import Decimal, ROUND_HALF_UP, localcontext
 from pathlib import Path
 from unittest.mock import patch
-
-import yaml
-
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -18,7 +16,7 @@ from extract_jita_reference import (  # noqa: E402
     build_prices,
     calculate_market_indicators,
     filter_reference_orders,
-    write_price_yaml,
+    write_market_database,
 )
 
 
@@ -166,26 +164,40 @@ class MarketMetricsTests(unittest.TestCase):
         )
         self.assertEqual(precise["buy_liquidity"]["value_isk"], expected_value)
 
-    def test_yaml_is_valid_comment_free_and_field_order_is_deterministic(self):
+    def test_sqlite_snapshot_schema_and_fixed_point_values(self):
         rows = build_prices(
             [make_order(1, 8, "10", 2, True)],
             [make_order(2, 8, "12", 3, False)],
         )
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "prices.yml"
-            write_price_yaml(rows, path)
-            content = path.read_text(encoding="utf-8")
-            parsed = yaml.safe_load(content)
-        self.assertNotIn("#", content)
-        self.assertEqual(
-            list(parsed[0]),
-            [
-                "type_id", "buy", "sell", "best_bid", "best_ask", "spread",
-                "buy_execution", "sell_execution", "buy_at_reference", "sell_at_reference",
-                "buy_depth", "sell_depth", "buy_liquidity", "sell_liquidity",
-                "buy_distribution", "sell_distribution", "market_balance",
-            ],
-        )
+            path = Path(directory) / "referenceMarketPrices.db"
+            write_market_database(rows, path)
+            connection = sqlite3.connect(path)
+            try:
+                self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
+                result = connection.execute(
+                    """SELECT buy_price_cents, sell_price_cents, best_bid_cents, best_ask_cents,
+                              spread_absolute_1e4, spread_percentage_1e4,
+                              buy_at_reference_volume, buy_at_reference_price_cents,
+                              sell_at_reference_volume, sell_at_reference_price_cents, imbalance_5pct_1e4
+                       FROM market_prices WHERE type_id = 8"""
+                ).fetchone()
+                self.assertEqual(result, (1000, 1200, 1000, 1200, 20000, 181818, 2, 1000, 3, 1200, -2000))
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM execution_levels").fetchone()[0], 12)
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM depth_levels").fetchone()[0], 6)
+                self.assertEqual(
+                    connection.execute("SELECT side, orders, volume, value_isk_cents FROM liquidity ORDER BY side").fetchall(),
+                    [("buy", 1, 2, 2000), ("sell", 1, 3, 3600)],
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT side, median_cents, p10_cents, p90_cents FROM price_distributions ORDER BY side"
+                    ).fetchall(),
+                    [("buy", 1000, 1000, 1000), ("sell", 1200, 1200, 1200)],
+                )
+            finally:
+                connection.close()
 
 
 if __name__ == "__main__":

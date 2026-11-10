@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import datetime as dt
-import json
 import math
+import os
 import random
 import sqlite3
 import sys
@@ -28,10 +28,8 @@ from capture_market_orders import (
 REGION_ID = 10000002
 STATION_ID = 60003760
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT = ROOT / "data" / "test"
-BUY_JSONL = "jita4-4_buy_orders.jsonl"
-SELL_JSONL = "jita4-4_sell_orders.jsonl"
-PRICES_YAML = "jita4-4_market_prices.yml"
+DEFAULT_OUTPUT = ROOT / "data" / "esi" / "market"
+DATABASE_NAME = "referenceMarketPrices.db"
 REFERENCE_QUANTUM = Decimal("0.01")
 EXECUTION_QUANTUM = Decimal("0.01")
 METRIC_QUANTUM_2 = Decimal("0.01")
@@ -478,139 +476,159 @@ def build_prices(buy_orders: list[dict[str, Any]], sell_orders: list[dict[str, A
 
 
 def round_reference_price(value: Decimal | None) -> Decimal | None:
+    return _quantize_metric(value, REFERENCE_QUANTUM)
+
+
+def _scaled_integer(value: Decimal | None, scale: int) -> int | None:
     if value is None:
         return None
     with localcontext() as context:
-        context.prec = max(50, len(value.as_tuple().digits) + 8)
-        return value.quantize(REFERENCE_QUANTUM, rounding=ROUND_HALF_UP)
+        integer_digits = max(1, value.adjusted() + 1)
+        scale_digits = len(str(scale))
+        context.prec = max(50, len(value.as_tuple().digits) + 2, integer_digits + scale_digits + 2)
+        result = int((value * scale).to_integral_value(rounding=ROUND_HALF_UP))
+    if not -(2**63) <= result < 2**63:
+        raise CaptureError("Un valor numérico excede la capacidad INTEGER de SQLite")
+    return result
 
 
-def _yaml_decimal(value: Decimal | None) -> str:
-    rounded = round_reference_price(value)
-    return "null" if rounded is None else format(rounded, ".2f")
-
-
-def _yaml_execution_price(value: Decimal | None) -> str:
-    return "null" if value is None else format(value, ".2f")
-
-
-def _yaml_metric(value: Decimal | int | None, places: int) -> str:
-    if value is None:
-        return "null"
-    return format(value, f".{places}f") if isinstance(value, Decimal) else str(value)
-
-
-def write_price_yaml(price_rows: list[dict[str, Any]], path: Path) -> None:
+def write_market_database(price_rows: list[dict[str, Any]], path: Path) -> Path:
+    """Write the metrics snapshot to compact SQLite tables using fixed-point integers."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
     try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        connection = sqlite3.connect(temporary)
+        try:
+            connection.execute("PRAGMA page_size = 4096")
+            connection.execute("PRAGMA journal_mode = OFF")
+            connection.execute("PRAGMA synchronous = OFF")
+            connection.execute("PRAGMA temp_store = MEMORY")
+            connection.execute("PRAGMA user_version = 1")
+            connection.execute(
+                """CREATE TABLE market_prices (
+                    type_id INTEGER PRIMARY KEY,
+                    buy_price_cents INTEGER,
+                    sell_price_cents INTEGER,
+                    best_bid_cents INTEGER,
+                    best_ask_cents INTEGER,
+                    spread_absolute_1e4 INTEGER,
+                    spread_percentage_1e4 INTEGER,
+                    buy_at_reference_volume INTEGER,
+                    buy_at_reference_price_cents INTEGER,
+                    sell_at_reference_volume INTEGER,
+                    sell_at_reference_price_cents INTEGER,
+                    imbalance_5pct_1e4 INTEGER
+                )"""
+            )
+            connection.execute(
+                """CREATE TABLE execution_levels (
+                    type_id INTEGER NOT NULL,
+                    side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+                    percentage INTEGER NOT NULL,
+                    volume INTEGER NOT NULL,
+                    price_cents INTEGER,
+                    PRIMARY KEY (type_id, side, percentage)
+                ) WITHOUT ROWID"""
+            )
+            connection.execute(
+                """CREATE TABLE depth_levels (
+                    type_id INTEGER NOT NULL,
+                    side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+                    percentage INTEGER NOT NULL,
+                    volume INTEGER NOT NULL,
+                    orders INTEGER NOT NULL,
+                    PRIMARY KEY (type_id, side, percentage)
+                ) WITHOUT ROWID"""
+            )
+            connection.execute(
+                """CREATE TABLE liquidity (
+                    type_id INTEGER NOT NULL,
+                    side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+                    orders INTEGER NOT NULL,
+                    volume INTEGER NOT NULL,
+                    value_isk_cents INTEGER NOT NULL,
+                    PRIMARY KEY (type_id, side)
+                ) WITHOUT ROWID"""
+            )
+            connection.execute(
+                """CREATE TABLE price_distributions (
+                    type_id INTEGER NOT NULL,
+                    side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+                    median_cents INTEGER,
+                    p10_cents INTEGER,
+                    p90_cents INTEGER,
+                    top_5_volume_pct_1e4 INTEGER,
+                    PRIMARY KEY (type_id, side)
+                ) WITHOUT ROWID"""
+            )
+
+            market_rows = []
+            execution_rows = []
+            depth_rows = []
+            liquidity_rows = []
+            distribution_rows = []
             for row in price_rows:
-                stream.write(f"- type_id: {row['type_id']}\n")
-                stream.write(f"  buy: {_yaml_decimal(row['buy'])}\n")
-                stream.write(f"  sell: {_yaml_decimal(row['sell'])}\n")
-                stream.write(f"  best_bid: {_yaml_metric(row['best_bid'], 2)}\n")
-                stream.write(f"  best_ask: {_yaml_metric(row['best_ask'], 2)}\n")
-                stream.write("  spread:\n")
-                stream.write(f"    absolute: {_yaml_metric(row['spread']['absolute'], 4)}\n")
-                stream.write(f"    percentage: {_yaml_metric(row['spread']['percentage'], 4)}\n")
-                for field in ("buy_execution", "sell_execution"):
-                    levels = row[field]
-                    if levels is None:
-                        stream.write(f"  {field}: null\n")
-                        continue
-                    stream.write(f"  {field}:\n")
-                    for percentage in EXECUTION_PERCENTAGES:
-                        level = levels[percentage]
-                        stream.write(f"    {percentage}:\n")
-                        stream.write(f"      volume: {level['volume']}\n")
-                        stream.write(f"      price: {_yaml_execution_price(level['price'])}\n")
-                for field in ("buy_at_reference", "sell_at_reference"):
-                    level = row[field]
-                    if level is None:
-                        stream.write(f"  {field}: null\n")
-                    else:
-                        stream.write(f"  {field}:\n")
-                        stream.write(f"    volume: {level['volume']}\n")
-                        stream.write(f"    price: {_yaml_execution_price(level['price'])}\n")
-                for field in ("buy_depth", "sell_depth"):
-                    depth = row[field]
-                    if depth is None:
-                        stream.write(f"  {field}: null\n")
-                        continue
-                    stream.write(f"  {field}:\n")
-                    for percentage in DEPTH_PERCENTAGES:
-                        level = depth[percentage]
-                        stream.write(f"    {percentage}:\n")
-                        stream.write(f"      volume: {_yaml_metric(level['volume'], 0)}\n")
-                        stream.write(f"      orders: {_yaml_metric(level['orders'], 0)}\n")
-                for field in ("buy_liquidity", "sell_liquidity"):
-                    liquidity = row[field]
-                    stream.write(f"  {field}:\n")
-                    stream.write(f"    orders: {_yaml_metric(liquidity['orders'], 0)}\n")
-                    stream.write(f"    volume: {_yaml_metric(liquidity['volume'], 0)}\n")
-                    stream.write(f"    value_isk: {_yaml_metric(liquidity['value_isk'], 2)}\n")
-                for field in ("buy_distribution", "sell_distribution"):
-                    distribution = row[field]
-                    stream.write(f"  {field}:\n")
-                    for key in ("median", "p10", "p90"):
-                        stream.write(f"    {key}: {_yaml_metric(distribution[key], 2)}\n")
-                    stream.write(f"    top_5_volume_pct: {_yaml_metric(distribution['top_5_volume_pct'], 4)}\n")
-                stream.write("  market_balance:\n")
-                stream.write(
-                    f"    imbalance_5pct: {_yaml_metric(row['market_balance']['imbalance_5pct'], 4)}\n"
-                )
-            if not price_rows:
-                stream.write("[]\n")
-        temporary.replace(path)
+                buy_reference = row["buy_at_reference"]
+                sell_reference = row["sell_at_reference"]
+                market_rows.append((
+                    row["type_id"],
+                    _scaled_integer(round_reference_price(row["buy"]), 100),
+                    _scaled_integer(round_reference_price(row["sell"]), 100),
+                    _scaled_integer(row["best_bid"], 100),
+                    _scaled_integer(row["best_ask"], 100),
+                    _scaled_integer(row["spread"]["absolute"], 10_000),
+                    _scaled_integer(row["spread"]["percentage"], 10_000),
+                    buy_reference["volume"] if buy_reference else None,
+                    _scaled_integer(buy_reference["price"], 100) if buy_reference else None,
+                    sell_reference["volume"] if sell_reference else None,
+                    _scaled_integer(sell_reference["price"], 100) if sell_reference else None,
+                    _scaled_integer(row["market_balance"]["imbalance_5pct"], 10_000),
+                ))
+                for side in ("buy", "sell"):
+                    levels = row[f"{side}_execution"]
+                    if levels is not None:
+                        execution_rows.extend(
+                            (row["type_id"], side, percentage, level["volume"], _scaled_integer(level["price"], 100))
+                            for percentage, level in levels.items()
+                        )
+                    depths = row[f"{side}_depth"]
+                    if depths is not None:
+                        depth_rows.extend(
+                            (row["type_id"], side, percentage, level["volume"], level["orders"])
+                            for percentage, level in depths.items()
+                        )
+                    liquidity = row[f"{side}_liquidity"]
+                    liquidity_rows.append((
+                        row["type_id"], side, liquidity["orders"], liquidity["volume"],
+                        _scaled_integer(liquidity["value_isk"], 100),
+                    ))
+                    distribution = row[f"{side}_distribution"]
+                    distribution_rows.append((
+                        row["type_id"], side,
+                        _scaled_integer(distribution["median"], 100),
+                        _scaled_integer(distribution["p10"], 100),
+                        _scaled_integer(distribution["p90"], 100),
+                        _scaled_integer(distribution["top_5_volume_pct"], 10_000),
+                    ))
+
+            connection.executemany(
+                "INSERT INTO market_prices VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", market_rows
+            )
+            connection.executemany("INSERT INTO execution_levels VALUES (?, ?, ?, ?, ?)", execution_rows)
+            connection.executemany("INSERT INTO depth_levels VALUES (?, ?, ?, ?, ?)", depth_rows)
+            connection.executemany("INSERT INTO liquidity VALUES (?, ?, ?, ?, ?)", liquidity_rows)
+            connection.executemany("INSERT INTO price_distributions VALUES (?, ?, ?, ?, ?, ?)", distribution_rows)
+            connection.commit()
+            connection.execute("VACUUM")
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()
+            if not integrity or integrity[0] != "ok":
+                raise CaptureError(f"Falló integrity_check de SQLite: {integrity}")
+        finally:
+            connection.close()
+        os.replace(temporary, path)
+        return path
     except Exception:
         temporary.unlink(missing_ok=True)
-        raise
-
-
-def load_order_jsonl(path: Path) -> list[dict[str, Any]]:
-    orders = []
-    try:
-        with path.open("r", encoding="utf-8") as stream:
-            for line_number, line in enumerate(stream, start=1):
-                if not line.strip():
-                    continue
-                order = json.loads(line)
-                if not isinstance(order, dict):
-                    raise CaptureError(f"{path}, línea {line_number}: se esperaba un objeto JSON")
-                orders.append(order)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise CaptureError(f"No se pudo leer {path}: {exc}") from exc
-    return orders
-
-
-def write_outputs(
-    buy_orders: list[dict[str, Any]],
-    sell_orders: list[dict[str, Any]],
-    output_dir: Path,
-) -> tuple[Path, Path, Path]:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    outputs = (
-        output_dir / PRICES_YAML,
-        output_dir / BUY_JSONL,
-        output_dir / SELL_JSONL,
-    )
-    temporary_paths = tuple(path.with_name(f".{path.name}.tmp") for path in outputs)
-    try:
-        price_rows = build_prices(buy_orders, sell_orders)
-        write_price_yaml(price_rows, temporary_paths[0])
-
-        for path, orders in ((temporary_paths[1], buy_orders), (temporary_paths[2], sell_orders)):
-            with path.open("w", encoding="utf-8", newline="\n") as stream:
-                for order in orders:
-                    stream.write(json.dumps(order, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
-                    stream.write("\n")
-
-        for temporary, final in zip(temporary_paths, outputs, strict=True):
-            temporary.replace(final)
-        return outputs
-    except Exception:
-        for path in temporary_paths:
-            path.unlink(missing_ok=True)
         raise
 
 
@@ -618,37 +636,25 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Captura órdenes de Jita 4-4 y calcula precios de referencia")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help=f"Páginas en paralelo (1-{MAX_WORKERS})")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--from-jsonl", action="store_true", help="Recalcula el YAML usando los JSONL existentes, sin consultar ESI")
     args = parser.parse_args()
     output_dir = args.output_dir.expanduser().resolve()
-    if args.from_jsonl:
-        try:
-            buy_orders = load_order_jsonl(output_dir / BUY_JSONL)
-            sell_orders = load_order_jsonl(output_dir / SELL_JSONL)
-            price_rows = build_prices(buy_orders, sell_orders)
-            write_price_yaml(price_rows, output_dir / PRICES_YAML)
-            print(f"Recalculado {PRICES_YAML} desde los JSONL existentes; no se consultó ESI.", flush=True)
-            return 0
-        except (CaptureError, OSError, ValueError) as exc:
-            print(f"Recalculo fallido: {exc}", file=sys.stderr)
-            return 1
     if not 1 <= args.workers <= MAX_WORKERS:
         print(f"--workers debe estar entre 1 y {MAX_WORKERS}", file=sys.stderr)
         return 2
     try:
         buy_orders, sell_orders, page_count = collect_station_orders(args.workers)
-        outputs = write_outputs(buy_orders, sell_orders, output_dir)
-    except (CaptureError, OSError, sqlite3.Error, ValueError) as exc:
+        price_rows = build_prices(buy_orders, sell_orders)
+        database = write_market_database(price_rows, output_dir / DATABASE_NAME)
+    except (CaptureError, OSError, OverflowError, sqlite3.Error, ValueError) as exc:
         print(f"Extracción fallida: {exc}", file=sys.stderr)
         return 1
 
     print(
-        f"Leídas {page_count} páginas; guardadas {len(buy_orders):,} órdenes BUY y "
-        f"{len(sell_orders):,} SELL; {len(build_prices(buy_orders, sell_orders)):,} type_id.",
+        f"Leídas {page_count} páginas; procesadas {len(buy_orders):,} órdenes BUY y "
+        f"{len(sell_orders):,} SELL; {len(price_rows):,} type_id.",
         flush=True,
     )
-    for path in outputs:
-        print(f"Creado: {path} ({path.stat().st_size:,} bytes)", flush=True)
+    print(f"Creado: {database} ({database.stat().st_size:,} bytes)", flush=True)
     return 0
 
 
