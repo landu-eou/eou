@@ -1,0 +1,61 @@
+name: Capture ESI universe activity
+
+on:
+  schedule:
+    - cron: "*/20 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: capture-universe-activity
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Capture ESI system jumps and kills
+        id: capture
+        run: python scripts/capture_universe_activity.py
+        env:
+          PYTHONUNBUFFERED: "1"
+
+      - name: Commit and push database snapshots when changed
+        if: always()
+        run: |
+          git add data/esi/uni/shipJumps.db data/esi/uni/npcKills.db data/esi/uni/podKills.db data/esi/uni/shipKills.db
+          if git diff --cached --quiet; then
+            echo "No universe activity database changes to publish."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update ESI universe activity snapshots"
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git rebase origin/main
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "Failed to push after multiple attempts."
+          exit 1

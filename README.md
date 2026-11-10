@@ -36,6 +36,12 @@ El workflow manual **Capture market page counts** consulta la primera página de
 
 El workflow **Capture ESI market prices** consulta `GET /markets/prices/` cada hora y también se puede ejecutar manualmente o mediante `repository_dispatch`. Guarda el snapshot en `data/esi/market/marketPrices.db`, con una fila por `type_id` y las columnas `adjusted_price` y `average_price`, más los metadatos de captura y caché de ESI. Usa `ETag` para conservar la base sin cambios cuando ESI responde `304 Not Modified`; el formulario manual permite forzar una descarga completa.
 
+## Actividad del universo ESI
+
+El workflow **Capture ESI universe activity** consulta `/universe/system_jumps/` y `/universe/system_kills/` cada 20 minutos y también se puede ejecutar manualmente. Respeta `Expires` y `Cache-Control`: si la ventana de caché guardada sigue vigente, no hace ninguna petición. Al vencer, envía `If-None-Match`; solo un ETag distinto del actual crea un snapshot. Las respuestas `304` o con el mismo ETag actualizan el estado de caché, pero no añaden filas históricas.
+
+Los datos se guardan en `data/esi/uni/shipJumps.db`, `npcKills.db`, `podKills.db` y `shipKills.db`. Cada snapshot tiene `date` en UTC redondeado a la hora (`YYYY-MM-DDTHH:00:00Z`), `captured_at_utc`, `system_id` y su métrica. `date` es clave primaria: si llega un ETag nuevo dentro de una hora ya almacenada, reemplaza esa hora para evitar duplicados. El estado de ETag y expiración se conserva en cada SQLite para que las ejecuciones del workflow respeten la caché entre runs.
+
 ## Referencias de mercado de Jita 4-4
 
 El workflow manual **Extract Jita 4-4 market reference prices** captura las páginas regionales de The Forge para la estación `60003760` y guarda el snapshot de métricas en `data/esi/market/referenceMarketPrices.db`. La SQLite contiene `market_prices` con una fila por `type_id` y tablas relacionadas para `execution_levels`, `depth_levels`, `liquidity` y `price_distributions`. Los valores monetarios se guardan como enteros en céntimos y los porcentajes de cuatro decimales como enteros escalados por 10.000. Las órdenes se procesan en memoria y no se escriben como archivos JSONL. Para cada artículo y lado, los outliers Tukey se validan y filtran una sola vez; las órdenes retenidas alimentan todas las métricas.
