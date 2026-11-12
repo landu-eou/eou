@@ -56,32 +56,53 @@ jobs:
           echo "Jump graph build failed after three attempts." >&2
           exit 1
 
-      - name: Commit and push the SQLite snapshot
+      - name: Build stargate distances after jump graph, retrying transient failures
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          for attempt in 1 2 3; do
+            echo "Stargate distance build attempt ${attempt}/3"
+            if python scripts/build_stargate_routes.py; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              delay=$((attempt * 10))
+              echo "Build failed; retrying in ${delay}s."
+              sleep "$delay"
+            fi
+          done
+          echo "Stargate distance build failed after three attempts." >&2
+          exit 1
+
+      - name: Commit and push derived SQLite snapshots
         shell: bash
         run: |
           git add -A data/esi/uni/ data/derived/uni/
           if git diff --cached --quiet; then
-            echo "Derived jumpRoutes.db is already current."
+            echo "Derived SQLite snapshots are already current."
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Update jump route possibilities"
+          git commit -m "Update derived route databases"
 
           for attempt in 1 2 3 4 5; do
             git fetch origin main
-            local_hash=$(sha256sum data/sde/mapSolarSystems.db | cut -d ' ' -f 1)
-            remote_hash=$(git show origin/main:data/sde/mapSolarSystems.db | sha256sum | cut -d ' ' -f 1)
-            if [ "$local_hash" != "$remote_hash" ]; then
-              echo "mapSolarSystems.db changed during generation; leaving the newer SDE for its after_sde run." >&2
-              exit 1
-            fi
+            for source in mapSolarSystems mapStargates; do
+              local_hash=$(sha256sum "data/sde/${source}.db" | cut -d ' ' -f 1)
+              remote_hash=$(git show "origin/main:data/sde/${source}.db" | sha256sum | cut -d ' ' -f 1)
+              if [ "$local_hash" != "$remote_hash" ]; then
+                echo "${source}.db changed during generation; leaving the newer SDE for its after_sde run." >&2
+                exit 1
+              fi
+            done
 
             if ! git rebase origin/main; then
               git rebase --abort
               if [ "$attempt" -eq 5 ]; then
-                echo "Could not rebase the jump graph commit onto main." >&2
+                echo "Could not rebase the derived route commit onto main." >&2
                 exit 1
               fi
               sleep $((attempt * 5))
@@ -92,7 +113,7 @@ jobs:
               exit 0
             fi
             if [ "$attempt" -eq 5 ]; then
-              echo "Could not publish data/derived/uni/jumpRoutes.db after five attempts." >&2
+              echo "Could not publish derived route databases after five attempts." >&2
               exit 1
             fi
             sleep $((attempt * 5))
