@@ -59,7 +59,7 @@ jobs:
       - name: Commit and push the SQLite snapshot
         shell: bash
         run: |
-          git add -A data/esi/uni/jumpRoutes.db.zlib data/derived/uni/jumpRoutes.db
+          git add -A data/esi/uni/ data/derived/uni/
           if git diff --cached --quiet; then
             echo "Derived jumpRoutes.db is already current."
             exit 0
