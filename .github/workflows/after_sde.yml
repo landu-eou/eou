@@ -1,0 +1,99 @@
+name: after_sde
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+  workflow_run:
+    workflows:
+      - Capture EVE SDE
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: after-sde
+  queue: max
+
+jobs:
+  build-jump-routes:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the latest main, including the completed SDE capture
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Build jump graph, retrying transient failures
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          for attempt in 1 2 3; do
+            echo "Jump graph build attempt ${attempt}/3"
+            if python scripts/build_jump_routes.py; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              delay=$((attempt * 10))
+              echo "Build failed; retrying in ${delay}s."
+              sleep "$delay"
+            fi
+          done
+          echo "Jump graph build failed after three attempts." >&2
+          exit 1
+
+      - name: Commit and push the SQLite snapshot
+        shell: bash
+        run: |
+          git add data/esi/uni/jumpRoutes.db.zlib
+          if git diff --cached --quiet; then
+            echo "jumpRoutes.db.zlib is already current."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update jump route possibilities"
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            local_hash=$(sha256sum data/sde/mapSolarSystems.db | cut -d ' ' -f 1)
+            remote_hash=$(git show origin/main:data/sde/mapSolarSystems.db | sha256sum | cut -d ' ' -f 1)
+            if [ "$local_hash" != "$remote_hash" ]; then
+              echo "mapSolarSystems.db changed during generation; leaving the newer SDE for its after_sde run." >&2
+              exit 1
+            fi
+
+            if ! git rebase origin/main; then
+              git rebase --abort
+              if [ "$attempt" -eq 5 ]; then
+                echo "Could not rebase the jump graph commit onto main." >&2
+                exit 1
+              fi
+              sleep $((attempt * 5))
+              continue
+            fi
+
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "Could not publish jumpRoutes.db.zlib after five attempts." >&2
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
