@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import itertools
 import json
@@ -177,7 +178,7 @@ def compress_zlib(source: Path, destination: Path) -> None:
         os.fsync(output_file.fileno())
 
 
-def main() -> int:
+def main(force: bool = False) -> int:
     sources = (SYSTEMS_SOURCE, STARGATES_SOURCE, STATIONS_SOURCE)
     for source in sources:
         if not source.is_file():
@@ -188,13 +189,19 @@ def main() -> int:
         "mapStargates_sha256": sha256_file(STARGATES_SOURCE),
         "npcStations_sha256": sha256_file(STATIONS_SOURCE),
     }
-    if read_stored_hashes(OUTPUT) == source_hashes:
+    if not force and read_stored_hashes(OUTPUT) == source_hashes:
         print(
             "Sin cambios: coinciden los SHA-256 de mapSolarSystems.db, "
-            "mapStargates.db y npcStations.db; no se recalculan las distancias.",
+            "mapStargates.db y npcStations.db; no se recalculan las distancias. "
+            "Usa --force para reconstruirlas.",
             flush=True,
         )
         return 0
+    if force:
+        print(
+            "Modo force activo: se reconstruye stationgateRoutes.db aunque los SHA coincidan.",
+            flush=True,
+        )
 
     known_systems = {
         positive_id(record, "_key", f"mapSolarSystems ordinal={ordinal}")
@@ -242,8 +249,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="reconstruye la base aunque los SHA de las fuentes coincidan",
+    )
     try:
-        raise SystemExit(main())
+        raise SystemExit(main(force=parser.parse_args().force))
     except (OSError, sqlite3.Error, ValueError, RuntimeError, zlib.error) as exc:
         print(f"Error construyendo stationgateRoutes.db: {type(exc).__name__}: {exc}")
         raise SystemExit(1)

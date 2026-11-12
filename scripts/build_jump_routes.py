@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import argparse
 import json
 import math
 import os
@@ -29,9 +30,12 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def read_stored_source_hash(path: Path) -> str | None:
+SCHEMA_VERSION = "2"
+
+
+def read_stored_metadata(path: Path) -> dict[str, str]:
     if not path.is_file():
-        return None
+        return {}
     try:
         with tempfile.TemporaryDirectory(prefix="jump-routes-check-") as temp_dir:
             database = Path(temp_dir) / "jumpRoutes.db"
@@ -41,12 +45,13 @@ def read_stored_source_hash(path: Path) -> str | None:
                     output.write(decompressor.decompress(chunk))
                 output.write(decompressor.flush())
             with sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True) as connection:
-                row = connection.execute(
-                    "SELECT value FROM metadata WHERE key = 'mapSolarSystem_sha256'"
-                ).fetchone()
-            return str(row[0]) if row else None
+                rows = connection.execute(
+                    "SELECT key, value FROM metadata WHERE key IN "
+                    "('mapSolarSystem_sha256', 'schema_version')"
+                )
+                return {str(key): str(value) for key, value in rows}
     except (OSError, sqlite3.Error, zlib.error):
-        return None
+        return {}
 
 
 def load_systems(path: Path) -> list[tuple[int, float, float, float]]:
@@ -106,7 +111,11 @@ def spatial_candidates(
                             yield system_id, other_id, math.sqrt(distance_squared)
 
 
-def create_database(path: Path, systems: list[tuple[int, float, float, float]], source_hash: str) -> tuple[int, int]:
+def create_database(
+    path: Path,
+    systems: list[tuple[int, float, float, float]],
+    source_hash: str,
+) -> tuple[int, int]:
     connection = sqlite3.connect(path)
     try:
         connection.execute("PRAGMA page_size = 4096")
@@ -117,49 +126,47 @@ def create_database(path: Path, systems: list[tuple[int, float, float, float]], 
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID"
         )
         connection.execute(
-            "CREATE TABLE origins (system_id INTEGER PRIMARY KEY) WITHOUT ROWID"
-        )
-        connection.execute(
-            """CREATE TABLE destinations (
-                origin_system_id INTEGER NOT NULL,
-                system_id INTEGER NOT NULL,
+            """CREATE TABLE distances (
+                origin_id INTEGER NOT NULL,
+                destination_id INTEGER NOT NULL,
                 distance_m INTEGER NOT NULL CHECK(distance_m >= 0),
-                PRIMARY KEY (origin_system_id, system_id)
+                PRIMARY KEY (origin_id, destination_id),
+                CHECK (origin_id < destination_id)
             ) WITHOUT ROWID"""
         )
         connection.execute(
-            "INSERT INTO metadata(key, value) VALUES ('mapSolarSystem_sha256', ?)",
-            (source_hash,),
+            "INSERT INTO metadata(key, value) VALUES (?, ?)",
+            ("mapSolarSystem_sha256", source_hash),
         )
-        connection.executemany(
-            "INSERT INTO origins(system_id) VALUES (?)",
-            ((system_id,) for system_id, *_ in systems),
+        connection.execute(
+            "INSERT INTO metadata(key, value) VALUES ('schema_version', ?)",
+            (SCHEMA_VERSION,),
         )
-        # The supplied YAML example includes the origin itself as its zero-distance destination.
-        batch: list[tuple[int, int, int]] = [(system_id, system_id, 0) for system_id, *_ in systems]
+        batch: list[tuple[int, int, int]] = []
         pair_count = 0
         for origin_id, destination_id, distance in spatial_candidates(systems):
             # Compare the unrounded distance first; truncate only for storage in whole metres.
             distance_m = int(distance)
             batch.append((origin_id, destination_id, distance_m))
-            batch.append((destination_id, origin_id, distance_m))
             pair_count += 1
             if len(batch) >= 50_000:
-                connection.executemany(
-                    "INSERT INTO destinations VALUES (?, ?, ?)", batch
-                )
+                connection.executemany("INSERT INTO distances VALUES (?, ?, ?)", batch)
                 batch.clear()
         if batch:
-            connection.executemany("INSERT INTO destinations VALUES (?, ?, ?)", batch)
+            connection.executemany("INSERT INTO distances VALUES (?, ?, ?)", batch)
         connection.commit()
         connection.execute("VACUUM")
         integrity = connection.execute("PRAGMA integrity_check").fetchone()
         if integrity != ("ok",):
             raise RuntimeError(f"SQLite integrity_check falló: {integrity!r}")
-        destination_count = int(
-            connection.execute("SELECT COUNT(*) FROM destinations").fetchone()[0]
+        stored_pair_count = int(
+            connection.execute("SELECT COUNT(*) FROM distances").fetchone()[0]
         )
-        return pair_count, destination_count
+        if stored_pair_count != pair_count:
+            raise RuntimeError(
+                f"Se calcularon {pair_count} parejas, pero SQLite contiene {stored_pair_count}"
+            )
+        return pair_count, stored_pair_count
     finally:
         connection.close()
 
@@ -174,17 +181,23 @@ def compress_zlib(source: Path, destination: Path) -> None:
         os.fsync(output_file.fileno())
 
 
-def main() -> int:
+def main(force: bool = False) -> int:
     if not SOURCE.is_file():
         raise FileNotFoundError(f"No existe la fuente SDE: {SOURCE}")
     source_hash = sha256_file(SOURCE)
-    if read_stored_source_hash(OUTPUT) == source_hash:
+    stored_metadata = read_stored_metadata(OUTPUT)
+    if not force and (
+        stored_metadata.get("mapSolarSystem_sha256") == source_hash
+        and stored_metadata.get("schema_version") == SCHEMA_VERSION
+    ):
         print(
             f"Sin cambios: mapSolarSystems_sha256={source_hash}; "
-            "no se recalculan los saltos.",
+            "no se recalculan los saltos. Usa --force para reconstruirlos.",
             flush=True,
         )
         return 0
+    if force:
+        print("Modo force activo: se reconstruye jumpRoutes.db aunque el SHA coincida.", flush=True)
 
     systems = load_systems(SOURCE)
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
@@ -196,8 +209,8 @@ def main() -> int:
         os.replace(compressed_database, OUTPUT)
 
     print(
-        f"SQLite creada: {len(systems):,} orígenes; {pair_count:,} pares calculados "
-        f"y almacenados en ambos sentidos; {destination_count:,} destinos incluyendo origen; "
+        f"SQLite creada: {len(systems):,} sistemas; {pair_count:,} parejas únicas "
+        f"almacenadas sin invertir ni incluir el propio sistema; {destination_count:,} filas; "
         f"{OUTPUT.stat().st_size:,} bytes zlib; mapSolarSystem_sha256={source_hash}.",
         flush=True,
     )
@@ -205,8 +218,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="reconstruye la base aunque el SHA de la fuente coincida",
+    )
     try:
-        raise SystemExit(main())
+        raise SystemExit(main(force=parser.parse_args().force))
     except (OSError, sqlite3.Error, ValueError, RuntimeError, zlib.error) as exc:
         print(f"Error construyendo jumpRoutes.db: {type(exc).__name__}: {exc}")
         raise SystemExit(1)

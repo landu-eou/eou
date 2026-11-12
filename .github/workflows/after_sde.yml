@@ -2,6 +2,12 @@ name: after_sde
 
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild all derived route databases even when source SHA values are unchanged
+        required: false
+        default: false
+        type: boolean
   repository_dispatch:
   workflow_run:
     workflows:
@@ -23,6 +29,8 @@ jobs:
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      FORCE_DERIVED: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
     permissions:
       contents: write
     steps:
@@ -44,7 +52,13 @@ jobs:
         run: |
           for attempt in 1 2 3; do
             echo "Jump graph build attempt ${attempt}/3"
-            if python scripts/build_jump_routes.py; then
+            if [ "$FORCE_DERIVED" = "true" ]; then
+              build_args=(--force)
+              echo "Force mode enabled for derived databases."
+            else
+              build_args=()
+            fi
+            if python scripts/build_jump_routes.py "${build_args[@]}"; then
               exit 0
             fi
             if [ "$attempt" -lt 3 ]; then
@@ -63,7 +77,12 @@ jobs:
         run: |
           for attempt in 1 2 3; do
             echo "Station/stargate distance build attempt ${attempt}/3"
-            if python scripts/build_stationgate_routes.py; then
+            if [ "$FORCE_DERIVED" = "true" ]; then
+              build_args=(--force)
+            else
+              build_args=()
+            fi
+            if python scripts/build_stationgate_routes.py "${build_args[@]}"; then
               exit 0
             fi
             if [ "$attempt" -lt 3 ]; then
