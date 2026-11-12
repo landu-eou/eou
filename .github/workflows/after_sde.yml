@@ -56,14 +56,14 @@ jobs:
           echo "Jump graph build failed after three attempts." >&2
           exit 1
 
-      - name: Build stargate distances after jump graph, retrying transient failures
+      - name: Build station and stargate distances after jump graph, retrying transient failures
         shell: bash
         env:
           PYTHONUNBUFFERED: "1"
         run: |
           for attempt in 1 2 3; do
-            echo "Stargate distance build attempt ${attempt}/3"
-            if python scripts/build_stargate_routes.py; then
+            echo "Station/stargate distance build attempt ${attempt}/3"
+            if python scripts/build_stationgate_routes.py; then
               exit 0
             fi
             if [ "$attempt" -lt 3 ]; then
@@ -72,7 +72,7 @@ jobs:
               sleep "$delay"
             fi
           done
-          echo "Stargate distance build failed after three attempts." >&2
+          echo "Station/stargate distance build failed after three attempts." >&2
           exit 1
 
       - name: Commit and push derived SQLite snapshots
@@ -90,7 +90,7 @@ jobs:
 
           for attempt in 1 2 3 4 5; do
             git fetch origin main
-            for source in mapSolarSystems mapStargates; do
+            for source in mapSolarSystems mapStargates npcStations; do
               local_hash=$(sha256sum "data/sde/${source}.db" | cut -d ' ' -f 1)
               remote_hash=$(git show "origin/main:data/sde/${source}.db" | sha256sum | cut -d ' ' -f 1)
               if [ "$local_hash" != "$remote_hash" ]; then
