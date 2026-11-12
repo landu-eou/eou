@@ -16,7 +16,7 @@ from typing import Iterator
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "data" / "sde" / "mapSolarSystems.db"
-OUTPUT = ROOT / "data" / "esi" / "uni" / "jumpRoutes.db.zlib"
+OUTPUT = ROOT / "data" / "derived" / "uni" / "jumpRoutes.db"
 MAX_DISTANCE_M = 9_460_000_000_000_000
 MAX_DISTANCE_SQUARED = float(MAX_DISTANCE_M) ** 2
 
@@ -208,5 +208,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (OSError, sqlite3.Error, ValueError, RuntimeError, zlib.error) as exc:
-        print(f"Error construyendo jumpRoutes.db.zlib: {type(exc).__name__}: {exc}")
+        print(f"Error construyendo jumpRoutes.db: {type(exc).__name__}: {exc}")
         raise SystemExit(1)

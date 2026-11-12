@@ -59,9 +59,9 @@ jobs:
       - name: Commit and push the SQLite snapshot
         shell: bash
         run: |
-          git add data/esi/uni/jumpRoutes.db.zlib
+          git add -A data/esi/uni/jumpRoutes.db.zlib data/derived/uni/jumpRoutes.db
           if git diff --cached --quiet; then
-            echo "jumpRoutes.db.zlib is already current."
+            echo "Derived jumpRoutes.db is already current."
             exit 0
           fi
 
@@ -92,7 +92,7 @@ jobs:
               exit 0
             fi
             if [ "$attempt" -eq 5 ]; then
-              echo "Could not publish jumpRoutes.db.zlib after five attempts." >&2
+              echo "Could not publish data/derived/uni/jumpRoutes.db after five attempts." >&2
               exit 1
             fi
             sleep $((attempt * 5))
